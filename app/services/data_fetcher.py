@@ -261,7 +261,7 @@ class DataFetcher:
         return {
             "symbol":           symbol.upper(),
             "expiry":           expiry or raw.get("expiry", "") if isinstance(raw, dict) else "",
-            "all_expiries":     raw.get("all_expiries", []) if isinstance(raw, dict) else [],
+            "all_expiries":     sorted(raw.get("all_expiries", []) if isinstance(raw, dict) else [], key=lambda e: next((datetime.strptime(e, f).date() for f in ("%d-%b-%Y","%d%b%Y","%Y-%m-%d") if True), datetime.max.date())),
             "underlying_price": safe_float(raw.get("underlying_price", 0)) if isinstance(raw, dict) else 0,
             "data":             rows,
             "data_source":      "angel_one",
@@ -768,10 +768,18 @@ class DataFetcher:
         if not chain_rows:
             raise MarketDataError(f"No option chain rows for expiry {expiry}")
 
+        def _parse_expiry_date(e):
+            for fmt in ("%d-%b-%Y", "%d%b%Y", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(e, fmt).date()
+                except ValueError:
+                    continue
+            return datetime.max.date()
+        sorted_expiries = sorted(expiry_list, key=_parse_expiry_date)
         return {
             "symbol":           sym,
             "expiry":           expiry,
-            "all_expiries":     expiry_list,
+            "all_expiries":     sorted_expiries,
             "underlying_price": safe_float(records.get("underlyingValue", 0)),
             "data":             chain_rows,
             "data_source":      f"nse_curl_cffi/{IMPERSONATE}",
