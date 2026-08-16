@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 # gemini-2.5-flash → primary (fast, capable)
 # gemini-2.5-flash-lite → fast fallback (cheaper)
 # gemini-2.0-flash → last resort fallback
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]
+import os
+_env_models = os.environ.get("GEMINI_MODELS", "")
+GEMINI_MODELS = [m.strip() for m in _env_models.split(",") if m.strip()] \
+    if _env_models else ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash-8b"]
 OPENAI_MODEL  = "gpt-4o-mini"
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_URL   = "https://api.deepseek.com/v1"
