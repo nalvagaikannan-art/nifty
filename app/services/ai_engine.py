@@ -9,7 +9,7 @@ BUG FIX (2026-08-16):
   code-ல் மட்டும் "3.x" versions-ஆக தவறா type ஆயிருந்தது.
   Fix: gemini-2.5-flash → gemini-2.5-flash-lite → gemini-2.0-flash
 """
-import json, re, logging
+import os, json, re, logging
 from typing import Dict
 import google.generativeai as genai
 from openai import AsyncOpenAI
@@ -20,13 +20,9 @@ from app.schemas import AIAnalysisResponse
 
 logger = logging.getLogger(__name__)
 
-# gemini-2.5-flash → primary (fast, capable)
-# gemini-2.5-flash-lite → fast fallback (cheaper)
-# gemini-2.0-flash → last resort fallback
-import os
+GEMINI_ENABLED = os.environ.get("GEMINI_ENABLED", "false").lower() == "true"
 _env_models = os.environ.get("GEMINI_MODELS", "")
-GEMINI_MODELS = [m.strip() for m in _env_models.split(",") if m.strip()] \
-    if _env_models else ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-flash-8b"]
+GEMINI_MODELS = [m.strip() for m in _env_models.split(",") if m.strip()] if _env_models else ["gemini-2.5-pro-preview-06-05"]
 OPENAI_MODEL  = "gpt-4o-mini"
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_URL   = "https://api.deepseek.com/v1"
@@ -46,6 +42,8 @@ class AIEngine:
         primary = settings.ai_provider.lower()
         order   = [primary] if self.keys.get(primary) else []
         order  += [p for p in self.PRIORITY if p not in order and self.keys.get(p)]
+        if not GEMINI_ENABLED and "gemini" in order:
+            order.remove("gemini")
         if not order:
             raise AIProviderError("No AI provider API key configured")
         self.order = order
