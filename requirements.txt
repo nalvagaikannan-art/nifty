@@ -1,0 +1,51 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
+sqlalchemy==2.0.23
+pandas==2.2.2
+numpy==1.26.4
+requests==2.31.0
+httpx==0.25.1
+pydantic==2.5.0
+pydantic-settings==2.1.0
+plotly==5.18.0
+jinja2==3.1.2
+python-multipart==0.0.6
+python-dateutil==2.8.2
+tenacity==8.2.3
+loguru==0.7.2
+aiofiles==23.2.1
+aiosqlite==0.19.0
+smartapi-python>=1.4.0
+pyotp>=2.9.0
+# smartapi-python's own dependencies — not auto-installed by pip on some
+# platforms because smartapi-python's packaging doesn't always pin these
+# strictly, so pip can resolve without them present. Without these, the
+# `from SmartApi import SmartConnect` import inside angel_one.py fails at
+# runtime with a raw ModuleNotFoundError, which gets misreported by our
+# generic except-ImportError handler as "smartapi-python package இல்லை"
+# even though smartapi-python itself IS installed.
+websocket-client>=1.5.1
+logzero>=1.7.0
+google-generativeai==0.8.3
+openai==1.3.0
+curl_cffi>=0.7.0
+
+# Review #17: previously commented-out here with a note to "install only if
+# you use DATABASE_URL" — but that meant setting DATABASE_URL to a Postgres
+# URL on Render without ALSO remembering to uncomment this line failed at
+# runtime with a raw ModuleNotFoundError, silently falling back to ephemeral
+# SQLite (review #16/#17). asyncpg is small and has no import-time side
+# effects when DATABASE_URL is unset (SQLite/aiosqlite path never touches
+# it), so it's now a normal dependency instead of an easy-to-forget opt-in.
+asyncpg>=0.29.0
+
+# ── Optional — only needed if you set the matching env var ──────────────────
+# REDIS_URL set   → shared cache + rate limiter across multiple workers/instances
+#   redis>=5.0.0
+# Uncomment and install only if you actually use REDIS_URL — see app/config.py.
+
+# ── Optional — Zerodha Kite Connect (second broker provider) ────────────────
+# Only needed if you set KITE_API_KEY/KITE_ACCESS_TOKEN — see .env.example
+# and app/services/zerodha.py. Leave commented if you're not using Zerodha.
+#   kiteconnect>=5.0.0

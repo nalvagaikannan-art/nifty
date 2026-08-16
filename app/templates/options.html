@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+{% block title %}Option Chain - AI NIFTY Option Analyzer Pro{% endblock %}
+{% block content %}
+<div class="options-page">
+    <div class="options-header">
+        <h2>⛓️ Option Chain</h2>
+        <div style="display:flex;gap:0.75rem;align-items:center;">
+            <select id="symbol-select">
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="FINNIFTY">FINNIFTY</option>
+            </select>
+            <select id="expiry-select" style="display:none;">
+                <option value="">Nearest Expiry</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="dashboard-grid" id="summary-cards" style="margin-bottom:1.5rem;">
+        <div class="card glass"><h3>Underlying</h3><div class="price" id="underlying-price">--</div></div>
+        <div class="card glass"><h3>Expiry</h3><div class="price" id="expiry-date" style="font-size:1.2rem;">--</div></div>
+        <div class="card glass"><h3>PCR</h3><div class="price" id="pcr-value">--</div></div>
+        <div class="card glass"><h3>Max Pain</h3><div class="price" id="maxpain-value">--</div></div>
+        <div class="card glass"><h3>CE Max OI</h3><div class="price" id="ce-max-oi">--</div></div>
+        <div class="card glass"><h3>PE Max OI</h3><div class="price" id="pe-max-oi">--</div></div>
+    </div>
+
+    <div id="chain-status" class="card glass" style="margin-bottom:1rem;">Loading option chain...</div>
+
+    <div class="card glass" style="overflow-x:auto;">
+        <table id="option-chain-table" style="display:none;">
+            <thead>
+                <tr>
+                    <th colspan="4" class="side-ce">CALLS (CE)</th>
+                    <th class="strike-col">Strike</th>
+                    <th colspan="4" class="side-pe">PUTS (PE)</th>
+                </tr>
+                <tr>
+                    <th>OI</th><th>Vol</th><th>IV</th><th>LTP</th>
+                    <th class="strike-col"></th>
+                    <th>LTP</th><th>IV</th><th>Vol</th><th>OI</th>
+                </tr>
+            </thead>
+            <tbody id="option-chain-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<style>
+.options-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem; }
+#symbol-select {
+    background: rgba(20,30,50,0.7); color:#e0e0e0; border:1px solid rgba(255,255,255,0.15);
+    border-radius:8px; padding:0.5rem 1rem; font-size:1rem;
+}
+#option-chain-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+#option-chain-table th, #option-chain-table td { padding:0.6rem 0.8rem; text-align:center; white-space:nowrap; }
+#option-chain-table thead tr:first-child th { font-size:0.95rem; padding:0.8rem; }
+.side-ce { color:#00c853; border-bottom:2px solid #00c853; }
+.side-pe { color:#ff1744; border-bottom:2px solid #ff1744; }
+.strike-col { background: rgba(255,255,255,0.06); font-weight:bold; }
+#option-chain-body tr:hover { background: rgba(255,255,255,0.04); }
+#option-chain-body tr.atm-row { background: rgba(255,215,0,0.12); }
+#option-chain-body tr.atm-row .strike-col { color:#ffd700; }
+#chain-status.error { color:#ff6b6b; }
+</style>
+
+<script>
+    let currentSymbol = 'NIFTY';
+    let currentExpiry = '';
+
+    $(document).ready(function() {
+        loadOptionChain(currentSymbol, '');
+        $('#symbol-select').on('change', function() {
+            currentSymbol = $(this).val();
+            currentExpiry = '';
+            $('#expiry-select').hide().find('option:not(:first)').remove();
+            loadOptionChain(currentSymbol, '');
+        });
+        $('#expiry-select').on('change', function() {
+            currentExpiry = $(this).val();
+            loadOptionChain(currentSymbol, currentExpiry);
+        });
+    });
+
+    function loadOptionChain(symbol, expiry) {
+        $('#chain-status').removeClass('error').text('Loading option chain for ' + symbol + '...').show();
+        $('#option-chain-table').hide();
+
+        const url = '/api/options/chain/' + symbol + (expiry ? '?expiry=' + expiry : '');
+        $.get(url)
+            .done(function(chain) { renderChain(chain); })
+            .fail(function(xhr) {
+                let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+                $('#chain-status').addClass('error').text('⚠️ Option chain could not be loaded: ' + detail);
+            });
+    }
+
+    function renderChain(chain) {
+        $('#underlying-price').text(chain.underlying_price ? chain.underlying_price.toFixed(2) : '--');
+        $('#expiry-date').text(chain.expiry || '--');
+        $('#pcr-value').text(chain.pcr ? chain.pcr.toFixed(3) : '--');
+        $('#maxpain-value').text(chain.max_pain ? chain.max_pain.toFixed(0) : '--');
+
+        // OI summary cards
+        const oi = chain.oi_summary || {};
+        $('#ce-max-oi').text(oi.ce_max_oi_strike ? oi.ce_max_oi_strike.toFixed(0) : '--');
+        $('#pe-max-oi').text(oi.pe_max_oi_strike ? oi.pe_max_oi_strike.toFixed(0) : '--');
+
+        // Expiry selector populate
+        const expiries = chain.all_expiries || [];
+        if (expiries.length > 1) {
+            const sel = $('#expiry-select').show();
+            sel.find('option:not(:first)').remove();
+            expiries.forEach(function(e) {
+                const opt = $('<option>').val(e).text(e);
+                if (e === chain.expiry) opt.prop('selected', true);
+                sel.append(opt);
+            });
+        }
+
+        const rows = (chain.data || []).slice().sort((a, b) => a.strikePrice - b.strikePrice);
+        if (!rows.length) {
+            $('#chain-status').addClass('error').text('⚠️ No option chain rows returned for this expiry.');
+            return;
+        }
+
+        // ATM strike — closest to underlying
+        const underlying = chain.underlying_price || 0;
+        let atmStrike = rows[0].strikePrice;
+        let minDiff = Infinity;
+        rows.forEach(r => {
+            const diff = Math.abs(r.strikePrice - underlying);
+            if (diff < minDiff) { minDiff = diff; atmStrike = r.strikePrice; }
+        });
+
+        const ceMaxStrike = oi.ce_max_oi_strike || 0;
+        const peMaxStrike = oi.pe_max_oi_strike || 0;
+
+        const body = $('#option-chain-body').empty();
+        rows.forEach(row => {
+            const ce = row.CE || {};
+            const pe = row.PE || {};
+            const isAtm   = row.strikePrice === atmStrike;
+            const isCeMax = row.strikePrice === ceMaxStrike;
+            const isPeMax = row.strikePrice === peMaxStrike;
+            const tr = $(`<tr class="${isAtm ? 'atm-row' : ''}"></tr>`);
+            tr.append(
+                `<td style="${isCeMax ? 'color:#00c853;font-weight:bold;' : ''}">${fmt(ce.openInterest)}</td>
+                 <td>${fmt(ce.totalTradedVolume)}</td>
+                 <td>${fmt(ce.impliedVolatility, 1)}</td>
+                 <td style="color:#00c853;">${fmt(ce.lastPrice, 2)}</td>
+                 <td class="strike-col">${row.strikePrice.toFixed(0)}</td>
+                 <td style="color:#ff6b6b;">${fmt(pe.lastPrice, 2)}</td>
+                 <td>${fmt(pe.impliedVolatility, 1)}</td>
+                 <td>${fmt(pe.totalTradedVolume)}</td>
+                 <td style="${isPeMax ? 'color:#ff1744;font-weight:bold;' : ''}">${fmt(pe.openInterest)}</td>`
+            );
+            body.append(tr);
+        });
+
+        $('#chain-status').hide();
+        $('#option-chain-table').show();
+
+        // Auto-scroll to ATM row
+        const atmRow = $('#option-chain-body tr.atm-row')[0];
+        if (atmRow) atmRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function fmt(val, decimals) {
+        if (val === undefined || val === null || val === 0) return '--';
+        return decimals !== undefined ? Number(val).toFixed(decimals) : Number(val).toLocaleString('en-IN');
+    }
+</script>
+{% endblock %}

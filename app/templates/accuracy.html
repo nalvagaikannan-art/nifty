@@ -1,0 +1,405 @@
+{% extends "base.html" %}
+{% block title %}Accuracy - AI NIFTY Option Analyzer Pro{% endblock %}
+{% block content %}
+<div class="options-page">
+    <div class="options-header">
+        <h2>🎯 Prediction Accuracy</h2>
+        <div style="display:flex;gap:0.75rem;align-items:center;">
+            <select id="symbol-select">
+                <option value="NIFTY">NIFTY</option>
+                <option value="BANKNIFTY">BANKNIFTY</option>
+                <option value="FINNIFTY">FINNIFTY</option>
+            </select>
+            <select id="days-select">
+                <option value="7">7 நாட்கள்</option>
+                <option value="15" selected>15 நாட்கள்</option>
+                <option value="30">30 நாட்கள்</option>
+            </select>
+        </div>
+    </div>
+
+    <p class="acc-note">
+        இரண்டு தனித்தனி accuracy views கீழே இருக்கு:
+        <b>Spot Direction Accuracy</b> — signal சொன்ன திசையில் NIFTY spot நகர்ந்ததா என்று மட்டும் சோதிக்கிறது.
+        <b>Option Premium Accuracy</b> — actual recommend செய்யப்பட்ட CE/PE contract-ன் premium (real ₹ P&L அடிப்படையில்) ஏறியதா/இறங்கியதா என்று சோதிக்கிறது.
+        இரண்டும் ஒரே பதில் தராது — spot சரியாக இருந்தும் theta/IV crush காரணமாக premium loss ஆகலாம் (கீழே "Direction vs Premium Disagreement" பாருங்க).
+        ஒவ்வொரு % figure-உம் "Graded"-ஆன signals-ஐ மட்டும் base செய்து கணக்கிடப்படுகிறது — Flat/Pending/No-data தனியாக காட்டப்படும், "Graded" எண்ணிக்கையில் சேராது.
+    </p>
+
+    <div id="signal-status" class="card glass" style="margin-bottom:1rem;">Loading signal accuracy...</div>
+
+    <div class="card glass acc-block" id="persistence-block">
+        <h3>💾 Accuracy History Storage</h3>
+        <div id="persistence-status">Checking saved history...</div>
+    </div>
+
+    <div class="card glass acc-block" id="accuracy-chart-block" style="display:none;">
+        <h3>📈 Accuracy Trend by Time Horizon</h3>
+        <div id="accuracy-horizon-chart" style="height:320px;"></div>
+    </div>
+
+    <h3 style="margin:1.5rem 0 0.75rem;">🧭 Spot Direction Accuracy</h3>
+    <div class="dashboard-grid" id="signal-summary" style="margin-bottom:0.5rem; display:none;">
+        <div class="card glass"><h3>Overall (60min)</h3><div class="price" id="overall-rate">--</div><div class="sub" id="overall-n">--</div></div>
+        <div class="card glass"><h3>CALL BUY Accuracy</h3><div class="price ce" id="call-rate">--</div><div class="sub" id="call-n">--</div></div>
+        <div class="card glass"><h3>PUT BUY Accuracy</h3><div class="price pe" id="put-rate">--</div><div class="sub" id="put-n">--</div></div>
+    </div>
+    <div class="card glass acc-block" id="signal-breakdown-block" style="display:none;">
+        <div class="acc-breakdown" id="signal-breakdown"></div>
+    </div>
+
+    <h3 style="margin:1.5rem 0 0.75rem;">💰 Option Premium Accuracy (real contract P&amp;L)</h3>
+    <div class="dashboard-grid" id="premium-summary" style="margin-bottom:0.5rem; display:none;">
+        <div class="card glass"><h3>Overall (60min)</h3><div class="price" id="premium-overall-rate">--</div><div class="sub" id="premium-overall-n">--</div></div>
+        <div class="card glass"><h3>Overall — Net of Est. Costs</h3><div class="price" id="premium-net-rate">--</div><div class="sub" id="premium-net-n">Est. round-trip cost subtracted</div></div>
+        <div class="card glass"><h3>CALL BUY Premium</h3><div class="price ce" id="premium-call-rate">--</div><div class="sub" id="premium-call-n">--</div></div>
+        <div class="card glass"><h3>PUT BUY Premium</h3><div class="price pe" id="premium-put-rate">--</div><div class="sub" id="premium-put-n">--</div></div>
+    </div>
+    <div class="card glass acc-block" id="premium-breakdown-block" style="display:none;">
+        <div class="acc-breakdown" id="premium-breakdown"></div>
+    </div>
+    <div id="premium-status" class="card glass acc-block">Loading premium accuracy...</div>
+
+    <div class="card glass acc-block" id="horizon-block" style="display:none;">
+        <h3>Spot Direction Accuracy by Horizon (5 / 10 / 15 / 30 / 60 min)</h3>
+        <table class="acc-table" id="horizon-table">
+            <thead><tr><th>Horizon</th><th>Overall</th><th>CALL BUY</th><th>PUT BUY</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="card glass acc-block" id="premium-horizon-block" style="display:none;">
+        <h3>Option Premium Accuracy by Horizon (5 / 10 / 15 / 30 / 60 min)</h3>
+        <table class="acc-table" id="premium-horizon-table">
+            <thead><tr><th>Horizon</th><th>Overall</th><th>CALL BUY</th><th>PUT BUY</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="acc-grid">
+        <div class="card glass acc-block" id="regime-block" style="display:none;">
+            <h3>By Market Regime (VIX-based)</h3>
+            <table class="acc-table" id="regime-table">
+                <thead><tr><th>Regime</th><th>Success %</th><th>Signals</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <div class="card glass acc-block" id="confidence-block" style="display:none;">
+            <h3>By Confidence Range</h3>
+            <table class="acc-table" id="confidence-table">
+                <thead><tr><th>Confidence</th><th>Success %</th><th>Signals</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card glass acc-block" id="indicator-chart-block" style="display:none;">
+        <h3>📊 Indicator Accuracy Chart</h3>
+        <div id="indicator-accuracy-chart" style="height:420px;"></div>
+    </div>
+
+    <div class="card glass acc-block" id="indicator-block" style="display:none;">
+        <h3>Per-Indicator Accuracy (20-condition scoring engine)</h3>
+        <table class="acc-table" id="indicator-table">
+            <thead><tr><th>Indicator</th><th>Success %</th><th>Hits / Total</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+    <div id="indicator-status" class="card glass" style="margin-top:1rem;">Loading indicator accuracy...</div>
+</div>
+
+<style>
+.acc-note { color:#9aa4b2; font-size:0.9rem; margin-bottom:1rem; max-width:70ch; }
+.acc-block { margin-bottom:1.5rem; }
+.acc-block h3 { margin-bottom:0.75rem; }
+.acc-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+.acc-table th, .acc-table td { padding:0.5rem 0.7rem; text-align:left; border-bottom:1px solid rgba(255,255,255,0.08); }
+.acc-table th { color:#9aa4b2; font-weight:600; }
+.acc-grid { display:grid; grid-template-columns:1fr 1fr; gap:1.5rem; }
+@media (max-width:800px) { .acc-grid { grid-template-columns:1fr; } }
+.price.ce { color:#00c853; }
+.price.pe { color:#ff1744; }
+.sub { color:#9aa4b2; font-size:0.8rem; margin-top:0.25rem; }
+.rate-good { color:#00c853; }
+.rate-bad { color:#ff6b6b; }
+.rate-mid { color:#ffd700; }
+#signal-status.error, #indicator-status.error { color:#ff6b6b; }
+#persistence-status { color:#b8c4d4; line-height:1.7; }
+.persist-ok { color:#00c853; } .persist-warn { color:#ffd54f; } .persist-bad { color:#ff6b6b; }
+.acc-breakdown { display:flex; flex-wrap:wrap; gap:1.25rem; font-size:0.85rem; color:#b8c4d4; }
+.acc-breakdown b { color:#e8edf2; }
+.acc-breakdown .chip { padding:0.35rem 0.7rem; border-radius:8px; background:rgba(255,255,255,0.05); }
+.acc-breakdown .chip.graded { border-left:3px solid #00c853; }
+.acc-breakdown .chip.flat { border-left:3px solid #9aa4b2; }
+.acc-breakdown .chip.pending { border-left:3px solid #ffd54f; }
+.acc-breakdown .chip.nodata { border-left:3px solid #ff6b6b; }
+.disagree-row { color:#ffd54f; }
+</style>
+
+<script>
+let currentSymbol = 'NIFTY';
+let currentDays = 15;
+
+$(document).ready(function() {
+    loadAll();
+    $('#symbol-select').on('change', function() { currentSymbol = $(this).val(); loadAll(); });
+    $('#days-select').on('change', function() { currentDays = parseInt($(this).val(), 10); loadAll(); });
+});
+
+function loadAll() {
+    loadSignalAccuracy();
+    loadPremiumAccuracy();
+    loadIndicatorAccuracy();
+    loadPersistenceStatus();
+}
+
+function renderBreakdown(targetSel, d, gradedField) {
+    // Review #2: flat/pending/no-data shown as their own chips, never
+    // folded into (or hidden behind) the headline % — so "75% accuracy"
+    // can't be misread when most signals were actually flat/ungraded.
+    const overall = d.overall || {};
+    const graded = overall.total_graded || 0;
+    const flat = overall.flat || 0;
+    const pending = d.pending_at_headline_horizon || 0;
+    const noData = d[gradedField] || 0;
+    $(targetSel).html(
+        '<span class="chip graded"><b>' + graded + '</b> Graded (correct ' + (overall.correct||0) + ', wrong ' + (overall.wrong||0) + ')</span>' +
+        '<span class="chip flat"><b>' + flat + '</b> Flat (no real move)</span>' +
+        '<span class="chip pending"><b>' + pending + '</b> Pending (horizon not reached yet)</span>' +
+        '<span class="chip nodata"><b>' + noData + '</b> No data</span>'
+    );
+}
+
+function rateClass(rate) {
+    if (rate === null || rate === undefined) return '';
+    if (rate >= 60) return 'rate-good';
+    if (rate >= 45) return 'rate-mid';
+    return 'rate-bad';
+}
+function fmtRate(rate, insufficient) {
+    if (rate === null || rate === undefined) return insufficient ? 'insufficient data' : '--';
+    return rate.toFixed(1) + '%' + (insufficient ? ' (low n)' : '');
+}
+
+function loadPersistenceStatus() {
+    $.get('/api/accuracy/status/' + currentSymbol)
+      .done(function(d) {
+        const s = d.saved || {};
+        const db = d.database_configured;
+        const cls = (s.market_snapshots > 0 || s.ai_signals > 0) ? 'persist-ok' : 'persist-warn';
+        let html = '<div class="' + cls + '">' +
+          'Market snapshots: <b>' + s.market_snapshots + '</b> &nbsp; | &nbsp; ' +
+          'AI signals: <b>' + s.ai_signals + '</b> &nbsp; | &nbsp; ' +
+          'Option rows: <b>' + s.option_rows + '</b></div>';
+        html += '<div>Last market save: ' + (d.last_saved_utc.market || '--') +
+          ' &nbsp; | &nbsp; Last analysis save: ' + (d.last_saved_utc.analysis || '--') + '</div>';
+        if (!db) {
+          html += '<div class="persist-warn">⚠️ Render-ல் DATABASE_URL அமைக்கப்படவில்லை. SQLite history restart/redeploy-ல் அழிந்துவிடலாம்.</div>';
+        } else {
+          html += '<div class="persist-ok">✅ External database configured.</div>';
+        }
+        $('#persistence-status').html(html);
+      })
+      .fail(function(xhr) {
+        $('#persistence-status').html('<span class="persist-bad">⚠️ Storage status unavailable: ' +
+          ((xhr.responseJSON && xhr.responseJSON.detail) || 'server error') + '</span>');
+      });
+}
+
+function renderAccuracyCharts(d) {
+    if (typeof Plotly === 'undefined') return;
+    const hs = Object.keys(d.by_horizon || {}).sort((a,b) => parseInt(a)-parseInt(b));
+    const overall = hs.map(h => d.by_horizon[h].overall.success_rate);
+    const call = hs.map(h => d.by_horizon[h].call_buy.success_rate);
+    const put = hs.map(h => d.by_horizon[h].put_buy.success_rate);
+    if (hs.length) {
+      $('#accuracy-chart-block').show();
+      Plotly.newPlot('accuracy-horizon-chart', [
+        {x: hs.map(h=>h+' min'), y: overall, mode:'lines+markers', name:'Overall'},
+        {x: hs.map(h=>h+' min'), y: call, mode:'lines+markers', name:'CALL BUY'},
+        {x: hs.map(h=>h+' min'), y: put, mode:'lines+markers', name:'PUT BUY'}
+      ], {
+        paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+        yaxis:{title:'Accuracy %', range:[0,100], gridcolor:'rgba(255,255,255,0.06)'},
+        xaxis:{title:'Evaluation horizon'}, margin:{t:20,b:55,l:55,r:20},
+        legend:{orientation:'h'}, responsive:true
+      }, {responsive:true,displayModeBar:false});
+    }
+    const inds = d._indicator_cache || [];
+    if (inds.length) {
+      $('#indicator-chart-block').show();
+      Plotly.newPlot('indicator-accuracy-chart', [{
+        x: inds.map(i=>i.title_ta),
+        y: inds.map(i=>i.success_rate),
+        type:'bar',
+        text: inds.map(i=>i.success_rate == null ? 'N/A' : i.success_rate.toFixed(1)+'%'),
+        textposition:'outside'
+      }], {
+        paper_bgcolor:'rgba(0,0,0,0)', plot_bgcolor:'rgba(0,0,0,0)',
+        yaxis:{title:'Accuracy %', range:[0,100], gridcolor:'rgba(255,255,255,0.06)'},
+        margin:{t:25,b:120,l:55,r:20}, xaxis:{tickangle:-35},
+        responsive:true
+      }, {responsive:true,displayModeBar:false});
+    }
+}
+
+function loadSignalAccuracy() {
+    $('#signal-status').removeClass('error').text('Loading signal accuracy for ' + currentSymbol + '...').show();
+    $('#signal-summary, #horizon-block, #signal-breakdown-block').hide();
+
+    $.get('/api/accuracy/signals/' + currentSymbol + '?days=' + currentDays)
+        .done(function(d) {
+            $('#signal-status').hide();
+            $('#signal-summary, #horizon-block, #signal-breakdown-block').show();
+
+            $('#overall-rate').text(fmtRate(d.overall.success_rate, d.overall.insufficient_data))
+                .removeClass('rate-good rate-mid rate-bad').addClass(rateClass(d.overall.success_rate));
+            $('#overall-n').text(d.overall.total_graded + ' graded signals');
+
+            $('#call-rate').text(fmtRate(d.call_buy_accuracy.success_rate, d.call_buy_accuracy.insufficient_data));
+            $('#call-n').text(d.call_buy_accuracy.total_graded + ' CALL BUY signals');
+
+            $('#put-rate').text(fmtRate(d.put_buy_accuracy.success_rate, d.put_buy_accuracy.insufficient_data));
+            $('#put-n').text(d.put_buy_accuracy.total_graded + ' PUT BUY signals');
+
+            renderBreakdown('#signal-breakdown', d, 'no_price_data');
+
+            const hbody = $('#horizon-table tbody').empty();
+            Object.keys(d.by_horizon).sort((a,b) => parseInt(a) - parseInt(b)).forEach(function(h) {
+                const row = d.by_horizon[h];
+                hbody.append(`<tr>
+                    <td>${h} min</td>
+                    <td class="${rateClass(row.overall.success_rate)}">${fmtRate(row.overall.success_rate, row.overall.insufficient_data)}</td>
+                    <td class="${rateClass(row.call_buy.success_rate)}">${fmtRate(row.call_buy.success_rate, row.call_buy.insufficient_data)}</td>
+                    <td class="${rateClass(row.put_buy.success_rate)}">${fmtRate(row.put_buy.success_rate, row.put_buy.insufficient_data)}</td>
+                </tr>`);
+            });
+
+            renderBucketTable('#regime-table', '#regime-block', d.by_regime);
+            renderBucketTable('#confidence-table', '#confidence-block', d.by_confidence_range);
+            window.__spotAccuracy = d;
+            renderAccuracyCharts(d);
+            maybeRenderDisagreement();
+        })
+        .fail(function(xhr) {
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            $('#signal-status').addClass('error').text('⚠️ Signal accuracy could not be loaded: ' + detail);
+        });
+}
+
+function loadPremiumAccuracy() {
+    $('#premium-status').removeClass('error').text('Loading premium accuracy for ' + currentSymbol + '...').show();
+    $('#premium-summary, #premium-horizon-block, #premium-breakdown-block').hide();
+
+    $.get('/api/accuracy/premium/' + currentSymbol + '?days=' + currentDays)
+        .done(function(d) {
+            $('#premium-status').hide();
+            $('#premium-summary, #premium-horizon-block, #premium-breakdown-block').show();
+
+            $('#premium-overall-rate').text(fmtRate(d.overall.success_rate, d.overall.insufficient_data))
+                .removeClass('rate-good rate-mid rate-bad').addClass(rateClass(d.overall.success_rate));
+            $('#premium-overall-n').text(d.overall.total_graded + ' graded signals (gross)');
+
+            const netB = d.overall_net_of_costs || {};
+            $('#premium-net-rate').text(fmtRate(netB.success_rate, netB.insufficient_data))
+                .removeClass('rate-good rate-mid rate-bad').addClass(rateClass(netB.success_rate));
+            $('#premium-net-n').text('Est. ' + (d.estimated_round_trip_cost_pct || 2) + '% round-trip cost subtracted');
+
+            $('#premium-call-rate').text(fmtRate(d.call_buy_accuracy.success_rate, d.call_buy_accuracy.insufficient_data));
+            $('#premium-call-n').text(d.call_buy_accuracy.total_graded + ' CALL BUY signals');
+
+            $('#premium-put-rate').text(fmtRate(d.put_buy_accuracy.success_rate, d.put_buy_accuracy.insufficient_data));
+            $('#premium-put-n').text(d.put_buy_accuracy.total_graded + ' PUT BUY signals');
+
+            renderBreakdown('#premium-breakdown', d, 'no_premium_data');
+            if (d.signals_without_recommendation) {
+                $('#premium-breakdown').append(
+                    '<span class="chip">' + d.signals_without_recommendation +
+                    ' signals had no directional recommendation to track (NONE)</span>'
+                );
+            }
+
+            const hbody = $('#premium-horizon-table tbody').empty();
+            Object.keys(d.by_horizon).sort((a,b) => parseInt(a) - parseInt(b)).forEach(function(h) {
+                const row = d.by_horizon[h];
+                hbody.append(`<tr>
+                    <td>${h} min</td>
+                    <td class="${rateClass(row.overall.success_rate)}">${fmtRate(row.overall.success_rate, row.overall.insufficient_data)}</td>
+                    <td class="${rateClass(row.call_buy.success_rate)}">${fmtRate(row.call_buy.success_rate, row.call_buy.insufficient_data)}</td>
+                    <td class="${rateClass(row.put_buy.success_rate)}">${fmtRate(row.put_buy.success_rate, row.put_buy.insufficient_data)}</td>
+                </tr>`);
+            });
+
+            window.__premiumAccuracy = d;
+            maybeRenderDisagreement();
+        })
+        .fail(function(xhr) {
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            $('#premium-status').addClass('error').text('⚠️ Premium accuracy could not be loaded: ' + detail);
+        });
+}
+
+function maybeRenderDisagreement() {
+    // Review #1's core point, made visible as a number: how often the spot
+    // direction call and the actual option premium disagreed at the
+    // headline horizon. Both endpoints must have loaded with enough graded
+    // signals to compare meaningfully.
+    const spot = window.__spotAccuracy, prem = window.__premiumAccuracy;
+    if (!spot || !prem) return;
+    const sRate = spot.overall.success_rate, pRate = prem.overall.success_rate;
+    if (sRate == null || pRate == null) return;
+    const gap = Math.abs(sRate - pRate);
+    let note = '';
+    if (spot.overall.total_graded >= 5 && prem.overall.total_graded >= 5) {
+        if (gap >= 10) {
+            note = '⚠️ Spot Direction (' + sRate.toFixed(1) + '%) மற்றும் Premium Accuracy (' + pRate.toFixed(1) +
+                '%) இடையே ' + gap.toFixed(1) + ' புள்ளி வித்தியாசம் — theta/IV crush direction-ஐ விட P&L-ஐ கணிசமா affect பண்றதற்கான அறிகுறி.';
+        } else {
+            note = 'Spot Direction (' + sRate.toFixed(1) + '%) மற்றும் Premium Accuracy (' + pRate.toFixed(1) +
+                '%) நெருக்கமா இருக்கு — theta/IV crush இந்த window-ல் பெரிய impact காட்டல.';
+        }
+        $('#premium-breakdown-block').append('<div class="disagree-row" style="margin-top:0.5rem;font-size:0.85rem;">' + note + '</div>');
+    }
+}
+
+function renderBucketTable(tableSel, blockSel, buckets) {
+    const body = $(tableSel + ' tbody').empty();
+    const keys = Object.keys(buckets || {});
+    if (!keys.length) { $(blockSel).hide(); return; }
+    keys.forEach(function(k) {
+        const b = buckets[k];
+        body.append(`<tr>
+            <td>${k}</td>
+            <td class="${rateClass(b.success_rate)}">${fmtRate(b.success_rate, b.insufficient_data)}</td>
+            <td>${b.total_graded}</td>
+        </tr>`);
+    });
+    $(blockSel).show();
+}
+
+function loadIndicatorAccuracy() {
+    $('#indicator-status').removeClass('error').text('Loading indicator accuracy for ' + currentSymbol + '...').show();
+    $('#indicator-block').hide();
+
+    $.get('/api/accuracy/indicators/' + currentSymbol + '?days=' + currentDays)
+        .done(function(d) {
+            window.__indicatorAccuracy = d.indicators || [];
+            const body = $('#indicator-table tbody').empty();
+            (d.indicators || []).forEach(function(ind) {
+                body.append(`<tr>
+                    <td>${ind.icon} ${ind.title_ta}</td>
+                    <td class="${rateClass(ind.success_rate)}">${fmtRate(ind.success_rate, ind.insufficient_data)}</td>
+                    <td>${ind.hits} / ${ind.total}</td>
+                </tr>`);
+            });
+            $('#indicator-status').hide();
+            $('#indicator-block').show();
+            renderAccuracyCharts({by_horizon:{}, _indicator_cache: window.__indicatorAccuracy});
+        })
+        .fail(function(xhr) {
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            $('#indicator-status').addClass('error').text('⚠️ Indicator accuracy could not be loaded: ' + detail);
+        });
+}
+</script>
+{% endblock %}

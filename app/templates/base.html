@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>{% block title %}AI NIFTY Analyzer{% endblock %}</title>
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0a0e1a" media="(prefers-color-scheme: dark)">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="NIFTY AI">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+<nav class="glass-nav">
+    <div class="nav-brand">📊 NIFTY AI</div>
+    <ul class="nav-links">
+        <li><a href="/dashboard"   id="nav-dashboard">Dashboard</a></li>
+        <li><a href="/live"        id="nav-live">📍 Live View</a></li>
+        <li><a href="/option-view" id="nav-option-view">🎯 Option Setup</a></li>
+        <li><a href="/terminal"    id="nav-terminal">⬡ Terminal</a></li>
+        <li><a href="/market"      id="nav-market">Market</a></li>
+        <li><a href="/options"     id="nav-options">Options</a></li>
+        <li><a href="/analysis"    id="nav-analysis">Analysis</a></li>
+        <li><a href="/positions"   id="nav-positions">📊 Positions</a></li>
+        <li><a href="/accuracy"    id="nav-accuracy">🎯 Accuracy</a></li>
+        <li><a href="/settings"    id="nav-settings">Settings</a></li>
+    </ul>
+</nav>
+<main>
+    {% block content %}{% endblock %}
+</main>
+<script src="/static/js/app.js"></script>
+{% block scripts %}{% endblock %}
+<script>
+  // Active nav highlight
+  (function() {
+    var path = location.pathname.replace(/\/$/, '') || '/dashboard';
+    var seg = path.split('/')[1] || 'dashboard';
+    var el = document.getElementById('nav-' + seg);
+    if (el) el.classList.add('active');
+  })();
+  // Service Worker
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('/sw.js').catch(function(){});
+    });
+  }
+</script>
+</body>
+</html>

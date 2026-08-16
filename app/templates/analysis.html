@@ -1,0 +1,868 @@
+{% extends "base.html" %}
+{% block title %}AI Analysis — NIFTY AI{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>🤖 AI + Rule Engine Analysis</h2>
+  <div class="sym-tabs" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">
+    <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
+    <button class="sym-tab" data-sym="BANKNIFTY">BNIFTY</button>
+    <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+    <select id="expiry-select" style="display:none;" title="Expiry-ஐ மாற்றி அந்த expiry-க்கான suggestion பாருங்க">
+      <option value="">Nearest Expiry</option>
+    </select>
+    <span id="expiry-resolved-label" style="font-size:.72rem;color:var(--text2);"></span>
+  </div>
+</div>
+
+<!-- ── STATUS BANNERS (Market Closed / Expiry Day) ────── -->
+<div id="status-banners" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem;"></div>
+
+
+<!-- ── FINAL SIGNAL BOX ─────────────────────────────── -->
+<div class="card" style="margin-bottom:1rem;border:2px solid var(--border);">
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
+    <div style="text-align:center;min-width:160px;">
+      <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.3rem;">Final Signal</div>
+      <div id="sig-badge" class="ai-badge wait" style="font-size:1.4rem;padding:.5rem 1.5rem;">--</div>
+      <div style="margin-top:.4rem;font-size:.8rem;">Signal Strength <b id="sig-conf">--/100</b></div>
+      <div id="data-completeness" style="margin-top:.25rem;font-size:.72rem;color:var(--text2);"></div>
+      <div id="market-regime-badge" style="margin-top:.25rem;font-size:.72rem;color:var(--text2);"></div>
+    </div>
+    <div style="flex:1;min-width:200px;">
+      <div style="margin-bottom:.5rem;">
+        <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text2);margin-bottom:.2rem;">
+          <span>🟢 Bull Score</span><span id="bull-val">0</span>
+        </div>
+        <div style="background:rgba(255,255,255,.07);border-radius:4px;height:8px;overflow:hidden;">
+          <div id="bull-bar" style="height:100%;background:var(--green);transition:width .5s;width:0%;"></div>
+        </div>
+      </div>
+      <div>
+        <div style="display:flex;justify-content:space-between;font-size:.72rem;color:var(--text2);margin-bottom:.2rem;">
+          <span>🔴 Bear Score</span><span id="bear-val">0</span>
+        </div>
+        <div style="background:rgba(255,255,255,.07);border-radius:4px;height:8px;overflow:hidden;">
+          <div id="bear-bar" style="height:100%;background:var(--red);transition:width .5s;width:0%;"></div>
+        </div>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:.7rem;color:var(--text2);margin-bottom:.2rem;">Risk</div>
+      <div id="sig-risk" style="font-size:1.1rem;font-weight:700;">--</div>
+      <div style="font-size:.7rem;color:var(--text2);margin-top:.3rem;margin-bottom:.2rem;">Market Bias</div>
+      <div id="sig-forecast" style="font-size:.95rem;font-weight:600;color:var(--primary);">--</div>
+      <div id="sig-volatility" style="font-size:.68rem;color:var(--text2);margin-top:.3rem;"></div>
+      <button id="refresh-btn" class="btn btn-primary" style="margin-top:.75rem;font-size:.8rem;padding:.4rem 1rem;">🔄 Refresh</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── RECOMMENDED OPTION (review #5 — structured strike/entry/SL/target, not just a bare CALL/PUT label) ── -->
+<div class="card" id="rec-option-card" style="margin-bottom:1rem; display:none;">
+  <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.5rem;">Recommended Option</div>
+  <div id="rec-option-body" style="display:flex;flex-wrap:wrap;gap:1.5rem;align-items:flex-start;"></div>
+</div>
+<div id="rec-option-unavailable" class="card" style="margin-bottom:1rem; display:none; font-size:.82rem; color:var(--text2);"></div>
+
+<!-- ── Stats Row ─────────────────────────────────────── -->
+<div class="stat-grid" style="margin-bottom:1rem;">
+  <div class="stat-box"><div class="stat-label">5 Min</div><div class="stat-value" id="tf-5">--</div></div>
+  <div class="stat-box"><div class="stat-label">15 Min</div><div class="stat-value" id="tf-15">--</div></div>
+  <div class="stat-box"><div class="stat-label">1 Hour</div><div class="stat-value" id="tf-1h">--</div></div>
+  <div class="stat-box"><div class="stat-label">PCR</div><div class="stat-value" id="a-pcr">--</div></div>
+  <div class="stat-box"><div class="stat-label">VIX</div><div class="stat-value" id="a-vix">--</div></div>
+  <div class="stat-box"><div class="stat-label">Max Pain</div><div class="stat-value" id="a-mp">--</div></div>
+</div>
+
+<!-- ── V2 DECISION DASHBOARD ─────────────────────────── -->
+<div id="v2-dashboard" class="card" style="margin-bottom:1rem;display:none;">
+  <h3 style="margin-bottom:.9rem;">🧭 V2 Decision Board</h3>
+
+  <!-- Row 1: Market status -->
+  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+    <div class="v2-cell">
+      <div class="v2-label">MARKET REGIME</div>
+      <div id="v2-regime" class="v2-big">--</div>
+      <div id="v2-regime-conf" class="v2-sub"></div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">SIGNAL STRENGTH</div>
+      <div id="v2-signal" class="v2-big" style="color:var(--primary);">-- / 100</div>
+      <div class="v2-sub">Rule engine score</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">CONFLUENCE</div>
+      <div id="v2-confluence" class="v2-big">-- / 10</div>
+      <div id="v2-conf-quality" class="v2-sub"></div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">TRADE QUALITY</div>
+      <div id="v2-quality" class="v2-big">--</div>
+      <div class="v2-sub">Based on all factors</div>
+    </div>
+  </div>
+
+  <!-- Row 2: Trade setup -->
+  <div id="v2-trade-row" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+    <div class="v2-cell">
+      <div class="v2-label">SETUP</div>
+      <div id="v2-setup" class="v2-big" style="color:#ffd740;">--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">TRIGGER</div>
+      <div id="v2-trigger" class="v2-big">--</div>
+      <div class="v2-sub" id="v2-trigger-note"></div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">ENTRY</div>
+      <div id="v2-entry" class="v2-big">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">R:R</div>
+      <div id="v2-rr" class="v2-big" style="color:var(--green);">--</div>
+    </div>
+  </div>
+
+  <!-- Row 3: SL / Targets -->
+  <div id="v2-sl-row" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+    <div class="v2-cell">
+      <div class="v2-label">STOP LOSS</div>
+      <div id="v2-sl" class="v2-big" style="color:var(--red);">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">TARGET 1 (1R)</div>
+      <div id="v2-t1" class="v2-big" style="color:var(--green);">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">TARGET 2 (2R)</div>
+      <div id="v2-t2" class="v2-big" style="color:var(--green);">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">MAX RISK / LOT</div>
+      <div id="v2-risk" class="v2-big" style="color:#ff9800;">₹--</div>
+    </div>
+  </div>
+
+  <!-- Risk / Position -->
+  <div id="v2-risk-row" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+    <div class="v2-cell">
+      <div class="v2-label">POSITION SIZE</div>
+      <div id="v2-lots" class="v2-big">-- LOT</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">MAX LOSS</div>
+      <div id="v2-maxloss" class="v2-big" style="color:var(--red);">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">RISK LEVEL</div>
+      <div id="v2-risklevel" class="v2-big">--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">WIN PROBABILITY</div>
+      <div id="v2-winprob" class="v2-big" style="color:var(--text2);font-size:.75rem;">Not enough data</div>
+    </div>
+  </div>
+
+  <!-- Action banner -->
+  <div id="v2-action-banner" style="padding:.7rem .9rem;border-radius:8px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);font-weight:700;font-size:.95rem;text-align:center;letter-spacing:.03em;display:none;"></div>
+
+  <!-- No-trade reasons -->
+  <div id="v2-notrade" style="display:none;margin-top:.6rem;padding:.65rem .85rem;background:rgba(255,23,68,.08);border-radius:8px;border-left:3px solid #ff1744;">
+    <div style="font-weight:700;color:#ff5252;margin-bottom:.35rem;">🚫 NO TRADE CONDITIONS</div>
+    <div id="v2-notrade-reasons" style="font-size:.82rem;color:var(--text2);line-height:1.7;"></div>
+  </div>
+
+  <!-- Confluence factor breakdown (collapsible) -->
+  <div style="margin-top:.75rem;">
+    <div id="v2-factors-toggle" style="font-size:.82rem;color:var(--text2);cursor:pointer;user-select:none;">▶ Show Factor Breakdown (<span id="v2-factor-count">0</span> factors)</div>
+    <div id="v2-factors-grid" style="display:none;margin-top:.6rem;display:none;grid-template-columns:repeat(3,1fr);gap:.35rem;"></div>
+  </div>
+</div>
+
+<!-- ── STRATEGY CANDIDATES (5 scores) ────────────────── -->
+<div class="card" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">📊 Strategy Candidates</h3>
+  <div id="candidates-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;">
+    <div class="cand-box" id="cand-BUY-CE"><div class="cand-name">BUY CE</div><div class="cand-score">--</div></div>
+    <div class="cand-box" id="cand-BUY-PE"><div class="cand-name">BUY PE</div><div class="cand-score">--</div></div>
+    <div class="cand-box" id="cand-SELL-CE"><div class="cand-name">SELL CE</div><div class="cand-score">--</div></div>
+    <div class="cand-box" id="cand-SELL-PE"><div class="cand-name">SELL PE</div><div class="cand-score">--</div></div>
+    <div class="cand-box" id="cand-WAIT"><div class="cand-name">WAIT</div><div class="cand-score">--</div></div>
+  </div>
+</div>
+
+<!-- ── REVERSAL ALERT ──────────────────────────────────── -->
+<div id="reversal-alert" class="reversal-alert">
+  🔄 <strong>Signal Reversal:</strong> <span id="reversal-text"></span>
+</div>
+
+<!-- ── STRIKE RECOMMENDATION ─────────────────────────── -->
+<div class="card" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">🎯 Best Option Setup</h3>
+  <div id="strategy-box" style="display:none;margin-bottom:1rem;padding:.75rem;background:rgba(255,255,255,.04);border-radius:8px;">
+    <div style="font-size:.75rem;color:var(--text2);margin-bottom:.25rem;">Strategy</div>
+    <div id="strategy-name" style="font-weight:700;color:var(--primary);font-size:1rem;margin-bottom:.35rem;"></div>
+    <div id="strategy-reason" style="font-size:.82rem;color:var(--text2);line-height:1.5;"></div>
+  </div>
+  <!-- Expected Move -->
+  <div id="exp-move-box" style="display:none;padding:.6rem .75rem;background:rgba(64,196,255,.06);border-radius:8px;margin-bottom:.75rem;font-size:.82rem;">
+    <span style="color:var(--primary);font-weight:600;">📐 Expected Move: </span>
+    <span id="exp-move-text" style="color:var(--text2);"></span>
+  </div>
+  <!-- Warnings bar -->
+  <div id="warnings-bar" style="display:none;margin-bottom:.75rem;"></div>
+  <div id="strikes-loading" style="color:var(--text2);font-size:.88rem;">Loading recommendations...</div>
+  <div id="strikes-wait" style="display:none;padding:.75rem;background:rgba(255,200,0,.08);border-radius:8px;border:1px solid rgba(255,200,0,.2);">
+    <span style="color:#ffd700;font-weight:700;">⏸ WAIT — No high-quality setup</span>
+    <div id="wait-reasons" style="font-size:.82rem;color:var(--text2);margin-top:.5rem;"></div>
+  </div>
+  <div id="strikes-grid" style="display:none;"></div>
+</div>
+
+<!-- ── PRICE LEVELS ────────────────────────────────────── -->
+<div class="card" id="price-levels-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">📐 Price Levels (ATR-Based)</h3>
+  <div id="price-levels-grid" style="display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;"></div>
+  <div id="price-levels-basis" style="font-size:.75rem;color:var(--text2);margin-top:.75rem;line-height:1.5;"></div>
+</div>
+
+<!-- ── STRATEGY DETAIL (Legs) ─────────────────────────── -->
+<div class="card" id="strategy-detail-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">🔖 Strategy Legs</h3>
+  <div id="strategy-detail-body"></div>
+</div>
+
+<!-- ── SIGNAL HISTORY ──────────────────────────────────── -->
+<div class="card" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">📜 Signal History</h3>
+  <div id="signal-history-body">
+    <span style="color:var(--text2);font-size:.85rem;">Loading history...</span>
+  </div>
+</div>
+
+<!-- ── AI Reasoning ───────────────────────────────────── -->
+<div class="card" style="margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">🧠 AI Reasoning</h3>
+  <div id="ai-reason"><span class="spinner"></span> Analyzing...</div>
+  <div id="key-factors" style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.75rem;"></div>
+</div>
+
+<!-- ── 🔮 NEXT MOVE SCENARIOS ──────────────────────────── -->
+<div class="card" id="scenarios-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">🔮 அடுத்த Market Move — Scenarios</h3>
+  <div id="scenarios-body" style="display:flex;flex-direction:column;gap:.6rem;"></div>
+</div>
+
+<!-- ── 📊 INDICATORS — தமிழில் ──────────────────────────── -->
+<div class="card" id="tamil-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">📊 Indicators — தமிழில் என்ன சொல்கிறது?</h3>
+  <div id="tamil-body" style="display:flex;flex-direction:column;gap:.5rem;"></div>
+</div>
+
+<!-- ── Data Quality ─────────────────────────────────────── -->
+<div class="card" id="dq-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.75rem;">🛰️ Data Quality</h3>
+  <div id="dq-body" style="display:flex;flex-wrap:wrap;gap:.5rem;"></div>
+</div>
+
+<!-- ── All 20 Rule Signals ────────────────────────────── -->
+<div class="card">
+  <h3 style="margin-bottom:.75rem;">📋 All 20 Rule Signals</h3>
+  <div id="all-reasons" style="display:flex;flex-direction:column;gap:.3rem;font-size:.82rem;">
+    <span style="color:var(--text2);">Loading...</span>
+  </div>
+</div>
+
+<style>
+/* ── Candidate boxes ── */
+.cand-box { text-align:center;padding:.6rem .3rem;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid var(--border);transition:all .3s; }
+.cand-box.winner { border-color:var(--green);background:rgba(0,230,118,.1); }
+.cand-box.buy-ce.winner { border-color:#00c853; }
+.cand-box.buy-pe.winner { border-color:#ff1744; }
+.cand-box.sell-ce.winner { border-color:#ff9800; }
+.cand-box.sell-pe.winner { border-color:#4caf50; }
+.cand-box.wait-win { border-color:#ffd740;background:rgba(255,215,64,.08); }
+.cand-name { font-size:.72rem;color:var(--text2);margin-bottom:.3rem; }
+.cand-score { font-size:1.2rem;font-weight:700; }
+/* ── Strike cards ── */
+.strike-card { border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:1rem;margin-bottom:.75rem;background:rgba(255,255,255,.03); }
+.strike-card.best { border-color:rgba(0,200,83,.45);animation:bestGlow 2.4s ease-in-out infinite alternate; }
+.strike-card.agg  { border-color:rgba(255,171,0,.35); }
+.strike-card.con  { border-color:rgba(100,181,246,.35); }
+@keyframes bestGlow{from{box-shadow:0 0 8px rgba(0,200,83,.1);}to{box-shadow:0 0 22px rgba(0,200,83,.28);}}
+.strike-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem; }
+.strike-badge { font-size:.72rem;padding:.2rem .6rem;border-radius:20px;font-weight:600; }
+.badge-call { background:rgba(0,200,83,.15);color:#00c853; }
+.badge-put  { background:rgba(255,23,68,.15);color:#ff1744; }
+.badge-sell-ce { background:rgba(255,152,0,.15);color:#ff9800; }
+.badge-sell-pe { background:rgba(76,175,80,.15);color:#4caf50; }
+.strike-stats { display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;font-size:.78rem; }
+.strike-targets { display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;font-size:.78rem;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border); }
+.s-stat { text-align:center; }
+.s-label { color:var(--text2);font-size:.68rem;margin-bottom:.1rem; }
+.s-val   { font-weight:600; }
+.pl-box  { text-align:center;padding:.5rem;border-radius:8px;background:rgba(255,255,255,.04); }
+.pl-label { font-size:.68rem;color:var(--text2);margin-bottom:.15rem; }
+.pl-val  { font-size:.95rem;font-weight:700; }
+.leg-row { display:flex;justify-content:space-between;align-items:center;padding:.5rem .75rem;border-radius:8px;background:rgba(255,255,255,.03);margin-bottom:.4rem;font-size:.84rem; }
+.hist-row { display:flex;justify-content:space-between;align-items:center;padding:.4rem .6rem;border-radius:6px;background:rgba(255,255,255,.03);margin-bottom:.25rem;font-size:.8rem; }
+.hist-row.reversal { background:rgba(255,152,0,.1);border-left:3px solid #ff9800; }
+.hist-badge { font-size:.68rem;padding:.15rem .5rem;border-radius:12px;font-weight:600; }
+.hb-buy-ce { background:rgba(0,200,83,.15);color:#00c853; }
+.hb-buy-pe { background:rgba(255,23,68,.15);color:#ff1744; }
+.hb-sell-ce { background:rgba(255,152,0,.15);color:#ff9800; }
+.hb-sell-pe { background:rgba(76,175,80,.15);color:#4caf50; }
+.hb-wait { background:rgba(255,215,0,.12);color:#ffd740; }
+.reversal-alert { padding:.5rem .75rem;background:rgba(255,152,0,.12);border:1px solid rgba(255,152,0,.3);border-radius:8px;margin-bottom:.75rem;font-size:.84rem;color:#ff9800;display:none; }
+.status-banner { padding:.6rem .9rem;border-radius:8px;font-size:.85rem;font-weight:600; }
+.status-banner.closed { background:rgba(255,255,255,.06);color:var(--text2);border:1px solid var(--border); }
+.status-banner.expiry { background:rgba(255,23,68,.1);color:#ff5252;border:1px solid rgba(255,23,68,.25); }
+.status-banner.expiry-soon { background:rgba(255,152,0,.1);color:#ff9800;border:1px solid rgba(255,152,0,.25); }
+.scenario-row { padding:.65rem .8rem;border-radius:8px;background:rgba(255,255,255,.03);border-left:3px solid var(--border); font-size:.82rem; line-height:1.55; }
+.scenario-row.bullish { border-left-color:var(--green); }
+.scenario-row.bearish { border-left-color:var(--red); }
+.scenario-row.sideways { border-left-color:#ffd740; }
+.scenario-head { display:flex;justify-content:space-between;align-items:center;font-weight:700;margin-bottom:.25rem; }
+.scenario-inval { color:var(--text2);font-size:.76rem;margin-top:.3rem; }
+.tamil-row { padding:.6rem .8rem;border-radius:8px;background:rgba(255,255,255,.03);border-left:3px solid var(--border); }
+.tamil-row.bull { border-left-color:var(--green); }
+.tamil-row.bear { border-left-color:var(--red); }
+.tamil-row.neutral { border-left-color:#888; }
+.tamil-head { display:flex;justify-content:space-between;align-items:center;font-size:.85rem;font-weight:700;margin-bottom:.25rem; }
+.tamil-exp { font-size:.78rem;color:var(--text2);line-height:1.5; }
+.dq-pill { font-size:.72rem;padding:.25rem .6rem;border-radius:20px;font-weight:600; }
+.dq-live { background:rgba(0,230,118,.12);color:var(--green); }
+.dq-unavailable { background:rgba(255,255,255,.06);color:var(--text2); }
+@media(max-width:600px){
+  #candidates-grid{grid-template-columns:repeat(3,1fr);}
+  .strike-stats,.strike-targets{grid-template-columns:repeat(2,1fr);}
+  .stat-grid{grid-template-columns:repeat(3,1fr);gap:.3rem;}
+}
+/* ── V2 Dashboard ── */
+.v2-cell{background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:8px;padding:.6rem .75rem;}
+.v2-label{font-size:.65rem;color:var(--text2);text-transform:uppercase;letter-spacing:.05em;margin-bottom:.3rem;}
+.v2-big{font-size:1.05rem;font-weight:700;line-height:1.2;}
+.v2-sub{font-size:.7rem;color:var(--text2);margin-top:.2rem;}
+.v2-factor-pill{font-size:.7rem;padding:.25rem .5rem;border-radius:6px;border:1px solid var(--border);background:rgba(255,255,255,.03);}
+.v2-factor-bull{border-color:rgba(0,200,83,.4);background:rgba(0,200,83,.07);color:#69f0ae;}
+.v2-factor-bear{border-color:rgba(255,23,68,.4);background:rgba(255,23,68,.07);color:#ff6b6b;}
+.v2-factor-neutral{color:var(--text2);}
+@media(max-width:600px){
+  #v2-dashboard [style*="grid-template-columns:repeat(4"]{grid-template-columns:repeat(2,1fr)!important;}
+}
+</style>
+
+<script>
+// jQuery ready wrapper - runs after base.html loads jQuery
+$(function() {
+var curSym   = 'NIFTY';
+var apiCache = {};
+
+function esc(s){ return $('<div>').text(s==null?'':String(s)).html(); }
+
+function renderRecommendedOption(rec) {
+  if (!rec || !rec.available) {
+    $('#rec-option-card').hide();
+    $('#rec-option-unavailable').show().text(
+      '⚠ Recommended option unavailable' + (rec && rec.reason ? (' — ' + rec.reason) : '')
+    );
+    return;
+  }
+  $('#rec-option-unavailable').hide();
+  $('#rec-option-card').show();
+
+  var typeColor = rec.type === 'CE' ? 'var(--green)' : 'var(--red)';
+  var parts = [];
+  parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Contract</div>' +
+    '<div style="font-size:1.1rem;font-weight:700;color:' + typeColor + ';">' +
+    esc(rec.strike) + ' ' + esc(rec.type) + '</div>' +
+    '<div style="font-size:.68rem;color:var(--text2);">Exp: ' + esc(rec.expiry || '--') + '</div></div>');
+  parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Entry (mid)</div>' +
+    '<div style="font-size:1.05rem;font-weight:600;">₹' + esc(rec.entry_price) + '</div>' +
+    (rec.spread_pct != null ? '<div style="font-size:.68rem;color:var(--text2);">Spread ' + esc(rec.spread_pct) + '%</div>' : ''));
+  if (rec.sl != null) {
+    parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Stop Loss</div>' +
+      '<div style="font-size:1.05rem;font-weight:600;color:var(--red);">₹' + esc(rec.sl) + '</div></div>');
+  }
+  if (rec.t1 != null) {
+    parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Target 1 / 2</div>' +
+      '<div style="font-size:1.05rem;font-weight:600;color:var(--green);">₹' + esc(rec.t1) + ' / ₹' + esc(rec.t2) + '</div>' +
+      (rec.risk_reward != null ? '<div style="font-size:.68rem;color:var(--text2);">R:R ' + esc(rec.risk_reward) + '</div>' : ''));
+  }
+  var riskBits = [];
+  if (rec.theta_per_day != null) riskBits.push('Theta ₹' + rec.theta_per_day + '/day' + (rec.theta_pct_of_entry != null ? ' (' + rec.theta_pct_of_entry + '% of entry)' : ''));
+  if (rec.delta != null) riskBits.push('Delta ' + rec.delta);
+  if (rec.vega != null) riskBits.push('Vega ₹' + rec.vega + '/IV-pt');
+  if (riskBits.length) {
+    parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Risk (Greeks)</div>' +
+      '<div style="font-size:.78rem;color:var(--text2);line-height:1.6;">' + riskBits.map(esc).join('<br>') + '</div></div>');
+  }
+  $('#rec-option-body').html(parts.join(''));
+  if (rec.liquidity_note && rec.liquidity_note.includes('⚠️')) {
+    $('#rec-option-body').append('<div style="width:100%;font-size:.75rem;color:var(--yellow);margin-top:.25rem;">' + esc(rec.liquidity_note) + '</div>');
+  }
+}
+function fmtN(v,d){ if(v==null||isNaN(Number(v))) return '--'; return d!=null?Number(v).toFixed(d):Number(v).toLocaleString('en-IN'); }
+function tfColor(t){ t=(t||'').toLowerCase(); return t==='up'?'var(--green)':t==='down'?'var(--red)':'var(--text2)'; }
+function tfIcon(t) { t=(t||'').toLowerCase(); return t==='up'?'▲ UP':t==='down'?'▼ DOWN':'→ SIDE'; }
+
+function setRefreshState(on){
+  $('#refresh-btn').prop('disabled',on).text(on?'⏳ Refreshing...':'🔄 Refresh');
+}
+
+var curExpiry = '';   // '' = nearest expiry (server default)
+
+function populateExpirySelect(allExpiries, resolvedExpiry){
+  var sel = $('#expiry-select');
+  if(!allExpiries || !allExpiries.length){ sel.hide(); return; }
+  // Rebuild options only when the list actually changed (avoid clobbering
+  // an open dropdown / re-triggering change on every refresh).
+  var existing = sel.find('option').map(function(){return $(this).val();}).get();
+  var incoming = [''].concat(allExpiries);
+  if(existing.join('|') !== incoming.join('|')){
+    sel.empty().append('<option value="">Nearest Expiry</option>');
+    allExpiries.forEach(function(e){ sel.append($('<option>').val(e).text(e)); });
+  }
+  sel.val(curExpiry || '').show();
+  // Suggestions above are for this exact expiry — show it plainly so it's
+  // obvious even when "Nearest Expiry" is selected.
+  $('#expiry-resolved-label').text(resolvedExpiry ? ('Suggestions for: ' + resolvedExpiry) : '');
+}
+
+function loadAll(sym, force, expiry){
+  if(expiry === undefined) expiry = curExpiry;
+  curExpiry = expiry || '';
+  var qs = curExpiry ? ('?expiry=' + encodeURIComponent(curExpiry)) : '';
+  var key = sym+'_'+(curExpiry||'nearest')+'_'+Math.floor(Date.now()/60000);
+  if(!force && apiCache[key]){ renderAnalysis(apiCache[key].ai); renderStrikes(apiCache[key].strat); return; }
+  setRefreshState(true);
+  var done={ai:false,strat:false};
+  function chk(){ if(done.ai&&done.strat) setRefreshState(false); }
+
+  $('#ai-reason').html('<span class="spinner"></span> Analyzing...');
+  $.get('/api/analysis/ai/'+sym+qs)
+    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); })
+    .fail(function(x){ var m='Analysis failed'; try{m=JSON.parse(x.responseText).detail;}catch(e){} $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>'); })
+    .always(function(){ done.ai=true; chk(); });
+
+  $('#strikes-loading').text('Loading...').show();
+  $('#strikes-grid,#strikes-wait,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
+  $.get('/api/strategy/recommend/'+sym+qs)
+    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].strat=d; renderStrikes(d); populateExpirySelect(d.all_expiries, d.expiry); })
+    .fail(function(){ $('#strikes-loading').text('Strategy data unavailable.'); })
+    .always(function(){ done.strat=true; chk(); });
+}
+
+function renderCandidates(candidates, best){
+  var map = {'BUY CE':'BUY-CE','BUY PE':'BUY-PE','SELL CE':'SELL-CE','SELL PE':'SELL-PE','WAIT':'WAIT'};
+  var colors = {'BUY CE':'#00c853','BUY PE':'#ff1744','SELL CE':'#ff9800','SELL PE':'#4caf50','WAIT':'#ffd740'};
+  Object.keys(candidates||{}).forEach(function(k){
+    var id = 'cand-'+map[k];
+    var score = candidates[k];
+    var isWin = k===best;
+    var el = $('#'+id);
+    el.find('.cand-score').text(score).css('color', isWin ? colors[k] : 'var(--text)');
+    el.removeClass('winner wait-win');
+    if(isWin) el.addClass(k==='WAIT'?'wait-win':'winner');
+  });
+}
+
+function renderV2Dashboard(d){
+  if(!d) return;
+  var cf = d.confluence || {};
+  var rg = d.market_regime || {};
+  var tl = d.v2_trade_levels || {};
+  var rk = d.v2_risk || {};
+
+  // Show dashboard
+  $('#v2-dashboard').show();
+
+  // Regime
+  var regimeColors = {
+    TREND_UP:'#00c853', TREND_DOWN:'#ff1744', RANGE:'#ffd740',
+    HIGH_VOLATILITY:'#ff6d00', LOW_VOLATILITY:'#80cbc4',
+    BREAKOUT:'#00b0ff', BREAKDOWN:'#ff4081',
+    EXPIRY_HIGH_GAMMA:'#ce93d8', NO_TRADE:'#888', UNKNOWN:'#888'
+  };
+  var regime = rg.regime || '--';
+  $('#v2-regime').text(regime).css('color', regimeColors[regime] || '#888');
+  $('#v2-regime-conf').text(rg.confidence ? 'Confidence: ' + rg.confidence : '');
+
+  // Signal strength (not "confidence %")
+  var ss = d.signal_strength || d.confidence || 0;
+  var ssColor = ss >= 70 ? 'var(--green)' : ss >= 50 ? '#ffd740' : 'var(--text2)';
+  $('#v2-signal').text(ss + ' / 100').css('color', ssColor);
+
+  // Confluence
+  var cScore = cf.confluence_score || 0;
+  var cCount = cf.agreement_count || 0;
+  var cTotal = cf.total_factors || 18;
+  var cQuality = cf.quality || '--';
+  var cDir = cf.direction || '--';
+  var cColor = cQuality === 'HIGH' ? 'var(--green)' : cQuality === 'MEDIUM' ? '#ffd740' : 'var(--text2)';
+  $('#v2-confluence').text(cCount + ' / ' + cTotal + ' agree').css('color', cColor);
+  $('#v2-conf-quality').text(cDir + ' — ' + cQuality + ' quality').css('color', cColor);
+
+  // Trade quality
+  var tqColor = cQuality === 'HIGH' ? 'var(--green)' : cQuality === 'MEDIUM' ? '#ffd740' : 'var(--red)';
+  $('#v2-quality').text(cQuality).css('color', tqColor);
+
+  // Action banner
+  if(d.action){
+    var actColor = (d.action||'').includes('NO TRADE') ? '#ff1744' :
+                   (d.action||'').includes('WAIT') ? '#ffd740' : 'var(--green)';
+    $('#v2-action-banner').text('⚡ ACTION: ' + d.action).css('color', actColor).show();
+  }
+
+  // Trade levels
+  if(tl && tl.trigger){
+    $('#v2-trade-row').show();
+    $('#v2-setup').text(d.best_strategy || '--');
+    $('#v2-trigger').text(fmtN(tl.trigger));
+    $('#v2-trigger-note').text(tl.reasons && tl.reasons[0] ? tl.reasons[0].replace('Trigger: ','') : '');
+    $('#v2-entry').text('₹' + fmtN(tl.option_entry || tl.entry_mid, 1));
+    $('#v2-rr').text('1 : ' + fmtN(tl.rr_ratio, 1));
+
+    $('#v2-sl-row').show();
+    $('#v2-sl').text('₹' + fmtN(tl.option_sl || tl.stop_loss_spot, 1));
+    $('#v2-t1').text('₹' + fmtN(tl.option_t1 || tl.target_1_spot, 1));
+    $('#v2-t2').text('₹' + fmtN(tl.option_t2 || tl.target_2_spot, 1));
+    $('#v2-risk').text('₹' + fmtN(tl.risk_per_lot, 0));
+  }
+
+  // Risk sizing
+  if(rk && rk.hasOwnProperty('allowed')){
+    $('#v2-risk-row').show();
+    if(rk.allowed){
+      $('#v2-lots').text((rk.lots || '--') + ' LOT').css('color','var(--green)');
+      $('#v2-maxloss').text('₹' + fmtN(rk.max_loss, 0));
+      var rlColor = rk.risk_level === 'LOW' ? 'var(--green)' : rk.risk_level === 'MEDIUM' ? '#ffd740' : 'var(--red)';
+      $('#v2-risklevel').text(rk.risk_level || '--').css('color', rlColor);
+    } else {
+      $('#v2-lots').text('NO TRADE').css('color','var(--red)');
+    }
+  }
+  $('#v2-winprob').text(d.win_probability_note || 'Not enough historical data');
+
+  // No-trade reasons
+  var notr = rk.no_trade_reasons || [];
+  if(notr.length){
+    $('#v2-notrade-reasons').html(notr.map(function(r){ return '<div>⛔ ' + esc(r) + '</div>'; }).join(''));
+    $('#v2-notrade').show();
+  } else {
+    $('#v2-notrade').hide();
+  }
+
+  // Factor breakdown
+  var factors = cf.factors || [];
+  $('#v2-factor-count').text(factors.length);
+  if(factors.length){
+    var fHtml = factors.map(function(f){
+      var cls = 'v2-factor-pill v2-factor-' + (f.direction || 'neutral');
+      var icon = f.direction === 'bullish' ? '🟢' : f.direction === 'bearish' ? '🔴' : '⚪';
+      return '<div class="'+cls+'">'+icon+' <b>'+esc(f.id)+'</b>: '+esc(f.reason)+'</div>';
+    }).join('');
+    $('#v2-factors-grid').html(fHtml);
+  }
+  $('#v2-factors-toggle').off('click').on('click', function(){
+    var $g = $('#v2-factors-grid');
+    var open = $g.is(':visible');
+    $g.toggle(!open);
+    $(this).text((open ? '▶' : '▼') + ' ' + (open ? 'Show' : 'Hide') + ' Factor Breakdown (' + factors.length + ' factors)');
+  });
+}
+
+function renderStrikes(d){
+  if(!d){ $('#strikes-loading').hide(); return; }
+  $('#strikes-loading').hide();
+
+  // V2 dashboard
+  renderV2Dashboard(d);
+
+  // Candidates
+  renderCandidates(d.candidates, d.best_strategy);
+
+  // Signal reversal alert
+  if(d.signal_reversal && d.reversal_type){
+    $('#reversal-text').text(d.reversal_type);
+    $('#reversal-alert').show();
+    setTimeout(function(){ $('#reversal-alert').hide(); }, 8000);
+  } else {
+    $('#reversal-alert').hide();
+  }
+
+  // Signal history
+  var hist = d.signal_history || [];
+  if(hist.length){
+    var histMap = {'BUY CE':'hb-buy-ce','BUY PE':'hb-buy-pe','SELL CE':'hb-sell-ce','SELL PE':'hb-sell-pe','WAIT':'hb-wait'};
+    var histHtml = hist.slice(0,10).map(function(h){
+      var bClass = histMap[h.strategy]||'hb-wait';
+      var rev = h.reversal ? '<span style="color:#ff9800;font-size:.65rem;"> 🔄</span>' : '';
+      return '<div class="hist-row' + (h.reversal?' reversal':'') + '">' +
+        '<span>' + esc(h.timestamp) + '</span>' +
+        '<span class="hist-badge '+bClass+'">'+esc(h.strategy)+'</span>'+rev+
+        '<span style="color:var(--text2);">Score:'+h.score+'</span>'+
+        '<span style="color:var(--text2);font-size:.75rem;">'+esc(h.market_state||'')+'</span>'+
+        '<span style="color:var(--text2);">₹'+fmtN(h.spot)+'</span>'+
+      '</div>';
+    }).join('');
+    $('#signal-history-body').html(histHtml);
+  } else {
+    $('#signal-history-body').html('<span style="color:var(--text2);font-size:.85rem;">No history yet — signals will appear after first refresh.</span>');
+  }
+
+  // Market state color
+  var msColor = {'STRONG BULLISH':'#00c853','BULLISH':'#69f0ae','MILD BULLISH':'#b9f6ca',
+    'STRONG BEARISH':'#ff1744','BEARISH':'#ff5252','MILD BEARISH':'#ff8a80',
+    'RANGE BOUND':'#ffd740','NEUTRAL':'#888','HIGH VOLATILITY':'#ff6d00',
+    'BREAKOUT':'#00b0ff','BREAKDOWN':'#ff4081'}[d.market_state]||'#888';
+  if(d.market_state){
+    $('#sig-forecast').text(esc(d.market_state)).css('color', msColor);
+  }
+
+  // Warnings bar
+  var warnings = d.warnings||[];
+  if(warnings.length){
+    $('#warnings-bar').html(
+      warnings.map(function(w){ return '<div style="padding:.4rem .75rem;background:rgba(255,152,0,.1);border-left:3px solid #ff9800;border-radius:4px;font-size:.8rem;color:#ff9800;margin-bottom:.3rem;">'+esc(w)+'</div>'; }).join('')
+    ).show();
+  } else {
+    $('#warnings-bar').hide();
+  }
+
+  // Time session badge
+  var sess = d.time_session;
+  if(sess && sess !== 'MID' && sess !== ''){
+    var sessColor = sess==='OPENING'?'#ff9800':sess==='CLOSING'?'#ff5722':'#888';
+    // Add to strategy box if visible
+  }
+  var em = d.expected_move;
+  if(em && em.move_points){
+    $('#exp-move-text').text(em.basis + ' | Range: ' + fmtN(em.lower) + ' – ' + fmtN(em.upper));
+    $('#exp-move-box').show();
+  }
+
+  // Strategy box
+  if(d.strategy){
+    $('#strategy-name').text(d.strategy);
+    $('#strategy-reason').text(d.strategy_reason||'');
+    $('#strategy-box').show();
+  }
+
+  // Price levels
+  var pl = d.price_levels;
+  if(pl){
+    $('#price-levels-grid').html(
+      '<div class="pl-box"><div class="pl-label">Entry Zone</div><div class="pl-val">'+(pl.entry_zone?fmtN(pl.entry_zone.low)+'–'+fmtN(pl.entry_zone.high):'--')+'</div></div>'+
+      '<div class="pl-box"><div class="pl-label">Target 1</div><div class="pl-val" style="color:var(--green);">'+fmtN(pl.target_1)+'</div></div>'+
+      '<div class="pl-box"><div class="pl-label">Target 2</div><div class="pl-val" style="color:var(--green);">'+fmtN(pl.target_2)+'</div></div>'+
+      '<div class="pl-box"><div class="pl-label">Stop Loss</div><div class="pl-val" style="color:var(--red);">'+fmtN(pl.stop_loss)+'</div></div>'+
+      '<div class="pl-box"><div class="pl-label">Invalidation</div><div class="pl-val" style="color:var(--red);">'+fmtN(pl.invalidation_level)+'</div></div>'
+    );
+    $('#price-levels-basis').text(pl.basis||'');
+    $('#price-levels-card').show();
+  }
+
+  // Strategy detail (legs)
+  var sd = d.strategy_detail;
+  if(sd && sd.legs && sd.legs.length){
+    var html = sd.legs.map(function(leg){
+      var col = (leg.action||'').toUpperCase()==='BUY'?'var(--green)':'var(--red)';
+      return '<div class="leg-row">'+
+        '<span style="font-weight:700;color:'+col+';">'+esc(leg.action)+' '+esc(leg.type||leg.side||'')+'</span>'+
+        '<span>'+esc(leg.strike)+(leg.expiry?' — '+esc(leg.expiry)+' Expiry':'')+'</span>'+
+        '<span>₹'+fmtN(leg.premium||leg.ltp,2)+'</span>'+
+      '</div>';
+    }).join('');
+    if(sd.net_credit) html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--green);">Net Credit: <b>₹'+fmtN(sd.net_credit,2)+'</b></div>';
+    if(sd.net_debit)  html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--red);">Net Debit: <b>₹'+fmtN(sd.net_debit,2)+'</b></div>';
+    if(sd.max_loss)   html += '<div style="text-align:right;font-size:.82rem;color:var(--text2);">Max Loss: ₹'+fmtN(sd.max_loss,2)+'</div>';
+    if(sd.reasoning)  html += '<div style="font-size:.75rem;color:var(--text2);margin-top:.5rem;line-height:1.5;">'+esc(sd.reasoning)+'</div>';
+    $('#strategy-detail-body').html(html);
+    $('#strategy-detail-card').show();
+  }
+
+  // WAIT
+  if(!d.strikes || !d.strikes.length){
+    var reasons = (d.wait_reasons||[]);
+    $('#wait-reasons').html(reasons.length ? reasons.map(function(r){ return '<div>• '+esc(r)+'</div>'; }).join('') : '');
+    $('#strikes-wait').show();
+    return;
+  }
+
+  // Strike cards
+  var html='';
+  d.strikes.forEach(function(s,i){
+    var cc = i===0?'best':i===1?'agg':'con';
+    var isCall = s.type==='CE';
+    var isSell = d.best_strategy&&d.best_strategy.startsWith('SELL');
+    var bc = isSell ? (isCall?'badge-sell-ce':'badge-sell-pe') : (isCall?'badge-call':'badge-put');
+    var lc = isCall?'#00c853':'#ff6b6b';
+    if(isSell) lc = isCall?'#ff9800':'#4caf50';
+    html+='<div class="strike-card '+cc+'">';
+    html+='<div class="strike-header">';
+    html+='<div style="font-size:1rem;font-weight:700;">'+esc(s.rank)+' '+esc(s.label)+'</div>';
+    html+='<span class="strike-badge '+bc+'">'+esc(String(s.strike))+' '+esc(s.type)+(s.expiry?' <span style="opacity:.75;font-weight:500;">| '+esc(s.expiry)+'</span>':'')+'</span>';
+    html+='</div>';
+    html+='<div style="font-size:.78rem;color:var(--text2);margin-bottom:.6rem;">'+esc(s.note)+'</div>';
+    html+='<div class="strike-stats">';
+    html+='<div class="s-stat"><div class="s-label">LTP</div><div class="s-val" style="color:'+lc+';">₹'+fmtN(s.ltp,2)+'</div></div>';
+    html+='<div class="s-stat"><div class="s-label">OI</div><div class="s-val">'+fmtN(s.oi)+'</div></div>';
+    html+='<div class="s-stat"><div class="s-label">Volume</div><div class="s-val">'+fmtN(s.volume)+'</div></div>';
+    html+='<div class="s-stat"><div class="s-label">IV%</div><div class="s-val">'+fmtN(s.iv,1)+'</div></div>';
+    html+='</div>';
+    if(s.sl){
+      html+='<div class="strike-targets">';
+      html+='<div class="s-stat"><div class="s-label">SL</div><div class="s-val" style="color:var(--red);">₹'+fmtN(s.sl,1)+'</div></div>';
+      html+='<div class="s-stat"><div class="s-label">T1</div><div class="s-val" style="color:var(--green);">₹'+fmtN(s.t1,1)+'</div></div>';
+      html+='<div class="s-stat"><div class="s-label">T2</div><div class="s-val" style="color:var(--green);">₹'+fmtN(s.t2,1)+'</div></div>';
+      html+='<div class="s-stat"><div class="s-label">R:R</div><div class="s-val" style="color:var(--primary);">1:'+fmtN(s.rr,1)+'</div></div>';
+      html+='</div>';
+    }
+    html+='</div>';
+  });
+  html+='<div style="font-size:.72rem;color:var(--text2);margin-top:.5rem;padding:.4rem;background:rgba(255,200,0,.06);border-radius:6px;">⚠️ '+esc(d.disclaimer)+'</div>';
+  $('#strikes-grid').html(html).show();
+}
+
+function renderAnalysis(d){
+  var dec=((d.suggestion||d.rule_decision||'WAIT')+'').toUpperCase();
+  var badge=$('#sig-badge').text(dec).attr('class','ai-badge');
+  if(dec.includes('CALL')) badge.addClass('bull');
+  else if(dec.includes('PUT')) badge.addClass('bear');
+  else badge.addClass('wait');
+
+  var bull=d.bull_score||0,bear=d.bear_score||0,max=98;
+  $('#bull-val').text(bull); $('#bull-bar').css('width',Math.min(bull/max*100,100)+'%');
+  $('#bear-val').text(bear); $('#bear-bar').css('width',Math.min(bear/max*100,100)+'%');
+  $('#sig-conf').text((d.signal_strength!=null?d.signal_strength:(d.confidence||0))+'/100');
+  if (d.data_completeness_pct != null && d.data_completeness_pct < 100) {
+    var dc = d.data_completeness_pct;
+    var dcColor = dc < 60 ? 'var(--red)' : dc < 85 ? 'var(--yellow)' : 'var(--text2)';
+    $('#data-completeness').html('<span style="color:' + dcColor + '">⚠ ' + dc +
+      '% data live</span> — signal strength மேலே already குறைக்கப்பட்டிருக்கு missing data-க்கு');
+  } else {
+    $('#data-completeness').text('');
+  }
+
+  renderRecommendedOption(d.recommended_option);
+
+  if (d.market_regime && d.market_regime !== 'unknown') {
+    var regimeLabels = {
+      TREND_UP: '📈 Trending Up', TREND_DOWN: '📉 Trending Down', RANGE: '↔️ Range-bound',
+      BREAKOUT: '🚀 Breakout', BREAKDOWN: '💥 Breakdown', HIGH_VOLATILITY: '⚡ High Volatility',
+      LOW_VOLATILITY: '😴 Low Volatility', EXPIRY_HIGH_GAMMA: '🎯 Expiry Gamma Risk', NO_TRADE: '⛔ No Trade Zone'
+    };
+    $('#market-regime-badge').text('Regime: ' + (regimeLabels[d.market_regime] || d.market_regime));
+  } else {
+    $('#market-regime-badge').text('');
+  }
+
+  var risk=(d.risk||'medium').toLowerCase();
+  $('#sig-risk').text(risk.toUpperCase()).css('color',risk==='low'?'var(--green)':risk==='high'?'var(--red)':'var(--yellow)');
+  $('#sig-forecast').text(esc(d.forecast||d.market_bias||'--'));
+  $('#sig-volatility').text(d.volatility_label||'');
+
+  var tf=d.timeframe_trend||{};
+  $('#tf-5').text(tfIcon(tf['5min'])).css('color',tfColor(tf['5min']));
+  $('#tf-15').text(tfIcon(tf['15min'])).css('color',tfColor(tf['15min']));
+  $('#tf-1h').text(tfIcon(tf['1hr'])).css('color',tfColor(tf['1hr']));
+  $('#a-pcr').text(fmtN(d.pcr,3)); $('#a-vix').text(fmtN(d.vix,1)); $('#a-mp').text(fmtN(d.max_pain));
+
+  $('#ai-reason').html('<div class="ai-reasoning">'+esc(d.reason||'--')+'</div>');
+  if(d.key_factors&&d.key_factors.length){
+    $('#key-factors').html(d.key_factors.map(function(f){
+      return '<span class="level-pill support" style="background:rgba(64,196,255,.1);color:var(--primary);">'+esc(f)+'</span>';
+    }).join(''));
+  }
+  var reasons=d.all_reasons||[];
+  $('#all-reasons').html(reasons.length?reasons.map(function(r){
+    return '<div style="padding:.3rem .5rem;border-radius:5px;background:rgba(255,255,255,.03);">'+esc(r)+'</div>';
+  }).join(''):'<span style="color:var(--text2);">Signals unavailable</span>');
+
+  renderStatusBanners(d);
+  renderScenarios(d.scenarios);
+  renderTamilIndicators(d.tamil_indicators);
+  renderDataQuality(d.data_quality);
+}
+
+function renderStatusBanners(d){
+  var html = '';
+  if(d.market_open === false){
+    html += '<div class="status-banner closed">🔴 Market Closed — கடைசி data-ஐ live movement-ஆக நினைக்க வேண்டாம்.</div>';
+  }
+  var er = d.expiry_risk || {};
+  if(er.is_expiry){
+    html += '<div class="status-banner expiry">🔴 இன்று Expiry Day — '+esc(er.note||'Gamma risk மிக அதிகம், premium decay வேகமாக இருக்கும்.')+'</div>';
+  } else if(er.days_left === 1){
+    html += '<div class="status-banner expiry-soon">🟠 நாளை Expiry — Gamma risk உயரும்.</div>';
+  }
+  $('#status-banners').html(html);
+}
+
+function renderScenarios(scenarios){
+  if(!scenarios || !scenarios.length){ $('#scenarios-card').hide(); return; }
+  var icons = {bullish:'🟢', bearish:'🔴', sideways:'🟡'};
+  var titles = {bullish:'Bullish Scenario', bearish:'Bearish Scenario', sideways:'Range Scenario'};
+  var html = scenarios.map(function(s){
+    var icon = icons[s.type]||'⚪';
+    return '<div class="scenario-row '+esc(s.type)+'">'+
+      '<div class="scenario-head"><span>'+icon+' '+esc(titles[s.type]||s.type)+'</span>'+
+      (s.probability!=null?'<span style="font-size:.78rem;color:var(--text2);">'+esc(s.probability)+'%</span>':'')+'</div>'+
+      '<div>'+esc(s.condition)+' → <b>'+esc(s.target_zone)+'</b></div>'+
+      '<div class="scenario-inval">❌ Invalidation: '+esc(s.invalidation)+'</div>'+
+    '</div>';
+  }).join('');
+  $('#scenarios-body').html(html);
+  $('#scenarios-card').show();
+}
+
+function renderTamilIndicators(items){
+  if(!items || !items.length){ $('#tamil-card').hide(); return; }
+  var html = items.map(function(it){
+    return '<div class="tamil-row '+esc(it.direction||'neutral')+'">'+
+      '<div class="tamil-head"><span>'+esc(it.icon||'')+' '+esc(it.title_ta||it.id)+'</span>'+
+      '<span style="font-weight:600;">'+esc(it.value_display||'--')+'</span></div>'+
+      '<div class="tamil-exp">'+esc(it.explanation_ta||'')+'</div>'+
+    '</div>';
+  }).join('');
+  $('#tamil-body').html(html);
+  $('#tamil-card').show();
+}
+
+function renderDataQuality(dq){
+  if(!dq){ $('#dq-card').hide(); return; }
+  var labels = {
+    futures_premium:'Futures Premium', global_market:'Global Market', gift_nifty:'Gift Nifty',
+    fii:'FII', dii:'DII', technicals_source:'Technicals'
+  };
+  var html = Object.keys(dq).map(function(k){
+    var v = (dq[k]||'').toString();
+    var isLive = v === 'live' || v.indexOf('intraday') >= 0 || v.indexOf('historical') >= 0;
+    var pillClass = isLive ? 'dq-live' : 'dq-unavailable';
+    var pillIcon = isLive ? '🟢' : '⚪';
+    return '<span class="dq-pill '+pillClass+'">'+pillIcon+' '+esc(labels[k]||k)+': '+esc(v)+'</span>';
+  }).join('');
+  $('#dq-body').html(html);
+  $('#dq-card').show();
+}
+
+// Init
+loadAll(curSym);
+var t=null;
+$('#refresh-btn').on('click',function(){ clearTimeout(t); t=setTimeout(function(){loadAll(curSym,true,curExpiry);},300); });
+$('.sym-tab').on('click',function(){
+  $('.sym-tab').removeClass('active'); $(this).addClass('active');
+  curSym=$(this).data('sym');
+  curExpiry='';               // different symbol → different expiry calendar, back to nearest
+  $('#expiry-select').hide().val('');
+  $('#expiry-resolved-label').text('');
+  loadAll(curSym,true,'');
+});
+$('#expiry-select').on('change',function(){
+  loadAll(curSym,true,$(this).val());
+});
+}); // end $(function()
+</script>
+{% endblock %}

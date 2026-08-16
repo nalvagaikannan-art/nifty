@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block title %}Live View — AI NIFTY{% endblock %}
+{% block content %}
+
+<div class="page-header">
+    <h2>📍 Live View</h2>
+    <div class="sym-tabs">
+        <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
+        <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
+        <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+    </div>
+</div>
+
+<div id="freshness" style="font-size:0.78rem;color:var(--text2);margin-bottom:0.75rem;"></div>
+
+    <!-- LIVE CHART -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>📈 Live Price (5-min)</h3>
+        <div id="liveChart" style="height:280px;"></div>
+        <div id="liveChartMsg" style="display:none;font-size:0.85rem;color:var(--text2);text-align:center;padding:1rem 0;"></div>
+    </div>
+
+    <!-- MARKET VIEW -->
+    <div class="card" style="margin-bottom:1rem;text-align:center;">
+        <div id="marketViewIcon" style="font-size:2.2rem;line-height:1;">⏳</div>
+        <div id="marketViewLabel" style="font-size:1.3rem;font-weight:700;margin:0.35rem 0;">Loading…</div>
+        <div id="marketViewSub" style="font-size:0.85rem;color:var(--text2);"></div>
+    </div>
+
+    <!-- BIAS -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>Call / Put Bias</h3>
+        <div id="biasBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <!-- WHY -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>ஏன் இந்த View? (Why this view?)</h3>
+        <div id="whyBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <!-- KEY LEVELS -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>Key Levels</h3>
+        <div id="levelsBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <!-- VIX -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>India VIX</h3>
+        <div id="vixBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <!-- FII/DII -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3>FII / DII</h3>
+        <div id="fiiBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <div id="errorBanner" style="display:none;" class="card">
+        <div class="error-msg">
+            ⚠️ Live market data temporarily கிடைக்கவில்லை. Angel One connection-ஐ சரிபார்க்கவும்.
+        </div>
+        <button id="retryBtn" class="sym-tab" style="margin-top:0.5rem;">🔄 Retry</button>
+    </div>
+
+<script>
+let curSym = 'NIFTY';
+let lastFetchTime = null;
+
+function pctBadge(v) {
+    if (v === null || v === undefined || isNaN(v)) return '<span class="td-neutral">—</span>';
+    const cls = v > 0 ? 'td-green' : (v < 0 ? 'td-red' : 'td-neutral');
+    return '<span class="' + cls + '">' + (v >= 0 ? '+' : '') + Number(v).toFixed(2) + '</span>';
+}
+
+function updateFreshness() {
+    const el = document.getElementById('freshness');
+    if (!lastFetchTime) { el.innerHTML = ''; return; }
+    const ageSec = Math.round((Date.now() - lastFetchTime) / 1000);
+    const timeStr = new Date(lastFetchTime).toLocaleTimeString('en-IN', {hour12:false});
+    if (ageSec < 20) {
+        el.innerHTML = '🟢 LIVE &nbsp;·&nbsp; Updated: ' + timeStr + ' &nbsp;·&nbsp; ' + ageSec + 's ago';
+    } else if (ageSec < 90) {
+        el.innerHTML = '🟡 STALE DATA — ' + ageSec + 's old &nbsp;·&nbsp; Updated: ' + timeStr;
+    } else {
+        el.innerHTML = '🔴 DATA CONNECTION LOST — last update ' + ageSec + 's ago';
+    }
+}
+setInterval(updateFreshness, 1000);
+
+function renderMarketView(dec, ai, spot) {
+    const bias = dec.market_bias || 'Sideways';
+    const conf = ai.confidence || 0;
+    const icon = bias === 'Bullish' ? '🟢' : bias === 'Bearish' ? '🔴' : '🟡';
+    const label = bias === 'Bullish' ? 'BULLISH' : bias === 'Bearish' ? 'BEARISH' : 'NEUTRAL';
+    $('#marketViewIcon').text(icon);
+    $('#marketViewLabel').text(label);
+    const mktTxt = (spot && spot.market_open === false)
+        ? ' &nbsp;·&nbsp; <span class="td-neutral">● MARKET CLOSED' + (spot.market_status_source && spot.market_status_source !== 'nse' ? ' (est.)' : '') + '</span>'
+        : '';
+    $('#marketViewSub').html('Confidence: ' + conf + '%  ·  Risk: ' + (ai.risk || '—') + mktTxt);
+}
+
+function renderBias(ai) {
+    const side = ai.preferred_side || 'NONE';
+    const sr = ai.support_resistance || {};
+    const support = (sr.support || [])[0];
+    const resistance = (sr.resistance || [])[0];
+    let biasLabel, biasIcon, biasNote;
+    if (side === 'CALL') {
+        biasLabel = 'CALL BIAS'; biasIcon = '🟢';
+        biasNote = 'NIFTY-மேலே trading. Support: ' + (support ?? '—') + ' · Resistance: ' + (resistance ?? '—');
+    } else if (side === 'PUT') {
+        biasLabel = 'PUT BIAS'; biasIcon = '🔴';
+        biasNote = 'NIFTY-கீழே trading. Support: ' + (support ?? '—') + ' · Resistance: ' + (resistance ?? '—');
+    } else {
+        biasLabel = 'WAIT'; biasIcon = '🟡';
+        biasNote = 'Call/Put side-க்கு clear confirmation இல்லை. Wait for: '
+            + (resistance ? ('NIFTY above ' + resistance + ' → bullish confirmation') : '')
+            + (support && resistance ? ' அல்லது ' : '')
+            + (support ? ('NIFTY below ' + support + ' → bearish confirmation') : '');
+    }
+    $('#biasBody').html(
+        '<div style="font-size:1.1rem;font-weight:700;margin-bottom:0.3rem;">' + biasIcon + ' ' + biasLabel + '</div>' +
+        '<div style="font-size:0.85rem;color:var(--text2);">' + biasNote + '</div>' +
+        '<div style="margin-top:0.5rem;font-size:0.85rem;">Confidence: <b>' + (ai.confidence||0) + '%</b></div>'
+    );
+}
+
+function renderWhy(ai) {
+    const reasons = (ai.all_reasons || []).slice(0, 5);
+    if (!reasons.length) {
+        $('#whyBody').html('<div class="error-msg">⚠ Data Unavailable</div>');
+        return;
+    }
+    $('#whyBody').html('<div style="font-size:0.88rem;line-height:1.8;">' +
+        reasons.map(r => '<div>' + r + '</div>').join('') + '</div>');
+}
+
+function renderLevels(ai, spot) {
+    const sr = ai.support_resistance || {};
+    const support = sr.support || [];
+    const resistance = sr.resistance || [];
+    const rows = [
+        ['Strong Resistance', resistance[1]],
+        ['Resistance', resistance[0]],
+        ['Current', spot],
+        ['Support', support[0]],
+        ['Strong Support', support[1]],
+    ];
+    $('#levelsBody').html('<div class="stat-grid">' + rows.map(([label, val]) => {
+        const isCurrent = label === 'Current';
+        return '<div class="stat-box' + (isCurrent ? '' : '') + '"><div class="stat-label">' + label + '</div>' +
+            '<div class="stat-value"' + (isCurrent ? ' style="color:var(--primary)"' : '') + '>' +
+            (val ? Number(val).toLocaleString('en-IN') : '—') + '</div></div>';
+    }).join('') + '</div>');
+}
+
+function renderVix(vix) {
+    if (vix === null || vix === undefined || vix <= 0) {
+        $('#vixBody').html('<div class="error-msg">⚠ Data Unavailable</div>');
+        return;
+    }
+    let cls, label, note;
+    if (vix < 15) { cls = 'td-green'; label = '🟢 LOW VOLATILITY'; note = 'Option premium relatively stable.'; }
+    else if (vix < 20) { cls = 'td-neutral'; label = '🟡 NORMAL VOLATILITY'; note = 'Typical intraday range expected.'; }
+    else { cls = 'td-red'; label = '🔴 HIGH VOLATILITY'; note = 'Expect larger intraday swings — option premium costlier.'; }
+    $('#vixBody').html(
+        '<div style="font-size:1.6rem;font-weight:700;" class="' + cls + '">' + vix.toFixed(2) + '</div>' +
+        '<div style="font-size:0.85rem;margin-top:0.2rem;">' + label + '</div>' +
+        '<div style="font-size:0.8rem;color:var(--text2);margin-top:0.3rem;">' + note + '</div>'
+    );
+}
+
+function renderFii(fiiNet, diiNet) {
+    if (fiiNet === null && diiNet === null) {
+        $('#fiiBody').html('<div class="error-msg">⚠ Data Unavailable (NSE)</div>');
+        return;
+    }
+    const fiiTxt = fiiNet == null ? '— N/A' : (fiiNet >= 0 ? '🟢 Buying' : '🔴 Selling') + ' (' + fiiNet.toFixed(0) + ' Cr)';
+    const diiTxt = diiNet == null ? '— N/A' : (diiNet >= 0 ? '🟢 Buying' : '🔴 Selling') + ' (' + diiNet.toFixed(0) + ' Cr)';
+    let bias = 'Neutral';
+    if (fiiNet != null && diiNet != null) {
+        if (fiiNet >= 0 && diiNet >= 0) bias = 'Bullish';
+        else if (fiiNet < 0 && diiNet < 0) bias = 'Bearish';
+    }
+    $('#fiiBody').html(
+        '<div style="font-size:0.9rem;">FII: ' + fiiTxt + '</div>' +
+        '<div style="font-size:0.9rem;margin-top:0.2rem;">DII: ' + diiTxt + '</div>' +
+        '<div style="font-size:0.82rem;color:var(--text2);margin-top:0.4rem;">Institutional flow supports <b>' + bias + '</b> bias.</div>'
+    );
+}
+
+let liveChartDrawn = false;
+
+function renderLiveChartMsg(text) {
+    $('#liveChart').hide();
+    $('#liveChartMsg').text(text).show();
+    liveChartDrawn = false;
+}
+
+function loadLiveChart(sym) {
+    $.get('/api/market/candles/' + sym, { interval: 'FIVE_MINUTE', bars: 100 })
+      .done(function(d) {
+        if (!d || !d.available || !d.closes || !d.closes.length) {
+            renderLiveChartMsg('⚠ Live chart தேவையான intraday data கிடைக்கவில்லை (Angel One/Zerodha configure ஆகவில்லை).');
+            return;
+        }
+        $('#liveChartMsg').hide();
+        $('#liveChart').show();
+        const x = d.timestamps && d.timestamps.length === d.closes.length ? d.timestamps : d.closes.map((_, i) => i);
+        const trace = {
+            x: x, y: d.closes, mode: 'lines', type: 'scatter',
+            line: { color: '#00e676', width: 1.6 },
+            fill: 'tozeroy', fillcolor: 'rgba(0,230,118,0.06)',
+            hovertemplate: '₹%{y:,.2f}<extra></extra>',
+        };
+        const layout = {
+            paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+            font: { color: '#8899aa', size: 11 },
+            margin: { t: 10, b: 30, l: 55, r: 10 },
+            xaxis: { showgrid: false, tickfont: { size: 9 } },
+            yaxis: { gridcolor: 'rgba(255,255,255,0.06)', tickprefix: '₹', tickformat: ',.0f' },
+            showlegend: false,
+        };
+        const config = { responsive: true, displayModeBar: false };
+        if (liveChartDrawn) {
+            Plotly.react('liveChart', [trace], layout, config);
+        } else {
+            Plotly.newPlot('liveChart', [trace], layout, config);
+            liveChartDrawn = true;
+        }
+      })
+      .fail(function() {
+        renderLiveChartMsg('⚠ Live chart load ஆகவில்லை.');
+      });
+}
+
+function loadLive(sym) {
+    $('#errorBanner').hide();
+    $.when(
+        $.get('/api/analysis/ai/' + sym),
+        $.get('/api/market/spot/' + sym)
+    ).done(function(aiResp, spotResp) {
+        const ai = aiResp[0];
+        const spot = spotResp[0];
+        lastFetchTime = Date.now();
+        updateFreshness();
+        renderMarketView(ai, ai, spot);
+        renderBias(ai);
+        renderWhy(ai);
+        renderLevels(ai, spot.price);
+        renderVix(ai.vix);
+        renderFii(ai.fii_net, ai.dii_net);
+    }).fail(function() {
+        $('#errorBanner').show();
+    });
+}
+
+$(document).ready(function() {
+    loadLive(curSym);
+    loadLiveChart(curSym);
+    setInterval(function(){ loadLive(curSym); }, 30000);
+    // Candles are 5-min bars — refetching every 30s like the rest of the
+    // page would just hammer the API for identical data; 60s is enough to
+    // catch each new bar promptly without the extra load.
+    setInterval(function(){ loadLiveChart(curSym); }, 60000);
+    $('.sym-tab').on('click', function() {
+        $('.sym-tab').removeClass('active');
+        $(this).addClass('active');
+        curSym = $(this).data('sym');
+        liveChartDrawn = false;
+        loadLive(curSym);
+        loadLiveChart(curSym);
+    });
+    $('#retryBtn').on('click', function() { loadLive(curSym); loadLiveChart(curSym); });
+});
+</script>
+{% endblock %}

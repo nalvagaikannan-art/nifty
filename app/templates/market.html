@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Market — NIFTY AI{% endblock %}
+{% block content %}
+
+<div class="page-header">
+    <h2>🏦 Market Overview</h2>
+    <div class="sym-tabs">
+        <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
+        <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
+        <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+    </div>
+</div>
+
+<!-- Spot Stats -->
+<div class="stat-grid" style="margin-bottom:1rem;" id="spot-stats">
+    <div class="stat-box"><div class="stat-label">Spot Price</div><div class="stat-value" id="spot-price">--</div></div>
+    <div class="stat-box"><div class="stat-label">Change</div><div class="stat-value" id="spot-change">--</div></div>
+    <div class="stat-box"><div class="stat-label">Day High</div><div class="stat-value" id="spot-high">--</div></div>
+    <div class="stat-box"><div class="stat-label">Day Low</div><div class="stat-value" id="spot-low">--</div></div>
+    <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value" id="spot-open">--</div></div>
+    <div class="stat-box"><div class="stat-label">Prev Close</div><div class="stat-value" id="spot-prev">--</div></div>
+</div>
+
+<!-- Technical Indicators -->
+<div class="card" style="margin-bottom:1rem;">
+    <h3 style="margin-bottom:1rem;">Technical Indicators</h3>
+    <div class="stat-grid" id="tech-stats">
+        <div class="stat-box"><div class="stat-label">RSI (14)</div><div class="stat-value" id="tech-rsi">--</div></div>
+        <div class="stat-box"><div class="stat-label">MACD</div><div class="stat-value" id="tech-macd">--</div></div>
+        <div class="stat-box"><div class="stat-label">Support</div><div class="stat-value td-green" id="tech-support">--</div></div>
+        <div class="stat-box"><div class="stat-label">Resistance</div><div class="stat-value td-red" id="tech-resist">--</div></div>
+    </div>
+</div>
+
+<!-- Sector Performance -->
+<div class="card" style="margin-bottom:1rem;">
+    <h3 style="margin-bottom:0.5rem;">Sector Performance</h3>
+    <div id="sector-perf" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<!-- Global Markets -->
+<div class="card" style="margin-bottom:1rem;">
+    <h3 style="margin-bottom:0.5rem;">Global Market</h3>
+    <div id="global-mkt" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<!-- FII / DII -->
+<div class="card" style="margin-bottom:1rem;">
+    <h3 style="margin-bottom:0.5rem;">FII / DII Activity</h3>
+    <div id="fii-dii" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<!-- Market Breadth -->
+<div class="card">
+    <h3 style="margin-bottom:0.5rem;">Market Data</h3>
+    <div id="market-raw" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<script>
+var curSym = 'NIFTY';
+
+function loadMarket(sym) {
+    $('#market-raw').html('<span class="spinner"></span> Loading...');
+    $.get('/api/market/spot/' + sym, function(d) {
+        $('#spot-price').text(d.price ? d.price.toLocaleString('en-IN', {maximumFractionDigits:2}) : '--');
+        var chg = d.change || d.change_pct;
+        $('#spot-change').html(chg !== undefined
+            ? '<span class="' + (chg >= 0 ? 'td-green' : 'td-red') + '">' + (chg >= 0 ? '▲' : '▼') + ' ' + chg.toFixed(2) + '%</span>'
+            : '--');
+        $('#spot-high').text(d.high ? d.high.toLocaleString('en-IN', {maximumFractionDigits:2}) : '--');
+        $('#spot-low').text(d.low ? d.low.toLocaleString('en-IN', {maximumFractionDigits:2}) : '--');
+        $('#spot-open').text(d.open ? d.open.toLocaleString('en-IN', {maximumFractionDigits:2}) : '--');
+        $('#spot-prev').text(d.prev_close ? d.prev_close.toLocaleString('en-IN', {maximumFractionDigits:2}) : '--');
+        // Tech indicators
+        if (d.indicators) {
+            $('#tech-rsi').text(d.indicators.rsi !== undefined ? d.indicators.rsi.toFixed(1) : '--');
+            $('#tech-macd').text(d.indicators.macd !== undefined ? d.indicators.macd.toFixed(2) : '--');
+            $('#tech-support').text(d.indicators.support ? d.indicators.support.toLocaleString('en-IN') : '--');
+            $('#tech-resist').text(d.indicators.resistance ? d.indicators.resistance.toLocaleString('en-IN') : '--');
+        }
+        $('#market-raw').html('<pre style="font-size:0.78rem;color:var(--text2);overflow-x:auto;">' + JSON.stringify(d, null, 2) + '</pre>');
+    }).fail(function(xhr) {
+        $('#market-raw').html('<div class="error-msg">⚠ ' + (JSON.parse(xhr.responseText || '{}').detail || 'Failed to load') + '</div>');
+    });
+}
+
+function pctBadge(v) {
+    if (v === null || v === undefined) return '<span class="td-neutral">Data Unavailable</span>';
+    var cls = v > 0 ? 'td-green' : (v < 0 ? 'td-red' : 'td-neutral');
+    return '<span class="' + cls + '">' + (v >= 0 ? '▲ +' : '▼ ') + v.toFixed(2) + '%</span>';
+}
+
+function loadSectorPerformance() {
+    $('#sector-perf').html('<span class="spinner"></span> Loading...');
+    $.get('/api/market-intel/sector-performance', function(d) {
+        if (!d.sectors || !d.sectors.length) {
+            $('#sector-perf').html('<div class="error-msg">⚠ Data Unavailable</div>');
+            return;
+        }
+        var rows = d.sectors.map(function(s) {
+            return '<div class="stat-box"><div class="stat-label">' + s.name + '</div>' +
+                   '<div class="stat-value">' + pctBadge(s.change_percent) + '</div></div>';
+        }).join('');
+        $('#sector-perf').html(
+            '<div style="margin-bottom:0.5rem;font-size:0.85rem;color:var(--text2);">' +
+            'Top: <b>' + d.top_sector.name + '</b> (' + d.top_sector.change_percent.toFixed(2) + '%) &nbsp;|&nbsp; ' +
+            'Weak: <b>' + d.weak_sector.name + '</b> (' + d.weak_sector.change_percent.toFixed(2) + '%) &nbsp;|&nbsp; ' +
+            d.rotation + '</div>' +
+            '<div class="stat-grid">' + rows + '</div>'
+        );
+    }).fail(function() {
+        $('#sector-perf').html('<div class="error-msg">⚠ Data Unavailable</div>');
+    });
+}
+
+function loadGlobalMarkets() {
+    $('#global-mkt').html('<span class="spinner"></span> Loading...');
+    $.get('/api/market-intel/global-markets', function(d) {
+        var rows = Object.keys(d.instruments || {}).map(function(k) {
+            var i = d.instruments[k];
+            var val = i.source === 'unavailable' ? '<span class="td-neutral">Data Unavailable</span>' : pctBadge(i.change_percent);
+            return '<div class="stat-box"><div class="stat-label">' + i.name + '</div><div class="stat-value">' + val + '</div></div>';
+        }).join('');
+        var giftLine = d.gift_nifty_change_pct === null
+            ? '<span class="td-neutral">Gift Nifty: Data Unavailable</span>'
+            : ('Gift Nifty: ' + pctBadge(d.gift_nifty_change_pct));
+        $('#global-mkt').html(
+            '<div style="margin-bottom:0.5rem;font-size:0.85rem;">' + giftLine +
+            ' &nbsp;|&nbsp; Global Cue: ' + pctBadge(d.global_change_pct) + '</div>' +
+            '<div class="stat-grid">' + rows + '</div>'
+        );
+    }).fail(function() {
+        $('#global-mkt').html('<div class="error-msg">⚠ Data Unavailable</div>');
+    });
+}
+
+function loadFiiDii() {
+    $('#fii-dii').html('<span class="spinner"></span> Loading...');
+    $.get('/api/market-intel/fii-dii', function(d) {
+        if (d.source === 'unavailable' || (!d.fii && !d.dii)) {
+            $('#fii-dii').html('<div class="error-msg">⚠ Data Unavailable</div>');
+            return;
+        }
+        var fii = d.fii || {}, dii = d.dii || {};
+        $('#fii-dii').html(
+            '<div class="stat-grid">' +
+            '<div class="stat-box"><div class="stat-label">FII Net (₹ Cr)</div><div class="stat-value">' + (fii.net_value !== undefined ? '<span class="' + (fii.net_value >= 0 ? 'td-green' : 'td-red') + '">' + fii.net_value.toFixed(1) + '</span>' : 'Data Unavailable') + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">DII Net (₹ Cr)</div><div class="stat-value">' + (dii.net_value !== undefined ? '<span class="' + (dii.net_value >= 0 ? 'td-green' : 'td-red') + '">' + dii.net_value.toFixed(1) + '</span>' : 'Data Unavailable') + '</div></div>' +
+            '</div>' +
+            (d.date ? '<div style="margin-top:0.5rem;font-size:0.78rem;color:var(--text2);">As of: ' + d.date + '</div>' : '')
+        );
+    }).fail(function() {
+        $('#fii-dii').html('<div class="error-msg">⚠ Data Unavailable</div>');
+    });
+}
+
+$(document).ready(function() {
+    loadMarket(curSym);
+    loadSectorPerformance();
+    loadGlobalMarkets();
+    loadFiiDii();
+    $('.sym-tab').on('click', function() {
+        $('.sym-tab').removeClass('active');
+        $(this).addClass('active');
+        curSym = $(this).data('sym');
+        loadMarket(curSym);
+    });
+});
+</script>
+{% endblock %}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}My Positions — NIFTY AI{% endblock %}
+{% block content %}
+
+<div class="page-header">
+  <h2>📊 My Positions</h2>
+  <button class="btn btn-primary" style="font-size:.8rem;padding:.4rem 1rem;" onclick="loadPositions()">🔄 Refresh</button>
+</div>
+
+<div class="card glass" style="margin-bottom:1rem;display:flex;justify-content:space-between;align-items:center;">
+  <div>
+    <div style="font-size:.75rem;color:var(--text2);">Total P&amp;L</div>
+    <div id="total-pnl" style="font-size:1.4rem;font-weight:700;">--</div>
+  </div>
+  <div>
+    <div style="font-size:.75rem;color:var(--text2);">Open Positions</div>
+    <div id="pos-count" style="font-size:1.4rem;font-weight:700;text-align:right;">--</div>
+  </div>
+</div>
+
+<div id="pos-status" class="card glass" style="margin-bottom:1rem;">Loading positions...</div>
+
+<div id="positions-list" style="display:flex;flex-direction:column;gap:.75rem;"></div>
+
+<style>
+.pos-card { border-radius:10px; padding:1rem; background:rgba(255,255,255,.03); border:1px solid var(--border); }
+.pos-card.profit { border-left:4px solid var(--green); }
+.pos-card.loss { border-left:4px solid var(--red); }
+.pos-card.sl-hit { box-shadow:0 0 0 1px var(--red); }
+.pos-row-top { display:flex; justify-content:space-between; flex-wrap:wrap; gap:.5rem; }
+.pos-symbol { font-weight:700; font-size:1.05rem; }
+.pos-meta { font-size:.8rem; color:var(--text2); }
+.pos-pnl { font-size:1.1rem; font-weight:700; }
+.pos-actions { margin-top:.6rem; display:flex; gap:.5rem; align-items:center; }
+.sl-alert { color:var(--red); font-size:.78rem; font-weight:700; margin-top:.3rem; }
+.ai-tag { font-size:.75rem; padding:.2rem .6rem; border-radius:12px; background:rgba(64,196,255,.12); color:var(--primary); }
+.btn-danger { background:var(--red); color:#fff; border:none; border-radius:6px; cursor:pointer; }
+#pos-status.error { color:#ff6b6b; }
+</style>
+
+<script>
+function loadPositions() {
+  $('#pos-status').show().removeClass('error').text('Loading positions...');
+
+  $.get('/api/portfolio/positions')
+    .done(function(d) {
+      var positions = d.positions || [];
+      $('#total-pnl').text(fmtPnl(d.total_pnl)).css('color', d.total_pnl >= 0 ? 'var(--green)' : 'var(--red)');
+      $('#pos-count').text(d.count || 0);
+
+      if (!positions.length) {
+        $('#pos-status').show().text('இப்போது எந்த open position-உம் இல்லை.');
+        $('#positions-list').html('');
+        return;
+      }
+
+      $('#pos-status').hide();
+      $('#positions-list').html(positions.map(renderPosition).join(''));
+    })
+    .fail(function(xhr) {
+      var msg = 'Positions load ஆகவில்லை';
+      try { msg = JSON.parse(xhr.responseText).detail; } catch(e) {}
+      $('#pos-status').addClass('error').text('⚠ ' + msg);
+    });
+}
+
+function renderPosition(p) {
+  var cls   = p.status === 'PROFIT' ? 'profit' : p.status === 'LOSS' ? 'loss' : '';
+  var slCls = p.stop_loss_hit ? 'sl-hit' : '';
+  return '<div class="pos-card ' + cls + ' ' + slCls + '">' +
+    '<div class="pos-row-top">' +
+      '<div>' +
+        '<div class="pos-symbol">' + esc(p.symbol) + '</div>' +
+        '<div class="pos-meta">' + esc(p.side) + ' • Qty: ' + p.quantity + ' • LTP: ' + p.ltp + ' • Avg: ' + p.avg_price + '</div>' +
+      '</div>' +
+      '<div style="text-align:right;">' +
+        '<div class="pos-pnl" style="color:' + (p.pnl >= 0 ? 'var(--green)' : 'var(--red)') + ';">' + fmtPnl(p.pnl) + '</div>' +
+        '<div class="pos-meta">' + esc(p.status) + '</div>' +
+      '</div>' +
+    '</div>' +
+    (p.stop_loss_hit ? '<div class="sl-alert">🚨 Stop-loss level அடைந்துவிட்டது — square off பரிசீலிக்கவும்</div>' : '') +
+    '<div class="pos-actions">' +
+      '<span class="ai-tag">🤖 ' + esc(p.ai_suggestion) + '</span>' +
+      '<button class="btn btn-danger" style="font-size:.75rem;padding:.3rem .8rem;margin-left:auto;" onclick="squareOff(\'' + esc(p.symbol) + '\')">Square Off</button>' +
+    '</div>' +
+  '</div>';
+}
+
+function fmtPnl(v) {
+  v = Number(v || 0);
+  return (v >= 0 ? '+₹' : '-₹') + Math.abs(v).toLocaleString('en-IN', {maximumFractionDigits:2});
+}
+
+function esc(s) {
+  return $('<div>').text(s == null ? '' : s).html();
+}
+
+function squareOff(symbol) {
+  if (!confirm(symbol + ' position-ஐ square off பண்ணலாமா?')) return;
+  $.post('/api/portfolio/positions/square-off/' + symbol)
+    .done(function() {
+      alert('Square off request அனுப்பப்பட்டது.');
+      loadPositions();
+    })
+    .fail(function(xhr) {
+      var msg = 'Square off ஆகவில்லை';
+      try { msg = JSON.parse(xhr.responseText).detail; } catch(e) {}
+      alert('⚠ ' + msg);
+    });
+}
+
+$(document).ready(function() {
+  loadPositions();
+  setInterval(loadPositions, 15000); // 15 வினாடிக்கு ஒருமுறை auto-refresh
+});
+</script>
+{% endblock %}

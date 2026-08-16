@@ -1,0 +1,73 @@
+# Render Blueprint — lets you deploy this whole app by clicking
+# "New +" → "Blueprint" in the Render dashboard and pointing it at your
+# GitHub repo, instead of configuring every field by hand.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Review #16/#17: Render's free WEB SERVICE disk is ephemeral — anything
+# written to SQLite under ./data is wiped on every redeploy/restart, so
+# Accuracy/OI history kept resetting no matter how well the background
+# collector worked. Fix: a managed Postgres database block below, wired to
+# the web service via DATABASE_URL — Render provisions this automatically
+# from this Blueprint (no manual dashboard step needed), and
+# requirements.txt now installs asyncpg unconditionally so the connection
+# actually works the first time (review #17's exact complaint).
+databases:
+  - name: ai-nifty-db
+    plan: free      # Render's free Postgres — fine for this app's volume;
+                     # upgrade if signal frequency/retention grows a lot.
+    region: singapore
+
+services:
+  - type: web
+    name: ai-nifty-analyzer
+    runtime: python
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /
+    envVars:
+      - key: ENV
+        value: production
+      - key: AI_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false      # set manually in the Render dashboard — never commit real keys
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: SQLITE_DB_PATH
+        value: ./data/analyzer.db   # only used as a fallback if DATABASE_URL below is ever removed
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ai-nifty-db
+          property: connectionString
+      - key: CACHE_TTL
+        value: "60"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_FILE
+        value: ./logs/app.log
+      - key: CORS_ALLOWED_ORIGINS
+        value: "*"       # auto-narrowed to RENDER_EXTERNAL_URL at startup — see app/config.py.
+                          # Only needed as an explicit domain list for a non-Render host or a
+                          # separately-hosted frontend calling this API cross-origin.
+      - key: API_RATE_LIMIT_PER_MINUTE
+        value: "60"
+      # Background history collector (Accuracy page needs this running
+      # continuously, not just while a browser tab is open) — see
+      # app/services/history_collector.py. Set to "0" to disable.
+      - key: HISTORY_COLLECTOR_INTERVAL_MINUTES
+        value: "5"
+      - key: HISTORY_COLLECTOR_SYMBOLS
+        value: "NIFTY,BANKNIFTY,FINNIFTY"
+    # NOTE: Render's free web service disk is EPHEMERAL — anything written to
+    # ./data or ./logs is wiped on every redeploy/restart. Uncomment the disk
+    # block below (requires a paid plan) if you need the SQLite DB to persist,
+    # or better: migrate to Render's managed Postgres (see DEPLOYMENT.md).
+    # disk:
+    #   name: ai-nifty-data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1

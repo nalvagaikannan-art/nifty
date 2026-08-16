@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Option Setup — AI NIFTY{% endblock %}
+{% block content %}
+
+<div class="page-header">
+    <h2>🎯 Option Setup</h2>
+    <div class="sym-tabs">
+        <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
+        <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
+        <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+    </div>
+</div>
+
+<!-- ATM Summary -->
+<div class="card" style="margin-bottom:1rem;text-align:center;">
+    <div id="atmBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<!-- CE / PE Candidates -->
+<div class="card" style="margin-bottom:1rem;">
+    <h3>Best Candidates</h3>
+    <div id="candidatesBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<!-- Filter tabs -->
+<div class="page-header" style="margin-top:0.5rem;">
+    <div class="sym-tabs">
+        <button class="sym-tab active" data-range="5">ATM ±5</button>
+        <button class="sym-tab" data-range="10">ATM ±10</button>
+        <button class="sym-tab" data-range="full">Full Chain</button>
+    </div>
+</div>
+
+<!-- Chain table -->
+<div class="card">
+    <h3>Option Chain</h3>
+    <div id="chainBody" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+</div>
+
+<div id="errorBanner" style="display:none;" class="card">
+    <div class="error-msg">⚠️ Option chain temporarily கிடைக்கவில்லை.</div>
+    <button id="retryBtn" class="sym-tab" style="margin-top:0.5rem;">🔄 Retry</button>
+</div>
+
+<script>
+let curSym = 'NIFTY';
+let curRange = 5;
+let lastChain = null;
+
+function num(v) { return v ? Number(v).toLocaleString('en-IN') : '—'; }
+
+function renderAtm(data) {
+    const atm = data.oi_summary && data.oi_summary.atm_strike ? data.oi_summary.atm_strike : data.underlying_price;
+    const callRes = data.oi_summary ? data.oi_summary.ce_max_oi_strike : null;
+    const putSup = data.oi_summary ? data.oi_summary.pe_max_oi_strike : null;
+    $('#atmBody').html(
+        '<div style="font-size:0.85rem;color:var(--text2);">ATM Strike</div>' +
+        '<div style="font-size:1.8rem;font-weight:700;color:var(--primary);">' + num(atm) + '</div>' +
+        '<div style="margin-top:0.6rem;font-size:0.88rem;text-align:left;display:inline-block;">' +
+            (putSup ? ('<div class="td-green">🟢 Strong Put Support — ' + num(putSup) + '</div>') : '') +
+            (callRes ? ('<div class="td-red">🔴 Strong Call Resistance — ' + num(callRes) + '</div>') : '') +
+            '<div class="td-neutral">🟡 Max Pain — ' + num(data.max_pain) + '</div>' +
+        '</div>'
+    );
+}
+
+function candidateCard(c, side) {
+    if (!c) return '<div class="stat-box"><div class="stat-label">' + side + '</div><div class="stat-value">Data Unavailable</div></div>';
+    const icon = side === 'CALL' ? '🟢' : '🔴';
+    const riskCls = c.risk === 'Low' ? 'td-green' : c.risk === 'Medium' ? 'td-neutral' : 'td-red';
+    return (
+        '<div class="card" style="margin-bottom:0.6rem;">' +
+        '<div style="font-weight:700;">' + icon + ' ' + side + ' — ' + num(c.strike) + (side==='CALL'?' CE':' PE') + '</div>' +
+        '<div class="stat-grid" style="margin-top:0.5rem;">' +
+            '<div class="stat-box"><div class="stat-label">LTP</div><div class="stat-value">₹' + num(c.ltp) + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">OI</div><div class="stat-value">' + num(c.oi) + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">Volume</div><div class="stat-value">' + num(c.volume) + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">OI Change</div><div class="stat-value ' + (c.oi_change>=0?'td-green':'td-red') + '">' + (c.oi_change>=0?'+':'') + num(c.oi_change) + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">Risk</div><div class="stat-value ' + riskCls + '">' + c.risk + '</div></div>' +
+            '<div class="stat-box"><div class="stat-label">Score</div><div class="stat-value">' + c.score + '/100</div></div>' +
+        '</div>' +
+        '<div style="font-size:0.72rem;color:var(--text2);margin-top:0.4rem;">' + c.score_basis + '</div>' +
+        '</div>'
+    );
+}
+
+function renderCandidates(data) {
+    const c = data.candidates || {};
+    $('#candidatesBody').html(candidateCard(c.ce, 'CALL') + candidateCard(c.pe, 'PUT'));
+}
+
+function renderChain(data, range) {
+    const rows = data.data || [];
+    const atm = data.oi_summary && data.oi_summary.atm_strike ? data.oi_summary.atm_strike : data.underlying_price;
+    let filtered = rows;
+    if (range !== 'full') {
+        const n = Number(range);
+        filtered = rows.filter(r => Math.abs((r.strike - atm) / 50) <= n);
+    }
+    if (!filtered.length) {
+        $('#chainBody').html('<div class="error-msg">⚠ Data Unavailable</div>');
+        return;
+    }
+    let html = '<div style="overflow-x:auto;"><table style="width:100%;font-size:0.78rem;border-collapse:collapse;">' +
+        '<thead><tr style="color:var(--text2);"><th style="text-align:right;padding:4px;">CE OI</th><th style="text-align:right;padding:4px;">CE LTP</th>' +
+        '<th style="text-align:center;padding:4px;">Strike</th>' +
+        '<th style="text-align:left;padding:4px;">PE LTP</th><th style="text-align:left;padding:4px;">PE OI</th></tr></thead><tbody>';
+    filtered.forEach(r => {
+        const isAtm = Math.abs(r.strike - atm) < 25;
+        html += '<tr style="' + (isAtm ? 'background:rgba(64,196,255,0.08);font-weight:700;' : '') + '">' +
+            '<td style="text-align:right;padding:4px;" class="td-green">' + num(r.ce_oi) + '</td>' +
+            '<td style="text-align:right;padding:4px;">' + num(r.ce_ltp) + '</td>' +
+            '<td style="text-align:center;padding:4px;color:var(--primary);">' + num(r.strike) + '</td>' +
+            '<td style="text-align:left;padding:4px;">' + num(r.pe_ltp) + '</td>' +
+            '<td style="text-align:left;padding:4px;" class="td-red">' + num(r.pe_oi) + '</td>' +
+            '</tr>';
+    });
+    html += '</tbody></table></div>';
+    $('#chainBody').html(html);
+}
+
+function loadOptionView(sym) {
+    $('#errorBanner').hide();
+    $.get('/api/options/' + sym).done(function(data) {
+        lastChain = data;
+        renderAtm(data);
+        renderCandidates(data);
+        renderChain(data, curRange);
+    }).fail(function() {
+        $('#errorBanner').show();
+    });
+}
+
+$(document).ready(function() {
+    loadOptionView(curSym);
+    $('.sym-tabs').eq(0).find('.sym-tab').on('click', function() {
+        $(this).siblings().removeClass('active');
+        $(this).addClass('active');
+        curSym = $(this).data('sym');
+        loadOptionView(curSym);
+    });
+    $('.sym-tabs').eq(1).find('.sym-tab').on('click', function() {
+        $(this).siblings().removeClass('active');
+        $(this).addClass('active');
+        curRange = $(this).data('range');
+        if (lastChain) renderChain(lastChain, curRange);
+    });
+    $('#retryBtn').on('click', function() { loadOptionView(curSym); });
+});
+</script>
+{% endblock %}

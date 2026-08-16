@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+{% block title %}Settings — NIFTY AI{% endblock %}
+{% block content %}
+
+<div class="page-header"><h2>⚙️ Settings</h2></div>
+
+<div style="max-width:560px;">
+
+    <!-- Angel One Login -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:1rem;">🔐 Angel One SmartAPI</h3>
+        <div id="angel-status-box" style="margin-bottom:1rem;padding:.75rem 1rem;border-radius:8px;background:rgba(255,255,255,0.05);border:1px solid var(--border);font-size:.85rem;">
+            <span class="spinner"></span> Checking...
+        </div>
+        <div class="settings-form">
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="a-apikey" placeholder="Angel One API Key">
+            </div>
+            <div class="form-group">
+                <label>Client ID</label>
+                <input type="text" id="a-clientid" placeholder="Your Client ID (e.g. A12345)">
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" id="a-password" placeholder="Angel One login password">
+            </div>
+            <div class="form-group">
+                <label>TOTP Secret</label>
+                <input type="password" id="a-totp" placeholder="Base32 TOTP secret (Google Authenticator)">
+                <small style="color:var(--text2);font-size:.75rem;">Angel One app → Profile → Enable TOTP → copy secret key</small>
+            </div>
+        </div>
+        <div style="display:flex;gap:.75rem;margin-top:1rem;flex-wrap:wrap;">
+            <button class="btn btn-primary" onclick="saveAngelCreds()">💾 Save Credentials</button>
+            <button class="btn btn-ghost" id="angel-login-btn" onclick="angelLogin()">🔑 Login Now</button>
+            <button class="btn btn-ghost" id="angel-logout-btn" onclick="angelLogout()" style="display:none;">🚪 Logout</button>
+        </div>
+        <div id="angel-msg" style="margin-top:.75rem;font-size:.85rem;display:none;"></div>
+    </div>
+
+    <!-- Zerodha Kite Connect (second broker — read-only status; Kite's login
+         is a browser-redirect OAuth flow, not a username/password form, so
+         it's configured via .env + a separate daily login script rather
+         than in-app fields the way Angel One's TOTP login is above. See
+         .env.example and app/services/zerodha.py for setup steps. -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:1rem;">🟠 Zerodha Kite Connect <span style="font-size:.7rem;color:var(--text2);font-weight:400;">(optional 2nd broker)</span></h3>
+        <div id="zerodha-status-box" style="margin-bottom:.5rem;padding:.75rem 1rem;border-radius:8px;background:rgba(255,255,255,0.05);border:1px solid var(--border);font-size:.85rem;">
+            <span class="spinner"></span> Checking...
+        </div>
+        <div style="font-size:.78rem;color:var(--text2);">
+            Configured via <code>KITE_API_KEY</code> / <code>KITE_API_SECRET</code> / <code>KITE_ACCESS_TOKEN</code> in <code>.env</code> —
+            Kite's login is a one-time-per-day browser redirect, not a saved password, so there's no form here.
+            See <code>.env.example</code> and <code>app/services/zerodha.py</code> for the exact steps.
+            Used automatically as a fallback when Angel One is unconfigured or a call to it fails.
+        </div>
+    </div>
+
+    <!-- AI Provider -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:1rem;">AI Provider</h3>
+        <div class="settings-form">
+            <div class="form-group">
+                <label>Provider</label>
+                <select id="s-provider">
+                    <option value="gemini">Gemini (Google)</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>API Key</label>
+                <input type="password" id="s-apikey" placeholder="Enter API key">
+            </div>
+        </div>
+    </div>
+
+    <!-- Cache & Rate -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:1rem;">Performance</h3>
+        <div class="settings-form">
+            <div class="form-group">
+                <label>Cache TTL (seconds)</label>
+                <input type="number" id="s-cache" placeholder="60" min="10" max="300">
+            </div>
+            <div class="form-group">
+                <label>Rate Limit (requests / min)</label>
+                <input type="number" id="s-ratelimit" placeholder="60" min="10" max="300">
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Config (read-only) -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:.75rem;">Current Config</h3>
+        <div id="cfg-data" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <!-- Data Source Health -->
+    <div class="card" style="margin-bottom:1rem;">
+        <h3 style="margin-bottom:.75rem;">📡 Data Source Health</h3>
+        <div style="font-size:0.8rem;color:var(--text2);margin-bottom:0.6rem;">
+            NSE/Angel One block rate over this process's last ~50 calls — an early signal of IP/session blocking.
+        </div>
+        <div id="health-data" class="loading-pulse"><span class="spinner"></span> Loading...</div>
+    </div>
+
+    <div style="display:flex;gap:0.75rem;flex-wrap:wrap;">
+        <button class="btn btn-primary" onclick="saveSettings()">💾 Save</button>
+        <button class="btn btn-ghost" onclick="loadConfig()">🔄 Reload</button>
+    </div>
+
+    <div id="save-msg" style="margin-top:.75rem;font-size:.85rem;display:none;"></div>
+</div>
+
+<script>
+// ── Angel One ──────────────────────────────────────────────────────────
+function loadAngelStatus() {
+    $.get('/api/angel/status', function(d) {
+        var box = $('#angel-status-box');
+        if (!d.configured) {
+            box.html('⚠️ <b>Not configured</b> — Below-ல் credentials enter செய்யவும்.')
+               .css('border-color','rgba(255,215,64,.4)');
+            $('#angel-login-btn').hide();
+            $('#angel-logout-btn').hide();
+        } else if (d.logged_in) {
+            box.html('✅ <b>Logged in</b> — Client: ' + d.client_id +
+                     ' &nbsp;|&nbsp; Session age: ' + d.session_age_minutes + ' min')
+               .css('border-color','rgba(0,230,118,.4)');
+            $('#angel-login-btn').hide();
+            $('#angel-logout-btn').show();
+        } else {
+            box.html('🔴 <b>Configured but not logged in</b> — Client: ' + d.client_id)
+               .css('border-color','rgba(255,82,82,.35)');
+            $('#angel-login-btn').show();
+            $('#angel-logout-btn').hide();
+        }
+    }).fail(function() {
+        $('#angel-status-box').html('⚠️ Status check failed');
+    });
+}
+
+function saveAngelCreds() {
+    var payload = {
+        angel_api_key:     $('#a-apikey').val().trim(),
+        angel_client_id:   $('#a-clientid').val().trim(),
+        angel_password:    $('#a-password').val().trim(),
+        angel_totp_secret: $('#a-totp').val().trim()
+    };
+    if (!payload.angel_api_key && !payload.angel_client_id) {
+        showAngelMsg('⚠ Credentials fill செய்யவும்', 'td-red'); return;
+    }
+    $.ajax({
+        url: '/api/settings/angel',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(payload),
+        success: function() {
+            showAngelMsg('✅ Saved — இப்போது Login click செய்யவும்', 'td-green');
+            setTimeout(loadAngelStatus, 500);
+        },
+        error: function(xhr) {
+            // .env write supported இல்லாவிட்டால் manual instruction காட்டு
+            var msg = '';
+            try { msg = JSON.parse(xhr.responseText).detail; } catch(e) {}
+            if (xhr.status === 501 || msg.includes('manual')) {
+                showAngelMsg('📋 .env file-ல் manually சேர்க்கவும் — கீழே copy செய்யவும்', 'td-yellow');
+                showEnvHint(payload);
+            } else {
+                showAngelMsg('⚠ ' + (msg || 'Save failed'), 'td-red');
+            }
+        }
+    });
+}
+
+function showEnvHint(p) {
+    var hint = '.env file-ல் இதை சேர்க்கவும்:\n\n'
+        + 'ANGEL_API_KEY=' + (p.angel_api_key || 'your_api_key') + '\n'
+        + 'ANGEL_CLIENT_ID=' + (p.angel_client_id || 'your_client_id') + '\n'
+        + 'ANGEL_PASSWORD=' + (p.angel_password || 'your_password') + '\n'
+        + 'ANGEL_TOTP_SECRET=' + (p.angel_totp_secret || 'your_totp_secret');
+    var pre = $('<pre>').css({
+        background:'rgba(255,255,255,.05)', padding:'1rem', borderRadius:'8px',
+        fontSize:'.78rem', color:'var(--text)', overflowX:'auto', marginTop:'.75rem',
+        userSelect:'all'
+    }).text(hint);
+    $('#angel-msg').after(pre);
+}
+
+function angelLogin() {
+    $('#angel-login-btn').prop('disabled', true).text('Logging in...');
+    $.ajax({
+        url: '/api/angel/login', method: 'POST',
+        success: function(d) {
+            showAngelMsg('✅ Login successful — ' + d.client_id, 'td-green');
+            loadAngelStatus();
+        },
+        error: function(xhr) {
+            var msg = ''; try { msg = JSON.parse(xhr.responseText).detail; } catch(e) {}
+            showAngelMsg('⚠ Login failed: ' + msg, 'td-red');
+        },
+        complete: function() { $('#angel-login-btn').prop('disabled', false).text('🔑 Login Now'); }
+    });
+}
+
+function angelLogout() {
+    $.ajax({
+        url: '/api/angel/logout', method: 'POST',
+        success: function() {
+            showAngelMsg('✅ Logged out', 'td-green');
+            loadAngelStatus();
+        }
+    });
+}
+
+function showAngelMsg(msg, cls) {
+    $('#angel-msg').attr('class', cls).text(msg).show();
+    setTimeout(function() { $('#angel-msg').hide(); }, 4000);
+}
+
+// ── Settings ────────────────────────────────────────────────────────────
+function loadConfig() {
+    $('#cfg-data').html('<span class="loading-pulse"><span class="spinner"></span> Loading...</span>');
+    $.get('/api/settings/config', function(d) {
+        // Pre-fill form
+        if (d.ai_provider) $('#s-provider').val(d.ai_provider);
+        if (d.cache_ttl)   $('#s-cache').val(d.cache_ttl);
+        if (d.rate_limit)  $('#s-ratelimit').val(d.rate_limit);
+        // Show sanitised config
+        var safe = Object.assign({}, d);
+        ['api_key','gemini_api_key','openai_api_key','deepseek_api_key'].forEach(function(k) {
+            if (safe[k]) safe[k] = '••••••••';
+        });
+        $('#cfg-data').html('<pre style="font-size:.78rem;color:var(--text2);overflow-x:auto;">' + JSON.stringify(safe, null, 2) + '</pre>');
+
+        if (d.zerodha_configured) {
+            $('#zerodha-status-box').html('🟢 <b>Configured</b> — used as fallback if Angel One is unconfigured/fails.');
+        } else {
+            $('#zerodha-status-box').html('⚪ Not configured — set KITE_API_KEY / KITE_API_SECRET / KITE_ACCESS_TOKEN in .env to enable. App works fine without it (falls through to NSE as before).');
+        }
+    }).fail(function() {
+        $('#cfg-data').html('<div class="error-msg">Could not load config</div>');
+        $('#zerodha-status-box').html('<div class="error-msg">Could not load status</div>');
+    });
+}
+
+function saveSettings() {
+    var payload = {
+        ai_provider: $('#s-provider').val(),
+        cache_ttl: parseInt($('#s-cache').val()) || undefined,
+        rate_limit: parseInt($('#s-ratelimit').val()) || undefined
+    };
+    var key = $('#s-apikey').val().trim();
+    if (key) payload.api_key = key;
+
+    $.ajax({
+        url: '/api/settings/config',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify(payload),
+        success: function(d) {
+            showMsg('✅ Saved successfully', 'td-green');
+            loadConfig();
+        },
+        error: function(xhr) {
+            var msg = '⚠ Save failed';
+            try { msg = '⚠ ' + JSON.parse(xhr.responseText).detail; } catch(e) {}
+            showMsg(msg, 'td-red');
+        }
+    });
+}
+
+function showMsg(msg, cls) {
+    $('#save-msg').attr('class', cls).text(msg).show();
+    setTimeout(function() { $('#save-msg').hide(); }, 3000);
+}
+
+$(document).ready(function() {
+    loadAngelStatus();
+    loadConfig();
+    loadHealth();
+    setInterval(loadHealth, 30000);
+});
+
+function loadHealth() {
+    $.get('/api/settings/health', function(d) {
+        var sources = d.sources || {};
+        var keys = Object.keys(sources);
+        if (!keys.length) {
+            $('#health-data').html('<div style="color:var(--text2);font-size:0.85rem;">No calls tracked yet this session.</div>');
+            return;
+        }
+        var rows = keys.map(function(k) {
+            var s = sources[k];
+            var rate = s.block_rate;
+            var rateTxt = (rate === null || rate === undefined) ? '—' : (rate * 100).toFixed(0) + '%';
+            var cls = (rate === null || rate === undefined) ? 'td-neutral' : (rate >= 0.3 ? 'td-red' : rate >= 0.1 ? 'td-yellow' : 'td-green');
+            return '<tr>' +
+                '<td style="padding:0.35rem 0.6rem;">' + k + '</td>' +
+                '<td style="padding:0.35rem 0.6rem;">' + (s.calls_tracked || 0) + '</td>' +
+                '<td style="padding:0.35rem 0.6rem;" class="' + cls + '">' + rateTxt + '</td>' +
+                '<td style="padding:0.35rem 0.6rem;color:var(--text2);">' + (s.last_outcome || '—') + ' · ' + (s.last_outcome_age_seconds !== undefined ? s.last_outcome_age_seconds + 's ago' : '—') + '</td>' +
+                '</tr>';
+        }).join('');
+        $('#health-data').html(
+            '<table style="width:100%;font-size:0.85rem;border-collapse:collapse;">' +
+            '<thead><tr style="color:var(--text2);text-align:left;">' +
+            '<th style="padding:0.35rem 0.6rem;">Source</th><th style="padding:0.35rem 0.6rem;">Calls</th>' +
+            '<th style="padding:0.35rem 0.6rem;">Block Rate</th><th style="padding:0.35rem 0.6rem;">Last</th></tr></thead>' +
+            '<tbody>' + rows + '</tbody></table>' +
+            (d.alert_webhook_configured ? '' : '<div style="margin-top:0.5rem;font-size:0.78rem;color:var(--text2);">Set ALERT_WEBHOOK_URL to get a webhook notification when block rate crosses 30%.</div>')
+        );
+    }).fail(function() {
+        $('#health-data').html('<div class="error-msg">Could not load health data</div>');
+    });
+}
+</script>
+{% endblock %}
