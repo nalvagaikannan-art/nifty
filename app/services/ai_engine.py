@@ -44,11 +44,20 @@ class AIEngine:
         order  += [p for p in self.PRIORITY if p not in order and self.keys.get(p)]
         if not GEMINI_ENABLED and "gemini" in order:
             order.remove("gemini")
-        if not order:
-            raise AIProviderError("No AI provider API key configured")
+        # BUG FIX (2026-08-17): previously raised AIProviderError right here
+        # in __init__ when no key was configured. get_ai_engine() (deps.py)
+        # constructs AIEngine() as a FastAPI Depends() — that resolves BEFORE
+        # the route function body runs, so this raise happened outside every
+        # route's try/except around `ai.analyze_market(...)`, producing an
+        # "Unhandled AIProviderError" -> 503 instead of the intended
+        # rule-engine-only fallback. Fix: store the empty order and defer the
+        # error to analyze_market() (call time), which every caller already
+        # wraps in try/except AIProviderError.
         self.order = order
 
     async def analyze_market(self, market_data: Dict) -> Dict:
+        if not self.order:
+            raise AIProviderError("No AI provider API key configured")
         decision = market_data.get("decision", {})
         prompt   = self._build_prompt(market_data, decision)
 
