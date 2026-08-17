@@ -23,18 +23,28 @@ Dev rule compliance:
 
 import asyncio
 import logging
+import re
 from typing import Dict, Optional
 
 import httpx
+from curl_cffi.requests import AsyncSession as CurlAsyncSession
 
 logger = logging.getLogger(__name__)
 
 # symbol -> (Yahoo ticker, display name, category)
-# Gift Nifty note: Yahoo does not publish an official free real-time feed
-# for NSE IX's Gift Nifty contract under a stable public ticker. Rather than
-# fabricate a number, we surface it as "unavailable" unless Angel One (which
-# IS configured with real broker credentials elsewhere in this app) is later
-# wired up for it. See get_snapshot()'s gift_nifty handling below.
+# Gift Nifty note (updated 2026-08-17): Yahoo does not publish an official
+# free real-time feed for NSE IX's Gift Nifty contract under a stable public
+# ticker, and Angel One's SmartAPI only covers NSE/NFO/BSE/BFO/MCX/CDS — not
+# NSE IX, where Gift Nifty actually trades. investing.com's quote page for
+# it (in.investing.com/indices/gift-nifty-50-c1-futures) DOES server-render
+# the current price and previous close as plain text (confirmed by manual
+# fetch), so that's used as a best-effort fallback source — see
+# _fetch_gift_nifty() below. This is a numeric-only scrape (just price and
+# prev_close, nothing textual/analytical from the page) using the same
+# curl_cffi browser-impersonation technique already proven against NSE in
+# data_fetcher.py. NOTE: investing.com's ToS prohibits programmatic
+# reproduction of their data without permission — fine for personal/internal
+# use, but worth knowing if this is ever exposed publicly or commercially.
 _TICKERS = {
     "dow_futures":     ("YM=F",       "Dow Futures",       "index_futures"),
     "nasdaq_futures":  ("NQ=F",       "Nasdaq Futures",    "index_futures"),
@@ -52,6 +62,11 @@ _TICKERS = {
     "usdinr":          ("INR=X",      "USD/INR",           "currency"),
     "us_bond_yield":   ("^TNX",       "US 10Y Bond Yield", "bond"),
 }
+
+_GIFT_NIFTY_URL       = "https://in.investing.com/indices/gift-nifty-50-c1-futures"
+_GIFT_PRICE_RE        = re.compile(r"current Gift Nifty 50 Futures price is ([\d,]+\.?\d*)", re.IGNORECASE)
+_GIFT_PREV_CLOSE_RE   = re.compile(r"Prev\.\s*Close\s*\n\s*([\d,]+\.?\d*)")
+_GIFT_IMPERSONATE     = "chrome131"  # same technique as data_fetcher.py's NSE session
 
 # Symbols that feed the aggregate "global_change_pct" cue consumed by
 # decision_engine._score_global() — the broad overnight-cue basket, not
@@ -105,6 +120,41 @@ class GlobalMarketService:
             logger.debug(f"Global market fetch failed for {yahoo_symbol}: {e}")
             return None
 
+    async def _fetch_gift_nifty(self) -> Optional[Dict]:
+        """Best-effort GIFT Nifty fetch via investing.com's server-rendered
+        quote page — see the module-level comment above _TICKERS for why
+        this exists and its caveats. Extracts ONLY the current price and
+        previous close (two numbers) via anchored regex; never touches any
+        of the page's text/analysis/news content. Returns None (→
+        'unavailable') on any HTTP error, missing match, or parse failure —
+        a page-layout change on investing.com's side degrades gracefully
+        instead of crashing the global-market panel."""
+        try:
+            async with CurlAsyncSession(impersonate=_GIFT_IMPERSONATE, timeout=8.0) as session:
+                resp = await session.get(_GIFT_NIFTY_URL)
+            if resp.status_code != 200:
+                logger.debug(f"GIFT Nifty fetch got HTTP {resp.status_code}")
+                return None
+            html = resp.text
+            price_m = _GIFT_PRICE_RE.search(html)
+            prev_m  = _GIFT_PREV_CLOSE_RE.search(html)
+            if not price_m or not prev_m:
+                logger.debug("GIFT Nifty page fetched but price/prev-close pattern not found (layout change?)")
+                return None
+            price = float(price_m.group(1).replace(",", ""))
+            prev  = float(prev_m.group(1).replace(",", ""))
+            if prev == 0:
+                return None
+            change_pct = ((price - prev) / prev) * 100
+            return {
+                "price":          round(price, 2),
+                "prev_close":     round(prev, 2),
+                "change_percent": round(change_pct, 2),
+            }
+        except Exception as e:
+            logger.debug(f"GIFT Nifty fetch failed: {e}")
+            return None
+
     async def get_snapshot(self) -> Dict:
         """
         Fetches all tracked global instruments concurrently.
@@ -118,7 +168,10 @@ class GlobalMarketService:
           }
         """
         keys = list(_TICKERS.keys())
-        results = await asyncio.gather(*[self._fetch_one(_TICKERS[k][0]) for k in keys])
+        results, gift_result = await asyncio.gather(
+            asyncio.gather(*[self._fetch_one(_TICKERS[k][0]) for k in keys]),
+            self._fetch_gift_nifty(),
+        )
 
         instruments = {}
         for key, res in zip(keys, results):
@@ -137,12 +190,9 @@ class GlobalMarketService:
 
         return {
             "instruments":           instruments,
-            # Gift Nifty: no free public feed available (see module docstring).
-            # Deliberately None rather than reusing SGX/global average as a
-            # stand-in — that would be exactly the "false signal" the spec's
-            # dev rules prohibit.
-            "gift_nifty_change_pct": None,
-            "gift_nifty_status":     "unavailable_no_free_source",
+            "gift_nifty_change_pct": gift_result["change_percent"] if gift_result else None,
+            "gift_nifty_price":      gift_result["price"] if gift_result else None,
+            "gift_nifty_status":     "investing_com" if gift_result else "unavailable_fetch_failed",
             "global_change_pct":     global_change_pct,
             "source":                "yahoo_finance",
         }
