@@ -776,8 +776,16 @@ class DataFetcher:
             raise MarketDataError(f"No option chain rows for expiry {expiry}")
 
         def _parse_expiry_date(e):
-            e2 = e.strip().title()
-            for fmt in ("%d%b%Y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d"):
+            import re as _re
+            e2 = e.strip()
+            # Handle 01SEP2026, 01Sep2026, 01-Sep-2026, 2026-09-01
+            m = _re.match(r"(\d{1,2})[-]?([A-Za-z]{3})[-]?(\d{4})", e2)
+            if m:
+                try:
+                    return datetime.strptime(f"{m.group(1)}{m.group(2).title()}{m.group(3)}", "%d%b%Y").date()
+                except Exception:
+                    pass
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
                 try:
                     return datetime.strptime(e2, fmt).date()
                 except ValueError:
