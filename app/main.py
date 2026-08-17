@@ -21,9 +21,23 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+class _HealthCheckFilter(logging.Filter):
+    """Drops uvicorn access-log lines for the bare health-check path '/' —
+    Render polls this every ~5s and it drowns out real request/app logs.
+    Real user traffic (e.g. GET /dashboard, GET /api/...) still logs normally."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not (' "GET / HTTP' in msg or ' "HEAD / HTTP' in msg)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    # Must run AFTER setup_logging() — if setup_logging() reconfigures
+    # uvicorn.access's handlers, a filter attached before that call could
+    # be dropped along with them.
+    logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
     logger.info("Starting AI NIFTY Option Analyzer Pro")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
