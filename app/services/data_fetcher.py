@@ -467,13 +467,37 @@ class DataFetcher:
         from_str = from_date.strftime("%Y-%m-%d 09:15")
         to_str   = to_date.strftime("%Y-%m-%d %H:%M")
 
-        try:
-            candles = await angel_session.get_candle_data(
-                symbol, interval=interval, from_date=from_str, to_date=to_str
-            )
-        except Exception as e:
-            logger.warning(f"Intraday OHLC ({interval}) fetch failed for {symbol} via Angel One: {e}")
-            return {"available": False, "reason": str(e)}
+        # BUG FIX (2026-08-17): this previously made exactly ONE attempt and
+        # gave up on any error, including Angel One's "Access denied because
+        # of exceeding access rate". get_intraday_ohlc() fans out to 3
+        # intervals x 3 symbols back-to-back (history_collector + dashboard
+        # loads), which reliably bursts past Angel One's per-second limit.
+        # _try_angel_historical() already had a 3-attempt backoff for this
+        # exact error family — reusing the same pattern here so intraday
+        # candles recover instead of immediately reporting "unavailable".
+        candles = None
+        for attempt in range(3):
+            try:
+                candles = await angel_session.get_candle_data(
+                    symbol, interval=interval, from_date=from_str, to_date=to_str
+                )
+                break
+            except Exception as e:
+                err = str(e).lower()
+                if any(x in err for x in ("too many", "ab1021", "rate", "access rate", "exceeding")):
+                    wait = (attempt + 1) * 3.0
+                    logger.warning(
+                        f"Angel One rate limit for {symbol} {interval} — "
+                        f"waiting {wait}s (attempt {attempt+1}/3)"
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    # Not a rate-limit error — retrying won't help, fail now.
+                    logger.warning(f"Intraday OHLC ({interval}) fetch failed for {symbol} via Angel One: {e}")
+                    return {"available": False, "reason": str(e)}
+        if candles is None:
+            # Exhausted all 3 rate-limit retries without success.
+            return {"available": False, "reason": "Angel One rate limit — exhausted retries"}
         if not candles:
             return {"available": False, "reason": "no candles returned"}
 
