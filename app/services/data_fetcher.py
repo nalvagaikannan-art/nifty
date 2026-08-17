@@ -265,7 +265,7 @@ class DataFetcher:
                 raw.get("all_expiries", []) if isinstance(raw, dict) else [],
                 key=lambda e: next(
                     (datetime.strptime(e.strip().title(), f).date()
-                     for f in ("%d-%b-%Y", "%d%b%Y", "%Y-%m-%d")),
+                     for f in ("%d-%b-%Y", "%d%b%Y", "%d-%b-%y", "%Y-%m-%d")),
                     datetime.max.date()
                 )
             ),
@@ -776,15 +776,12 @@ class DataFetcher:
             raise MarketDataError(f"No option chain rows for expiry {expiry}")
 
         def _parse_expiry_date(e):
-            e2 = e.strip()
-            for fmt in ("%d-%b-%Y", "%d%b%Y", "%Y-%m-%d"):
+            e2 = e.strip().title()
+            for fmt in ("%d%b%Y", "%d-%b-%Y", "%d-%b-%y", "%Y-%m-%d"):
                 try:
-                    return datetime.strptime(e2.title(), fmt).date()
+                    return datetime.strptime(e2, fmt).date()
                 except ValueError:
-                    try:
-                        return datetime.strptime(e2, fmt).date()
-                    except ValueError:
-                        continue
+                    continue
             return datetime.max.date()
         sorted_expiries = sorted(expiry_list, key=_parse_expiry_date)
         return {
