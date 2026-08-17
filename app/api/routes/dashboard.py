@@ -2,9 +2,38 @@ import asyncio
 from fastapi import APIRouter, Depends
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.history_service import save_market_snapshot
-from app.api.deps import get_analyzer
+from app.api.deps import get_analyzer, get_angel_session, get_ai_engine
+from app.services.angel_one import AngelOneSession
+from app.services.ai_engine import AIEngine
+from app.utils.helpers import is_market_hours_ist
 
 router = APIRouter()
+
+
+@router.get("/status")
+async def dashboard_status(
+    angel: AngelOneSession = Depends(get_angel_session),
+    ai: AIEngine = Depends(get_ai_engine),
+):
+    """Separate, honest status for the 3 things the dashboard's single
+    static 'LIVE' badge used to conflate: AI provider, Angel One broker
+    session, and whether the market is actually open right now. Each is
+    reported independently so the UI can show 'AI: down, Angel One: up,
+    Market: closed' instead of one misleading always-on 'LIVE' dot.
+    Best-effort: any attribute this app version doesn't have yet degrades
+    to False/unknown rather than 500ing the whole dashboard."""
+    try:
+        angel_connected = bool(getattr(angel, "is_configured", False))
+    except Exception:
+        angel_connected = False
+
+    return {
+        "ai_provider_configured": bool(ai.order),
+        "ai_providers_available": ai.order,
+        "angel_one_connected": angel_connected,
+        "market_open": is_market_hours_ist(),
+    }
+
 
 @router.get("/summary")
 async def dashboard_summary(analyzer: MarketAnalyzer = Depends(get_analyzer)):
