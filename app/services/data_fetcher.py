@@ -261,7 +261,14 @@ class DataFetcher:
         return {
             "symbol":           symbol.upper(),
             "expiry":           expiry or raw.get("expiry", "") if isinstance(raw, dict) else "",
-            "all_expiries":     _sort_expiries(raw.get("all_expiries", []) if isinstance(raw, dict) else []),
+            "all_expiries":     sorted(
+                raw.get("all_expiries", []) if isinstance(raw, dict) else [],
+                key=lambda e: next(
+                    (datetime.strptime(e.strip().title(), f).date()
+                     for f in ("%d-%b-%Y", "%d%b%Y", "%Y-%m-%d")),
+                    datetime.max.date()
+                )
+            ),
             "underlying_price": safe_float(raw.get("underlying_price", 0)) if isinstance(raw, dict) else 0,
             "data":             rows,
             "data_source":      "angel_one",
