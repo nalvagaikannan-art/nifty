@@ -22,7 +22,16 @@ logger = logging.getLogger(__name__)
 
 GEMINI_ENABLED = os.environ.get("GEMINI_ENABLED", "false").lower() == "true"
 _env_models = os.environ.get("GEMINI_MODELS", "")
-GEMINI_MODELS = [m.strip() for m in _env_models.split(",") if m.strip()] if _env_models else ["gemini-2.5-pro-preview-06-05"]
+# BUG FIX (2026-08-17): gemini-2.5-flash / gemini-2.5-pro-preview-06-05 now
+# return 404 "no longer available to new users" (Google blocking these for
+# recently-created API keys ahead of the Oct 16 2026 official shutdown —
+# see log: "AI provider gemini failed: Gemini failed: 404 This model
+# models/gemini-2.5-flash is no longer available to new users"). Current
+# recommended lightweight/fast tier is the 3.x Flash family — falls back
+# through 3.5-flash-lite -> 3.1-flash-lite -> 3.6-flash.
+GEMINI_MODELS = [m.strip() for m in _env_models.split(",") if m.strip()] if _env_models else [
+    "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.6-flash",
+]
 OPENAI_MODEL  = "gpt-4o-mini"
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_URL   = "https://api.deepseek.com/v1"
