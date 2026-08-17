@@ -564,7 +564,7 @@ class AngelOneSession:
         def _expiry_key(r):
             for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
                 try:
-                    return datetime.strptime(r["expiry"].strip().title(), fmt)
+                    return datetime.strptime(r["expiry"], fmt)
                 except ValueError:
                     continue
             return datetime.max

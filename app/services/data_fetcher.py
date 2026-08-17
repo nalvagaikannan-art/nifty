@@ -264,7 +264,7 @@ class DataFetcher:
             "all_expiries":     sorted(
                 raw.get("all_expiries", []) if isinstance(raw, dict) else [],
                 key=lambda e: next(
-                    (datetime.strptime(e.strip().title(), f).date()
+                    (datetime.strptime(e, f).date()
                      for f in ("%d-%b-%Y", "%d%b%Y", "%d-%b-%y", "%Y-%m-%d")),
                     datetime.max.date()
                 )
