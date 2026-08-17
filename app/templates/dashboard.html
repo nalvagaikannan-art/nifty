@@ -84,6 +84,9 @@
   display: inline-block;
   animation: ltpulse 1.8s infinite;
 }
+.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.lt-live-dot.unavail { color: var(--lt-red); }
+.lt-live-dot.unavail::before { background: var(--lt-red); animation: none; opacity: .6; }
 @keyframes ltpulse {
   0%,100%{ opacity:1; transform:scale(1); }
   50%{ opacity:.5; transform:scale(.85); }
@@ -736,7 +739,11 @@
   <header class="lt-header">
     <div class="lt-logo">NIFTY <span>AI</span></div>
     <div class="lt-header-right">
-      <span class="lt-live-dot" id="lt-live-badge">LIVE</span>
+      <span class="lt-status-group" id="lt-status-group" title="Click to refresh status">
+        <span class="lt-live-dot unavail" id="lt-status-ai">● AI</span>
+        <span class="lt-live-dot unavail" id="lt-status-angel">● Angel One</span>
+        <span class="lt-live-dot unavail" id="lt-status-market">● Market</span>
+      </span>
       <span class="lt-time" id="lt-clock">--:-- --</span>
       <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh()">↻ Refresh</button>
     </div>
@@ -1016,12 +1023,40 @@ function ltSetSym(btn, sym){
 }
 
 // ── Refresh ──
+// ── AI / Angel One / Market status badges (replaces the old always-on static 'LIVE' text) ──
+function ltUpdateStatus(){
+  fetch('/api/dashboard/status')
+    .then(function(r){ return r.json(); })
+    .then(function(s){
+      var ai = document.getElementById('lt-status-ai');
+      ai.className = 'lt-live-dot ' + (s.ai_provider_configured ? 'live' : 'unavail');
+      ai.textContent = '● AI' + (s.ai_provider_configured && s.ai_providers_available && s.ai_providers_available.length
+        ? ' (' + s.ai_providers_available[0] + ')' : '');
+
+      var angel = document.getElementById('lt-status-angel');
+      angel.className = 'lt-live-dot ' + (s.angel_one_connected ? 'live' : 'unavail');
+      angel.textContent = '● Angel One';
+
+      var mkt = document.getElementById('lt-status-market');
+      mkt.className = 'lt-live-dot ' + (s.market_open ? 'live' : 'unavail');
+      mkt.textContent = s.market_open ? '● Market Open' : '● Market Closed';
+    })
+    .catch(function(){
+      ['lt-status-ai','lt-status-angel','lt-status-market'].forEach(function(id){
+        var el = document.getElementById(id);
+        el.className = 'lt-live-dot unavail';
+      });
+    });
+}
+
 function ltRefresh(){
   if(ltLoading) return;
   ltLoading = true;
   var btn = document.getElementById('lt-ref-btn');
   btn.textContent = '⏳';
   btn.classList.add('spinning');
+
+  ltUpdateStatus();
 
   // Fetch strategy (primary — has strikes, levels, regime, confluence)
   fetch('/api/strategy/recommend/' + ltSym)
