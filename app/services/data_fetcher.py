@@ -23,6 +23,7 @@ FIXES (2026-08-08):
 
 import asyncio
 import json
+import re
 import time
 import random
 import logging
@@ -68,6 +69,41 @@ class NSEBlockedError(MarketDataError):
 class NSETransientError(MarketDataError):
     """429/5xx — retry-able."""
     pass
+
+
+def _parse_expiry_date(e: str):
+    """Robust NSE/Angel-One expiry string parser — handles 01SEP2026,
+    01Sep2026, 01-Sep-2026, 2026-09-01, dd/mm/yyyy. Never raises; returns
+    datetime.max.date() (sorts last) on anything unparseable.
+
+    BUG FIX (2026-08-17): the sort key inside _try_angel_option_chain used
+    to be `next((datetime.strptime(e, f).date() for f in (...)), default)`.
+    That pattern is broken — datetime.strptime() raises ValueError on a
+    mismatched format, and a generator expression does NOT catch that and
+    move on to the next format; the exception propagates straight out of
+    next()/sorted(), uncaught. Angel One returns dateless-separator strings
+    like '01SEP2026', and the first format tried was the dashed
+    '%d-%b-%Y', so every call failed with exactly the error seen in
+    production: "time data '01SEP2026' does not match format '%d-%b-%Y'".
+    This single always-safe helper replaces every ad-hoc expiry parser in
+    this module (get_option_chain had its own near-identical inner
+    function — consolidated here so there's one parser to fix, not two).
+    """
+    if not e:
+        return datetime.max.date()
+    e2 = e.strip()
+    m = re.match(r"(\d{1,2})[-/]?([A-Za-z]{3})[-/]?(\d{4})", e2)
+    if m:
+        try:
+            return datetime.strptime(f"{m.group(1)}{m.group(2).title()}{m.group(3)}", "%d%b%Y").date()
+        except Exception:
+            pass
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(e2, fmt).date()
+        except ValueError:
+            continue
+    return datetime.max.date()
 
 
 class DataFetcher:
@@ -263,11 +299,7 @@ class DataFetcher:
             "expiry":           expiry or raw.get("expiry", "") if isinstance(raw, dict) else "",
             "all_expiries":     sorted(
                 raw.get("all_expiries", []) if isinstance(raw, dict) else [],
-                key=lambda e: next(
-                    (datetime.strptime(e, f).date()
-                     for f in ("%d-%b-%Y", "%d%b%Y", "%d-%b-%y", "%Y-%m-%d")),
-                    datetime.max.date()
-                )
+                key=_parse_expiry_date
             ),
             "underlying_price": safe_float(raw.get("underlying_price", 0)) if isinstance(raw, dict) else 0,
             "data":             rows,
@@ -799,22 +831,8 @@ class DataFetcher:
         if not chain_rows:
             raise MarketDataError(f"No option chain rows for expiry {expiry}")
 
-        def _parse_expiry_date(e):
-            import re as _re
-            e2 = e.strip()
-            # Handle 01SEP2026, 01Sep2026, 01-Sep-2026, 2026-09-01
-            m = _re.match(r"(\d{1,2})[-]?([A-Za-z]{3})[-]?(\d{4})", e2)
-            if m:
-                try:
-                    return datetime.strptime(f"{m.group(1)}{m.group(2).title()}{m.group(3)}", "%d%b%Y").date()
-                except Exception:
-                    pass
-            for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-                try:
-                    return datetime.strptime(e2, fmt).date()
-                except ValueError:
-                    continue
-            return datetime.max.date()
+        # Reuses the shared module-level _parse_expiry_date (see its
+        # docstring) — this used to be a near-identical local copy.
         sorted_expiries = sorted(expiry_list, key=_parse_expiry_date)
         return {
             "symbol":           sym,
