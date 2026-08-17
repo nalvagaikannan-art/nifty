@@ -103,7 +103,7 @@ def expiry_filter(expiry_str: str) -> dict:
     try:
         for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
             try:
-                exp_date = datetime.strptime(expiry_str.upper(), fmt).date()
+                exp_date = datetime.strptime(expiry_str.strip().title(), fmt).date()
                 today    = datetime.now().date()
                 days_left = (exp_date - today).days
                 if days_left == 0:
@@ -131,7 +131,7 @@ def days_to_expiry(expiry_str: str) -> Optional[int]:
         return None
     for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
         try:
-            exp_date = datetime.strptime(expiry_str.upper(), fmt).date()
+            exp_date = datetime.strptime(expiry_str.strip().title(), fmt).date()
             return (exp_date - datetime.now().date()).days
         except ValueError:
             continue
