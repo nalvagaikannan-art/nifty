@@ -55,6 +55,9 @@ def calculate_trade_levels(
     spot: float,
     option_ltp: float,    # Current option premium
     lot_size: int = 50,   # NIFTY lot size
+    delta: Optional[float] = None,          # real Black-Scholes delta for the chosen strike, if known
+    theta_per_day: Optional[float] = None,  # ₹/day decay for the chosen strike, if known (negative)
+    assumed_hold_days: float = 1.0,         # how long you expect to hold before hitting T2 — used to net out theta
 ) -> Dict:
     """
     Structure + ATR அடிப்படையில் trade levels calculate செய்கிறோம்.
@@ -65,6 +68,18 @@ def calculate_trade_levels(
         spot: Current NIFTY spot price
         option_ltp: Option premium
         lot_size: Lot size (default 50 for NIFTY)
+        delta: real per-strike delta (options_greeks.black_scholes_greeks) —
+            when given, this REPLACES the old fixed 0.45 approximation used
+            to map underlying-point risk to option-premium risk. Review
+            point #38: "Option premium SL/Target — underlying ATR மட்டும்
+            போதாது" — a deep-OTM strike (delta ~0.20) and a deep-ITM strike
+            (delta ~0.80) do NOT move the same ₹ amount for the same spot
+            move, so using one fixed constant for every strike was wrong.
+        theta_per_day: real per-strike theta — when given, expected decay
+            over `assumed_hold_days` is netted OUT of the targets and OUT of
+            the SL cushion, so the levels reflect "what the premium can
+            realistically do net of time decay", not just the directional
+            move in isolation.
     """
     tech   = market_data.get("technicals", {}) or {}
     sr     = market_data.get("support_resistance", {}) or {}
@@ -171,22 +186,46 @@ def calculate_trade_levels(
 
     rr_ratio = round(risk_spot * 2.0 / risk_spot, 1)  # T2 = 2R always
 
-    # ── 4. Option premium levels (rough proportional mapping) ─────────────
-    # Premium moves faster than spot (delta ~0.45 for near ATM)
-    DELTA_APPROX = 0.45
+    # ── 4. Option premium levels ────────────────────────────────────────────
+    # Fallback constant only used when a real per-strike delta isn't
+    # available — near-ATM options move roughly ₹0.45 per ₹1 of spot, but
+    # this is now a LAST RESORT, not the default (see docstring).
+    DELTA_APPROX_FALLBACK = 0.45
+    eff_delta = abs(delta) if delta is not None else DELTA_APPROX_FALLBACK
+    delta_is_real = delta is not None
 
     if option_ltp > 0:
-        opt_risk = round(risk_spot * DELTA_APPROX, 1)
+        opt_risk = round(risk_spot * eff_delta, 1)
         opt_sl   = round(option_ltp - opt_risk, 1)
         opt_t1   = round(option_ltp + opt_risk * 1.0, 1)
         opt_t2   = round(option_ltp + opt_risk * 2.0, 1)
         opt_t3   = round(option_ltp + opt_risk * 2.5, 1)
+
+        # Net theta decay OUT of the targets (review #23/#38: a
+        # directionally-correct trade can still lose money to time decay —
+        # a target that ignores this overstates what's realistically
+        # reachable). SL gets a little decay cushion too (needs a slightly
+        # bigger adverse move to trigger, since decay is already working
+        # against the position independent of direction).
+        theta_note = ""
+        if theta_per_day is not None and theta_per_day < 0 and assumed_hold_days > 0:
+            expected_decay = round(abs(theta_per_day) * assumed_hold_days, 1)
+            opt_t1 = round(opt_t1 - expected_decay, 1)
+            opt_t2 = round(opt_t2 - expected_decay, 1)
+            opt_t3 = round(opt_t3 - expected_decay, 1)
+            opt_sl = round(opt_sl - expected_decay * 0.5, 1)
+            theta_note = f", net of ~₹{expected_decay:.1f} expected theta decay over {assumed_hold_days:.0f}d"
+
         # Premium SL floor: never let option go to zero
         premium_sl_floor = round(option_ltp * 0.40, 1)
         opt_sl = max(opt_sl, premium_sl_floor)
+
+        delta_basis = f"real delta {eff_delta:.2f}" if delta_is_real else f"approx delta {eff_delta:.2f} (real Greeks unavailable)"
         reasons.append(
-            f"Option SL ₹{opt_sl:.1f} — max(structure-based, 40% premium erosion)"
+            f"Option SL ₹{opt_sl:.1f} — max(structure-based using {delta_basis}, 40% premium erosion){theta_note}"
         )
+        if not delta_is_real:
+            reasons.append("⚠️ Using fallback delta approximation — pass the strike's real Greeks for accurate premium levels")
     else:
         opt_risk = opt_sl = opt_t1 = opt_t2 = opt_t3 = 0
         reasons.append("Option premium data unavailable — spot-based SL only")
@@ -220,6 +259,9 @@ def calculate_trade_levels(
         "option_t1":       opt_t1 if option_ltp > 0 else None,
         "option_t2":       opt_t2 if option_ltp > 0 else None,
         "option_t3":       opt_t3 if option_ltp > 0 else None,
+        "delta_used":      round(eff_delta, 2) if option_ltp > 0 else None,
+        "delta_is_real":   delta_is_real if option_ltp > 0 else None,
+        "theta_per_day_used": theta_per_day,
         "risk_per_lot":    risk_per_lot,
         "rr_ratio":        rr_ratio,
         "setup_quality":   quality,

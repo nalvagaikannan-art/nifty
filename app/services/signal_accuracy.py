@@ -61,6 +61,66 @@ def _confidence_bucket(conf: float) -> str:
     return "unknown"
 
 
+# ── Confidence calibration (priority #4 of the Tamil review — "Signal
+# Strength 85% ≠ 85% win probability") ───────────────────────────────────
+# compute_signal_accuracy() already buckets every graded signal by the
+# confidence it was generated with (by_confidence_range). This function is
+# just a convenience lookup on top of that: given the confidence a NEW
+# signal is showing right now, find which bucket it falls into and report
+# what signals in that bucket ACTUALLY did historically — i.e. the
+# calibration curve from CODE_REVIEW point #46. It deliberately does not
+# invent a smoothed/interpolated probability — only the bucket's raw
+# historical win-rate, with its own sample size and insufficient-data flag,
+# so the UI can show "N samples" honestly instead of a fake-precise number.
+CALIBRATION_MIN_SIGNALS = MIN_SIGNALS_FOR_CONFIDENCE
+
+CALIBRATION_DISCLAIMER = (
+    "Signal Strength ஒரு statistically-calibrated win probability இல்லை — "
+    "இது rule-engine indicators எவ்வளவு agree ஆகின்றன என்பதை அளக்கும் score "
+    "மட்டும். கீழே உள்ள 'Historical Win Rate' தான் இதே Signal Strength "
+    "range-ல் வந்த கடந்தகால signals-ல் NIFTY உண்மையில் எப்படி நகர்ந்தது "
+    "என்பதன் actual அளவு — sample size குறைவா இருந்தால் அதை நம்பாதீர்கள்."
+)
+
+
+async def calibrate_confidence(symbol: str, current_confidence: float,
+                                days: int = 30, horizon_minutes: int = 60) -> Dict:
+    """Looks up the historical win-rate for the confidence bucket that
+    `current_confidence` (a live/just-generated signal's Signal Strength)
+    falls into, using the same accuracy math as compute_signal_accuracy().
+    Also returns the full calibration curve (every bucket, not just the
+    matching one) so a UI can render it as a small table — the exact
+    "Signal Strength -> Actual Win Rate" mapping asked for in the review."""
+    bucket = _confidence_bucket(current_confidence)
+    stats = await compute_signal_accuracy(symbol, days=days, horizon_minutes=horizon_minutes)
+    by_conf = stats.get("by_confidence_range", {})
+    matched = by_conf.get(bucket)
+
+    curve = []
+    for label, lo, hi in CONFIDENCE_BUCKETS:
+        b = by_conf.get(label)
+        curve.append({
+            "range": label,
+            "win_rate_pct": b.get("success_rate") if b else None,
+            "sample_size": b.get("total_graded", 0) if b else 0,
+            "insufficient_data": (b is None) or b.get("insufficient_data", True),
+        })
+
+    return {
+        "symbol": symbol,
+        "signal_strength": current_confidence,
+        "confidence_bucket": bucket,
+        "historical_win_rate_pct": matched.get("success_rate") if matched else None,
+        "sample_size": matched.get("total_graded", 0) if matched else 0,
+        "insufficient_data": (matched is None) or matched.get("insufficient_data", True),
+        "min_signals_required": CALIBRATION_MIN_SIGNALS,
+        "lookback_days": days,
+        "horizon_minutes": horizon_minutes,
+        "calibration_curve": curve,
+        "disclaimer": CALIBRATION_DISCLAIMER,
+    }
+
+
 def _action_from_signal(result: Dict) -> Optional[str]:
     """preferred_side ('CALL'/'PUT'/'NONE') -> action label.
     Only BUY actions exist today (decision_engine never emits SELL — spec
@@ -337,6 +397,19 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
     # headline horizon.
     disagreement_examples: List[Dict] = []
 
+    # Strike-specific reliability (review point #39/#40 — "எந்த strike
+    # வாங்கினால் அதிக probability?"). recommended_option.label is one of
+    # "Best Strike" (ATM+1/-1, the liquidity pick), "Aggressive (OTM)", or
+    # "Conservative (ITM)" — see strategy.py's _pick_strikes. Bucketing the
+    # SAME premium grading by that label is the strike-specific win rate.
+    by_moneyness: Dict[str, Dict[int, Dict]] = {}
+
+    # MFE/MAE (review point #37): Maximum Favourable/Adverse Excursion —
+    # not just where the premium ended up at the horizon, but the best and
+    # worst it got to along the way. Every recommended_option here is a BUY
+    # (CALL or PUT), so favourable = higher premium, adverse = lower premium.
+    mfe_mae_samples: Dict[str, List[Dict]] = {"overall": [], "CALL_BUY": [], "PUT_BUY": []}
+
     for row in analysis_rows:
         result = row.result or {}
         rec = result.get("recommended_option") or {}
@@ -362,8 +435,13 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
             no_data += 1
             continue
 
+        moneyness = rec.get("label") or "unknown"
+        by_moneyness.setdefault(moneyness, {h: _empty_bucket() for h in HORIZONS_MINUTES})
+
         signals_seen += 1
         main_grade = None
+        window_prices: List[float] = []  # every premium snapshot between ts and the headline horizon
+        headline_target = ts + timedelta(minutes=horizon_minutes)
         for h in HORIZONS_MINUTES:
             target = ts + timedelta(minutes=h)
             if target > now:
@@ -377,11 +455,26 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
             grade = _grade_premium(change_pct)
             _bump(overall[h], grade)
             _bump(by_action[action][h], grade)
+            _bump(by_moneyness[moneyness][h], grade)
             net_grade = _grade_premium(change_pct, ESTIMATED_ROUND_TRIP_COST_PCT)
             _bump(overall_net[h], net_grade)
             _bump(by_action_net[action][h], net_grade)
             if h == horizon_minutes:
                 main_grade = grade
+
+        # MFE/MAE: scan every stored snapshot for this contract between
+        # signal time and the headline horizon (not just the 5/10/15/30/60
+        # sample points above) so a spike that reverted before the next
+        # horizon checkpoint still shows up.
+        for snap_ts, snap_price in series:
+            if ts <= snap_ts <= min(headline_target, now):
+                window_prices.append(snap_price)
+        if window_prices:
+            best_pct = (max(window_prices) - premium_then) / premium_then * 100
+            worst_pct = (min(window_prices) - premium_then) / premium_then * 100
+            sample = {"mfe_pct": round(best_pct, 1), "mae_pct": round(worst_pct, 1)}
+            mfe_mae_samples["overall"].append(sample)
+            mfe_mae_samples[action].append(sample)
 
         if main_grade is None:
             continue
@@ -389,6 +482,22 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
     def _fmt_bucket2(b: Dict) -> Dict:
         return {**b, "success_rate": _rate(b),
                 "insufficient_data": b["total_graded"] < MIN_SIGNALS_FOR_CONFIDENCE}
+
+    def _mfe_mae_summary(samples: List[Dict]) -> Dict:
+        if not samples:
+            return {"sample_size": 0, "insufficient_data": True,
+                    "avg_mfe_pct": None, "avg_mae_pct": None,
+                    "best_mfe_pct": None, "worst_mae_pct": None}
+        mfes = [s["mfe_pct"] for s in samples]
+        maes = [s["mae_pct"] for s in samples]
+        return {
+            "sample_size": len(samples),
+            "insufficient_data": len(samples) < MIN_SIGNALS_FOR_CONFIDENCE,
+            "avg_mfe_pct": round(sum(mfes) / len(mfes), 1),   # avg best-case move while the trade was live
+            "avg_mae_pct": round(sum(maes) / len(maes), 1),   # avg worst-case drawdown while the trade was live
+            "best_mfe_pct": round(max(mfes), 1),               # single best excursion seen
+            "worst_mae_pct": round(min(maes), 1),              # single worst drawdown seen
+        }
 
     return {
         "symbol": symbol,
@@ -411,6 +520,24 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
         "call_buy_accuracy_net_of_costs": _fmt_bucket2(by_action_net["CALL_BUY"][horizon_minutes]),
         "put_buy_accuracy_net_of_costs":  _fmt_bucket2(by_action_net["PUT_BUY"][horizon_minutes]),
         "estimated_round_trip_cost_pct": ESTIMATED_ROUND_TRIP_COST_PCT,
+        # Strike-specific reliability (review #39/#40): same premium grading,
+        # split by which strike label was recommended — "Best Strike"
+        # (ATM+1/-1 liquidity pick) vs "Aggressive (OTM)" vs
+        # "Conservative (ITM)". Lets you see e.g. "Aggressive (OTM) picks
+        # only won 41% of the time" even when the overall number looks fine.
+        "by_moneyness": {
+            label: _fmt_bucket2(buckets[horizon_minutes])
+            for label, buckets in by_moneyness.items()
+        },
+        # MFE/MAE (review #37): how far the recommended contract's premium
+        # swung in your favour / against you before the headline horizon —
+        # even on signals graded "correct" or "flat" at the endpoint, a deep
+        # MAE means the trade was uncomfortable/would have hit a tight SL.
+        "mfe_mae": {
+            "overall":  _mfe_mae_summary(mfe_mae_samples["overall"]),
+            "call_buy": _mfe_mae_summary(mfe_mae_samples["CALL_BUY"]),
+            "put_buy":  _mfe_mae_summary(mfe_mae_samples["PUT_BUY"]),
+        },
         "by_horizon": {
             str(h): {
                 "overall": _fmt_bucket2(overall[h]),
@@ -430,6 +557,10 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
             f"'_net_of_costs' fields subtract an estimated {ESTIMATED_ROUND_TRIP_COST_PCT}% "
             "round-trip cost (brokerage/STT/exchange charges/exit-side spread) — a rough "
             "estimate, not your actual broker's numbers, but a closer read of real "
-            "profitability than the gross % alone."
+            "profitability than the gross % alone. 'by_moneyness' splits this same grading "
+            "by which strike label was recommended (Best Strike / Aggressive OTM / "
+            "Conservative ITM). 'mfe_mae' shows how far the premium swung in your favour "
+            "(MFE) and against you (MAE) before the headline horizon, not just where it "
+            "ended up — both need enough samples (insufficient_data flag) before trusting them."
         ),
     }
