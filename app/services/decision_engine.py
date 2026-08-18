@@ -217,29 +217,35 @@ def _score_max_pain(spot: float, max_pain: float) -> Tuple[str, int, str]:
 
 
 def _score_call_writing(df_summary: Dict) -> Tuple[str, int, str]:
-    """Heavy call writing at ATM+1 strikes = resistance = bearish"""
-    ce_top_oi = df_summary.get("ce_max_oi_strike", 0)
+    """Confirmed call writing only; max OI alone is NOT writing."""
+    strike = df_summary.get("call_writing_strike", 0)
     spot = df_summary.get("spot", 0)
-    if ce_top_oi and spot:
-        dist = ce_top_oi - spot
-        if 0 < dist < spot * 0.02:  # within 2% above spot
-            return "bear", WEIGHTS["call_writing"], f"Heavy Call writing at {ce_top_oi:.0f} — near resistance"
-        elif dist > spot * 0.03:
-            return "bull", int(WEIGHTS["call_writing"] * 0.5), f"Call writing far OTM at {ce_top_oi:.0f} — less resistance"
-    return "neutral", 0, "Call writing pattern neutral"
+    confirmed = bool(df_summary.get("call_writing_confirmed", False))
+
+    if confirmed and strike > 0 and spot > 0:
+        return (
+            "bear",
+            WEIGHTS["call_writing"],
+            f"Confirmed Call writing near {strike:.0f} — CE OI ↑ + CE price ↓ + volume"
+        )
+
+    return "neutral", 0, "No confirmed Call-writing pattern"
 
 
 def _score_put_writing(df_summary: Dict) -> Tuple[str, int, str]:
-    """Heavy put writing below spot = support = bullish"""
-    pe_top_oi = df_summary.get("pe_max_oi_strike", 0)
+    """Confirmed put writing only; max OI alone is NOT writing."""
+    strike = df_summary.get("put_writing_strike", 0)
     spot = df_summary.get("spot", 0)
-    if pe_top_oi and spot:
-        dist = spot - pe_top_oi
-        if 0 < dist < spot * 0.02:
-            return "bull", WEIGHTS["put_writing"], f"Heavy Put writing at {pe_top_oi:.0f} — strong support"
-        elif dist > spot * 0.03:
-            return "bear", int(WEIGHTS["put_writing"] * 0.5), f"Put writing far OTM at {pe_top_oi:.0f} — weak support"
-    return "neutral", 0, "Put writing pattern neutral"
+    confirmed = bool(df_summary.get("put_writing_confirmed", False))
+
+    if confirmed and strike > 0 and spot > 0:
+        return (
+            "bull",
+            WEIGHTS["put_writing"],
+            f"Confirmed Put writing near {strike:.0f} — PE OI ↑ + PE price ↓ + volume"
+        )
+
+    return "neutral", 0, "No confirmed Put-writing pattern"
 
 
 def _score_futures_premium(premium: float, status: str = "live") -> Tuple[str, int, str]:
@@ -597,29 +603,48 @@ def _build_scenarios(
 # was actually available (independent of what direction it scored), and
 # dampens confidence by how much of the total possible weight was missing.
 def _data_availability(market_data: Dict, tech_src: str) -> Dict[str, bool]:
-    # PCR/OI-change/max-pain/writing patterns all derive from the same
-    # option-chain fetch — pcr<=0 is that fetch's own "empty/unavailable"
-    # sentinel (see _score_pcr fix above), so it's a more direct signal
-    # than the oi_summary truthiness check used before.
-    chain_available = market_data.get("pcr", 0) > 0
-    # tech_src == "placeholder" means self.tech._empty() was used for ALL of
-    # these at once (see market_analyzer.py) — one flag covers the whole group.
+    """Report whether each signal family has real source data.
+
+    Option-chain availability is explicitly carried by MarketAnalyzer. For
+    backwards-compatible unit fixtures, pcr>0 is accepted only when the
+    explicit flag is absent.
+    """
+    if "option_chain_valid" in market_data:
+        chain_available = bool(
+            market_data.get("option_chain_valid")
+            and int(market_data.get("option_chain_rows", 0)) >= 5
+        )
+    else:
+        chain_available = bool(
+            market_data.get("pcr", 0) > 0
+            and market_data.get("option_chain", None) is not False
+        )
+
     tech_available = tech_src != "placeholder"
+
     return {
-        "pcr": chain_available, "oi_change": chain_available, "max_pain": chain_available,
-        "call_writing": chain_available, "put_writing": chain_available,
+        "pcr": chain_available,
+        "oi_change": chain_available,
+        "max_pain": chain_available,
+        "call_writing": chain_available,
+        "put_writing": chain_available,
         "futures_premium": market_data.get("futures_premium_status") == "live",
-        "vwap": tech_available, "ema20": tech_available, "ema50": tech_available,
-        "rsi": tech_available, "macd": tech_available, "adx": tech_available,
-        "supertrend": tech_available, "volume_spike": tech_available,
+        "vwap": tech_available,
+        "ema20": tech_available,
+        "ema50": tech_available,
+        "rsi": tech_available,
+        "macd": tech_available,
+        "adx": tech_available,
+        "supertrend": tech_available,
+        "volume_spike": tech_available,
         "global_market": market_data.get("global_status") == "live",
         "gift_nifty": market_data.get("gift_status") == "live",
         "fii": market_data.get("fii_status") == "live",
         "dii": market_data.get("dii_status") == "live",
-        # atr_risk/india_vix weigh 0 already — availability doesn't affect
-        # confidence math, but tracked for the data_completeness_pct display.
-        "atr_risk": tech_available, "india_vix": True,
+        "atr_risk": tech_available,
+        "india_vix": market_data.get("vix", 0) > 0,
     }
+
 
 
 # ── Main Engine ──────────────────────────────────────────────────────────────
@@ -728,6 +753,23 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # transparent read of the same 20-condition scoring below — not a
     # separately-fit statistical model.
     margin = bull - bear
+
+    # CRITICAL DATA GATE:
+    # Directional CALL/PUT is forbidden when the live option chain is
+    # missing/incomplete. Technical-only analysis may still be displayed.
+    if "option_chain_valid" in market_data:
+        option_chain_valid = bool(
+            market_data.get("option_chain_valid")
+            and int(market_data.get("option_chain_rows", 0)) >= 5
+        )
+    else:
+        option_chain_valid = bool(market_data.get("pcr", 0) > 0)
+
+    if not option_chain_valid:
+        reasons.append(
+            "🛑 Critical: live option-chain unavailable/incomplete — directional signal blocked"
+        )
+
     bull_bear_total = bull + bear
     if bull_bear_total > 0:
         bullish_probability = round(bull / bull_bear_total * 100)
@@ -744,18 +786,53 @@ def run_decision_engine(market_data: Dict) -> Dict:
     else:
         market_bias = "Bullish" if margin > 0 else "Bearish"  # leaning, lower confidence below reflects the uncertainty
 
-    if margin >= 10:
+    # Directional signal requires stronger confluence than the old ±10 rule.
+    # This is intentionally conservative: false positives are worse than WAIT.
+    if not option_chain_valid:
+        preferred_side = "NONE"
+        risk = "High"
+    elif margin >= 16 and bull >= 25:
         preferred_side = "CALL"
         risk = "Low" if bull >= 40 else "Medium"
-    elif margin <= -10:
+    elif margin <= -16 and bear >= 25:
         preferred_side = "PUT"
         risk = "Low" if bear >= 40 else "Medium"
-    elif abs(margin) < 5:
+    elif abs(margin) < 8:
         preferred_side = "NONE"
         risk = "High"
     else:
         preferred_side = "NONE"
         risk = "Medium"
+
+    # Independent options-flow confirmation. A strong technical score alone
+    # must not turn into a directional option signal.
+    options_bull = sum(
+        pts for name, direction, pts in weighted_items
+        if direction == "bull" and INDICATOR_BUCKET.get(name) == "options_flow"
+    )
+    options_bear = sum(
+        pts for name, direction, pts in weighted_items
+        if direction == "bear" and INDICATOR_BUCKET.get(name) == "options_flow"
+    )
+
+    trend_bull = sum(
+        pts for name, direction, pts in weighted_items
+        if direction == "bull" and INDICATOR_BUCKET.get(name) == "trend"
+    )
+    trend_bear = sum(
+        pts for name, direction, pts in weighted_items
+        if direction == "bear" and INDICATOR_BUCKET.get(name) == "trend"
+    )
+
+    if preferred_side == "CALL" and options_bear > options_bull and trend_bull <= trend_bear:
+        preferred_side = "NONE"
+        risk = "High"
+        reasons.append("⚠️ Major Technical/Options conflict — WAIT")
+
+    elif preferred_side == "PUT" and options_bull > options_bear and trend_bear <= trend_bull:
+        preferred_side = "NONE"
+        risk = "High"
+        reasons.append("⚠️ Major Technical/Options conflict — WAIT")
 
     # Market closed → no live edge to read; be explicit about it rather
     # than showing a stale intraday bias.
@@ -833,7 +910,9 @@ def run_decision_engine(market_data: Dict) -> Dict:
     if regime_conf_mult is not None:
         confidence = int(confidence * regime_conf_mult)
 
-    confidence = max(30, min(95, confidence))  # clamp 30-95
+    if not option_chain_valid or preferred_side == "NONE":
+        confidence = min(confidence, 55)
+    confidence = max(0, min(95, confidence))  # true signal strength, not accuracy
 
     # ── Market Forecast ───────────────────────────────────────────────────
     if vol_ctx.get("regime") == "high":

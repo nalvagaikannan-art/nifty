@@ -21,6 +21,19 @@ from app.utils.helpers import safe_float
 logger = logging.getLogger(__name__)
 
 
+def _normalize_expiry(value: Optional[str]) -> Optional[str]:
+    """Normalize common expiry formats to Angel's canonical DDMMMYYYY form."""
+    if not value:
+        return None
+    raw = str(value).strip().upper()
+    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%d%b%Y").upper()
+        except ValueError:
+            continue
+    return raw
+
+
 class AngelOneError(Exception):
     pass
 
@@ -311,7 +324,7 @@ class AngelOneSession:
         }
 
     async def get_option_chain(
-        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 15
+        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: Optional[int] = None
     ) -> Dict:
         """
         Builds an NSE-shaped option chain by hand, since SmartAPI has no
@@ -363,7 +376,18 @@ class AngelOneSession:
         expiries = sorted(set(r["expiry"] for r in rows if r.get("expiry")))
         if not expiries:
             raise AngelOneError(f"No expiries found for {sym}")
-        chosen_expiry = expiry or expiries[0]
+        requested_expiry = _normalize_expiry(expiry)
+        normalized = {_normalize_expiry(x): x for x in expiries}
+
+        if requested_expiry:
+            chosen_expiry = normalized.get(requested_expiry)
+            if not chosen_expiry:
+                raise AngelOneError(
+                    f"Requested expiry {expiry} not found. Available: {expiries[:10]}"
+                )
+        else:
+            chosen_expiry = expiries[0]
+
         rows = [r for r in rows if r.get("expiry") == chosen_expiry]
         if not rows:
             raise AngelOneError(f"No option rows for {sym} expiry {chosen_expiry}")
@@ -383,9 +407,15 @@ class AngelOneSession:
             raise AngelOneError(f"No valid strikes parsed for {sym} {chosen_expiry}")
 
         atm_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
-        lo = max(0, atm_idx - strikes_each_side)
-        hi = min(len(all_strikes), atm_idx + strikes_each_side + 1)
-        selected_strikes = set(all_strikes[lo:hi])
+
+        if strikes_each_side is None:
+            # Full expiry chain for analytics. This is the default used by
+            # MarketAnalyzer so PCR/Max Pain/OI walls see the entire expiry.
+            selected_strikes = set(all_strikes)
+        else:
+            lo = max(0, atm_idx - int(strikes_each_side))
+            hi = min(len(all_strikes), atm_idx + int(strikes_each_side) + 1)
+            selected_strikes = set(all_strikes[lo:hi])
 
         selected_rows = [r for r in rows if _strike(r) in selected_strikes]
         tokens = [r["token"] for r in selected_rows if r.get("token")]
@@ -465,7 +495,8 @@ class AngelOneSession:
                 "openInterest":         safe_float(q.get("opnInterest", q.get("openInterest", 0))),
                 "changeinOpenInterest": safe_float(q.get("opnInterestChange", 0)),
                 "lastPrice":            safe_float(q.get("ltp", 0)),
-                "change":               safe_float(q.get("netChange", 0)),
+                "change":               safe_float(q.get("netChange", q.get("change", 0))),
+                "percentChange":        safe_float(q.get("percentChange", 0)),
                 "impliedVolatility":    0,  # Angel's quote API doesn't return IV
                 "totalTradedVolume":    safe_float(q.get("tradeVolume", 0)),
             }

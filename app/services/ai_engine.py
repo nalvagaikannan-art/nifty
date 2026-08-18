@@ -82,9 +82,9 @@ class AIEngine:
                 parsed["rule_confidence"]     = decision.get("confidence", 0)
                 parsed["ai_agrees"]           = ai_agrees
                 parsed["_provider"]           = provider
-                conf = decision.get("confidence", 50)
-                conf = min(95, conf + 5) if ai_agrees else max(30, conf - 8)
-                parsed["confidence"]          = conf
+                # AI is a validator/explainer, not a confidence calculator.
+                # Never manufacture +5/-8 confidence from model agreement.
+                parsed["confidence"]          = decision.get("confidence", 0)
                 parsed["market_bias"]         = decision.get("market_bias", parsed.get("market_bias", "Sideways"))
                 parsed["bullish_probability"] = decision.get("bullish_probability", 50)
                 parsed["bearish_probability"] = decision.get("bearish_probability", 50)
@@ -196,6 +196,8 @@ class AIEngine:
         sr     = md.get("support_resistance", {})
         tech   = md.get("technicals", {})
         oi_sum = md.get("oi_summary", {})
+        chain_valid = bool(md.get("option_chain_valid", False))
+        chain_rows = int(md.get("option_chain_rows", 0))
         rule_reasons = "\n".join(decision.get("reasons", [])[:10])
 
         multi_tf = md.get("multi_timeframe", {}) or {}
@@ -214,7 +216,15 @@ class AIEngine:
         tf_block = "\n".join(_tf_line(l) for l in ("5min", "15min", "1hr"))
         have_real_tf = any(multi_tf.get(l, {}).get("data_source") in _real_tf_sources for l in ("5min", "15min", "1hr"))
 
-        return f"""You are an expert NSE options analyst writing an ANALYSIS ONLY report — never a trade instruction. A rule-based engine already scored {md.get('symbol','NIFTY')} and gave:
+        return f"""You are an expert NSE options analyst writing an ANALYSIS ONLY report — never a trade instruction.
+
+CRITICAL DATA RULES:
+- If option-chain quality is invalid or incomplete, do NOT invent PCR/OI/Max Pain/option-flow conclusions.
+- If the rule engine preferred_side is NONE, preserve NONE and explain why; do not upgrade it to CALL/PUT.
+- Max OI alone is not writing. Require OI increase + option-price weakness + volume before calling writing.
+- Treat VIX as volatility/risk, not as directional evidence.
+
+A rule-based engine already scored {md.get('symbol','NIFTY')} and gave:
 
 RULE ENGINE RESULT:
 - Market Bias: {decision.get('market_bias','Sideways')} (Bullish {decision.get('bullish_probability',50)}% / Bearish {decision.get('bearish_probability',50)}%)
@@ -234,6 +244,9 @@ MARKET DATA (DAILY, from historical closes):
 - RSI: {md.get('rsi',50):.1f} | MACD: {md.get('macd',{}).get('macd',0):.1f}
 - EMA20: {tech.get('ema20',0):,.0f} | EMA50: {tech.get('ema50',0):,.0f}
 - ADX: {tech.get('adx',0):.1f} | Supertrend: {tech.get('supertrend','N/A')}
+- Option-chain quality: valid={chain_valid}, valid_rows={chain_rows}
+- Confirmed Call Writing: {oi_sum.get('call_writing_confirmed', False)}
+- Confirmed Put Writing: {oi_sum.get('put_writing_confirmed', False)}
 - ATM IV: {oi_sum.get('atm_iv',0):.1f}%
 - CE Max OI Strike: {oi_sum.get('ce_max_oi_strike',0):,.0f}
 - PE Max OI Strike: {oi_sum.get('pe_max_oi_strike',0):,.0f}

@@ -107,7 +107,7 @@ class MarketAnalyzer:
         pcr       = self.option.compute_pcr(opt_df)
         max_pain  = self.option.compute_max_pain(opt_df)
         oi_change = self.option.compute_oi_change(opt_df)   # provider's own day-change field
-        oi_summary = self.option.oi_summary(opt_df)
+        oi_summary = self.option.oi_summary(opt_df, spot.get("price", 0))
 
         expiry = chain.get("expiry", "")
         await save_option_chain_snapshot(chain.get("symbol", symbol), expiry, opt_df)
@@ -173,8 +173,12 @@ class MarketAnalyzer:
         market_data = {
             "symbol":        symbol,
             "spot":          spot,
-            "option_chain":  chain,
-            "vix":           vix,
+            "option_chain":          chain,
+            "option_chain_valid":    bool(chain.get("chain_valid", False)),
+            "option_chain_rows":     int(chain.get("valid_row_count", 0)),
+            "option_chain_error":    chain.get("chain_error"),
+            "option_chain_source":   chain.get("data_source", "unknown"),
+            "vix":                   vix,
             "breadth":       breadth,
             "pcr":           pcr,
             "max_pain":      max_pain,
@@ -311,11 +315,66 @@ class MarketAnalyzer:
             return {"available": False, "reason": str(e)}
 
     async def _safe_option_chain(self, symbol: str, expiry: str = None) -> Dict:
+        """Fetch and validate the option chain.
+
+        A failed/partial chain is explicitly marked invalid. Spot/technical
+        data may still be displayed, but the decision engine must return
+        WAIT/NONE instead of inventing a CALL/PUT from technicals.
+        """
         try:
-            return await self.fetcher.get_option_chain(symbol, expiry=expiry)
+            chain = await self.fetcher.get_option_chain(symbol, expiry=expiry)
+            if not isinstance(chain, dict):
+                raise ValueError("Option-chain response is not a dictionary")
+
+            rows = chain.get("data") or []
+            valid_rows = 0
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                strike = safe_float(row.get("strikePrice", 0))
+                ce = row.get("CE") or {}
+                pe = row.get("PE") or {}
+                ce_oi = safe_float(ce.get("openInterest", 0))
+                pe_oi = safe_float(pe.get("openInterest", 0))
+                ce_ltp = safe_float(ce.get("lastPrice", 0))
+                pe_ltp = safe_float(pe.get("lastPrice", 0))
+
+                if (
+                    strike > 0
+                    and ce_oi > 0
+                    and pe_oi > 0
+                    and (ce_ltp > 0 or pe_ltp > 0)
+                ):
+                    valid_rows += 1
+
+            chain["chain_valid"] = valid_rows >= 5
+            chain["valid_row_count"] = valid_rows
+            chain["chain_error"] = (
+                None if chain["chain_valid"]
+                else f"Incomplete option chain: {valid_rows} valid CE/PE rows"
+            )
+
+            if not chain["chain_valid"]:
+                logger.warning(
+                    f"Option chain incomplete for {symbol}: {valid_rows} valid rows"
+                )
+
+            return chain
+
         except Exception as e:
-            logger.warning(f"Option chain fetch failed for {symbol}, showing spot/technicals only: {e}")
-            return {"symbol": symbol, "expiry": "", "all_expiries": [], "underlying_price": 0, "data": []}
+            logger.warning(f"Option chain fetch/validation failed for {symbol}: {e}")
+            return {
+                "symbol": symbol,
+                "expiry": "",
+                "all_expiries": [],
+                "underlying_price": 0,
+                "data": [],
+                "chain_valid": False,
+                "valid_row_count": 0,
+                "chain_error": str(e),
+                "data_source": "unavailable",
+            }
 
     async def _safe_volatility(self) -> float:
         try:

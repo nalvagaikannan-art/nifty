@@ -26,6 +26,7 @@ class OptionAnalyzer:
                 "ce_oi_chg":    safe_int(ce.get("changeinOpenInterest", 0)),
                 "ce_volume":    safe_int(ce.get("totalTradedVolume", 0)),
                 "ce_ltp":       ce_ltp,
+                "ce_price_change": safe_float(ce.get("change", ce.get("netChange", 0))),
                 "ce_iv":        safe_float(ce.get("impliedVolatility", 0)),
                 "ce_bid":       ce_bid,
                 "ce_ask":       ce_ask,
@@ -39,6 +40,7 @@ class OptionAnalyzer:
                 "pe_oi_chg":    safe_int(pe.get("changeinOpenInterest", 0)),
                 "pe_volume":    safe_int(pe.get("totalTradedVolume", 0)),
                 "pe_ltp":       pe_ltp,
+                "pe_price_change": safe_float(pe.get("change", pe.get("netChange", 0))),
                 "pe_iv":        safe_float(pe.get("impliedVolatility", 0)),
                 "pe_bid":       pe_bid,
                 "pe_ask":       pe_ask,
@@ -107,36 +109,95 @@ class OptionAnalyzer:
         return {"ce_change": ce, "pe_change": pe, "total_change": ce + pe}
 
     def oi_summary(self, df: pd.DataFrame, underlying: float = 0) -> Dict:
-        """CE/PE max OI strike, total OI, ATM IV, and live chain volume.
+        """Return OI walls plus *confirmed* writing/buildup evidence.
 
-        `underlying` is optional (default 0, backward compatible with
-        existing callers that don't pass it) — when given, also computes
-        the true ATM strike's CE/PE OI and CE-PE IV skew, used by the
-        terminal dashboard's option-chain panel.
+        IMPORTANT: maximum OI alone is never labelled as writing. Writing is
+        only considered when fresh OI is increasing while option price is
+        falling, with volume activity, near the underlying.
         """
         if df.empty:
             return {}
+
         ce_max_idx = df["ce_oi"].idxmax()
         pe_max_idx = df["pe_oi"].idxmax()
-        # ATM IV = average of CE and PE IV at max OI strikes
-        atm_iv = (df.loc[ce_max_idx, "ce_iv"] + df.loc[pe_max_idx, "pe_iv"]) / 2
+
+        atm_iv = (
+            df.loc[ce_max_idx, "ce_iv"] + df.loc[pe_max_idx, "pe_iv"]
+        ) / 2
+
         result = {
             "ce_max_oi_strike": float(df.loc[ce_max_idx, "strike"]),
             "pe_max_oi_strike": float(df.loc[pe_max_idx, "strike"]),
-            "total_ce_oi":      int(df["ce_oi"].sum()),
-            "total_pe_oi":      int(df["pe_oi"].sum()),
-            "atm_iv":           round(float(atm_iv), 2),
+            "total_ce_oi": int(df["ce_oi"].sum()),
+            "total_pe_oi": int(df["pe_oi"].sum()),
+            "atm_iv": round(float(atm_iv), 2),
+            "call_writing_confirmed": False,
+            "put_writing_confirmed": False,
+            "call_writing_strike": 0.0,
+            "put_writing_strike": 0.0,
             **self.compute_option_volume(df),
         }
+
         if underlying > 0:
             atm_idx = (df["strike"] - underlying).abs().idxmin()
-            result["atm_strike"]  = float(df.loc[atm_idx, "strike"])
+            atm_strike = float(df.loc[atm_idx, "strike"])
+
+            result["atm_strike"] = atm_strike
             result["atm_call_oi"] = int(df.loc[atm_idx, "ce_oi"])
-            result["atm_put_oi"]  = int(df.loc[atm_idx, "pe_oi"])
+            result["atm_put_oi"] = int(df.loc[atm_idx, "pe_oi"])
+            result["atm_call_oi_change"] = int(df.loc[atm_idx, "ce_oi_chg"])
+            result["atm_put_oi_change"] = int(df.loc[atm_idx, "pe_oi_chg"])
+            result["atm_call_volume"] = int(df.loc[atm_idx, "ce_volume"])
+            result["atm_put_volume"] = int(df.loc[atm_idx, "pe_volume"])
+            result["atm_call_price_change"] = float(df.loc[atm_idx, "ce_price_change"])
+            result["atm_put_price_change"] = float(df.loc[atm_idx, "pe_price_change"])
+
             ce_iv_atm = float(df.loc[atm_idx, "ce_iv"])
             pe_iv_atm = float(df.loc[atm_idx, "pe_iv"])
             if ce_iv_atm > 0 and pe_iv_atm > 0:
                 result["iv_skew"] = round(pe_iv_atm - ce_iv_atm, 2)
+
+            # Use a practical ATM ±3-strike window for flow classification.
+            step = 0
+            if len(df) > 1:
+                diffs = sorted(
+                    abs(float(x) - atm_strike)
+                    for x in df["strike"].tolist()
+                    if abs(float(x) - atm_strike) > 0
+                )
+                step = diffs[0] if diffs else 0
+
+            window = df.copy()
+            if step > 0:
+                window = window[
+                    (window["strike"] >= atm_strike - step * 3)
+                    & (window["strike"] <= atm_strike + step * 3)
+                ]
+
+            # Call writing: OI rising + option price falling + volume, above spot.
+            call_candidates = window[
+                (window["strike"] >= underlying)
+                & (window["ce_oi_chg"] > 0)
+                & (window["ce_price_change"] < 0)
+                & (window["ce_volume"] > 0)
+            ]
+            if not call_candidates.empty:
+                idx = call_candidates["ce_oi_chg"].idxmax()
+                result["call_writing_confirmed"] = True
+                result["call_writing_strike"] = float(call_candidates.loc[idx, "strike"])
+
+            # Put writing: OI rising + option price falling + volume, below spot.
+            put_candidates = window[
+                (window["strike"] <= underlying)
+                & (window["pe_oi_chg"] > 0)
+                & (window["pe_price_change"] < 0)
+                & (window["pe_volume"] > 0)
+            ]
+            if not put_candidates.empty:
+                idx = put_candidates["pe_oi_chg"].idxmax()
+                result["put_writing_confirmed"] = True
+                result["put_writing_strike"] = float(put_candidates.loc[idx, "strike"])
+
         return result
 
     def compute_option_volume(self, df: pd.DataFrame) -> Dict:
