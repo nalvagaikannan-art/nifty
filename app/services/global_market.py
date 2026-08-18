@@ -6,11 +6,12 @@ Spec-ன் "Global Market" section-ஐ implement செய்கிறது:
   Gift Nifty, Dow/Nasdaq/S&P Futures, Nikkei, Hang Seng, Shanghai, FTSE,
   DAX, CAC, Crude Oil, Gold, Silver, Dollar Index, USDINR, US Bond Yield.
 
-Data source: Yahoo Finance's public `/v8/finance/chart/{symbol}` endpoint.
-No API key required, no paid subscription — matches spec's "Free Public
-APIs" requirement. This is a *quote* endpoint (JSON), not an HTML page, so
-it doesn't violate the "don't scrape HTML" principle applied elsewhere in
-this codebase (see data_fetcher.get_fii_dii docstring for the same rule).
+Data sources:
+  - Dow/Nasdaq/S&P/Nikkei/etc: Yahoo Finance's public
+    `/v8/finance/chart/{symbol}` endpoint. No API key required.
+  - Gift Nifty: NSE's own `/api/marketStatus` endpoint (see
+    _fetch_gift_nifty below) — this is NSE's OFFICIAL data for its own
+    NSE IX contract, not a third party.
 
 Dev rule compliance:
   - Never Mock Data: every field is either a real fetched number or
@@ -19,11 +20,27 @@ Dev rule compliance:
     failed ticker must not blank out the whole global-market panel
     (same "partial failure isolation" pattern used elsewhere, e.g.
     market_analyzer._safe_option_chain).
+
+GIFT NIFTY — SOURCE HISTORY (read before changing this again):
+  1. Yahoo Finance: no public ticker for NSE IX's Gift Nifty contract.
+  2. investing.com quote page (numeric-only scrape): worked when tested
+     manually, but Render's datacenter IP got an outright HTTP 403 from
+     investing.com's edge/WAF (3-byte block response) regardless of
+     browser-impersonation headers — this is an IP-reputation block, not
+     fixable by changing headers/fingerprint.
+  3. CURRENT: NSE's own `https://www.nseindia.com/api/marketStatus`
+     endpoint includes a `giftnifty` object (LASTPRICE, DAYCHANGE,
+     PERCHANGE, EXPIRYDATE) — NSE's official data for their own
+     exchange's contract. This app's NSE session (data_fetcher.py) already
+     authenticates against nseindia.com successfully from this same host,
+     so the identical cookie-priming approach is replicated here
+     (independently — GlobalMarketService doesn't share DataFetcher's
+     session/lock, to keep the two services decoupled).
 """
 
 import asyncio
 import logging
-import re
+import time
 from typing import Dict, Optional
 
 import httpx
@@ -32,19 +49,6 @@ from curl_cffi.requests import AsyncSession as CurlAsyncSession
 logger = logging.getLogger(__name__)
 
 # symbol -> (Yahoo ticker, display name, category)
-# Gift Nifty note (updated 2026-08-17): Yahoo does not publish an official
-# free real-time feed for NSE IX's Gift Nifty contract under a stable public
-# ticker, and Angel One's SmartAPI only covers NSE/NFO/BSE/BFO/MCX/CDS — not
-# NSE IX, where Gift Nifty actually trades. investing.com's quote page for
-# it (in.investing.com/indices/gift-nifty-50-c1-futures) DOES server-render
-# the current price and previous close as plain text (confirmed by manual
-# fetch), so that's used as a best-effort fallback source — see
-# _fetch_gift_nifty() below. This is a numeric-only scrape (just price and
-# prev_close, nothing textual/analytical from the page) using the same
-# curl_cffi browser-impersonation technique already proven against NSE in
-# data_fetcher.py. NOTE: investing.com's ToS prohibits programmatic
-# reproduction of their data without permission — fine for personal/internal
-# use, but worth knowing if this is ever exposed publicly or commercially.
 _TICKERS = {
     "dow_futures":     ("YM=F",       "Dow Futures",       "index_futures"),
     "nasdaq_futures":  ("NQ=F",       "Nasdaq Futures",    "index_futures"),
@@ -63,16 +67,6 @@ _TICKERS = {
     "us_bond_yield":   ("^TNX",       "US 10Y Bond Yield", "bond"),
 }
 
-_GIFT_NIFTY_URL       = "https://in.investing.com/indices/gift-nifty-50-c1-futures"
-_GIFT_PRICE_RE        = re.compile(r"current Gift Nifty 50 Futures price is ([\d,]+\.?\d*)", re.IGNORECASE)
-_GIFT_PREV_CLOSE_RE   = re.compile(r"Prev\.\s*Close\s*\n\s*([\d,]+\.?\d*)")
-_GIFT_IMPERSONATE     = "chrome131"  # same technique as data_fetcher.py's NSE session
-_GIFT_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://www.google.com/",
-}
-
 # Symbols that feed the aggregate "global_change_pct" cue consumed by
 # decision_engine._score_global() — the broad overnight-cue basket, not
 # every single ticker (e.g. USDINR/bond yield move on different drivers).
@@ -87,11 +81,31 @@ _HEADERS = {
     "Accept": "application/json",
 }
 
+# ── NSE marketStatus (Gift Nifty) — same technique as data_fetcher.py ──
+_NSE_HOME_URL           = "https://www.nseindia.com/"
+_NSE_MARKET_STATUS_URL  = "https://www.nseindia.com/api/marketStatus"
+_NSE_IMPERSONATE        = "chrome131"
+_NSE_SESSION_TTL        = 240  # seconds — cookies refreshed periodically, same pattern as data_fetcher.SESSION_TTL_SECONDS
+_NSE_HEADERS = {
+    "Accept":          "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.nseindia.com/",
+    "Origin":          "https://www.nseindia.com",
+    "DNT":             "1",
+    "Connection":      "keep-alive",
+}
+
 
 class GlobalMarketService:
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
+        # Independent NSE session for the marketStatus (Gift Nifty) endpoint
+        # — deliberately not shared with data_fetcher.DataFetcher's session
+        # to keep these two services decoupled (see module docstring).
+        self._nse_session: Optional[CurlAsyncSession] = None
+        self._nse_session_ts: float = 0.0
+        self._nse_lock = asyncio.Lock()
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         async with self._lock:
@@ -125,53 +139,87 @@ class GlobalMarketService:
             logger.debug(f"Global market fetch failed for {yahoo_symbol}: {e}")
             return None
 
-    async def _fetch_gift_nifty(self) -> Optional[Dict]:
-        """Best-effort GIFT Nifty fetch via investing.com's server-rendered
-        quote page — see the module-level comment above _TICKERS for why
-        this exists and its caveats. Extracts ONLY the current price and
-        previous close (two numbers) via anchored regex; never touches any
-        of the page's text/analysis/news content. Returns None (→
-        'unavailable') on any HTTP error, missing match, or parse failure —
-        a page-layout change on investing.com's side degrades gracefully
-        instead of crashing the global-market panel."""
-        try:
-            async with CurlAsyncSession(
-                impersonate=_GIFT_IMPERSONATE,
-                headers=_GIFT_HEADERS,
+    async def _ensure_nse_session(self, force: bool = False) -> bool:
+        """Primes cookies against nseindia.com's homepage before hitting its
+        API — same two-step pattern (homepage first, then API) that
+        data_fetcher.py already uses successfully for NSE from this host.
+        Returns False (caller should treat as unavailable) if priming fails."""
+        now = time.time()
+        if not force and self._nse_session and (now - self._nse_session_ts) < _NSE_SESSION_TTL:
+            return True
+
+        async with self._nse_lock:
+            if not force and self._nse_session and (time.time() - self._nse_session_ts) < _NSE_SESSION_TTL:
+                return True
+
+            if self._nse_session:
+                try:
+                    await self._nse_session.close()
+                except Exception:
+                    pass
+
+            self._nse_session = CurlAsyncSession(
+                impersonate=_NSE_IMPERSONATE,
+                headers=_NSE_HEADERS,
                 timeout=10,
                 verify=True,
                 allow_redirects=True,
-                max_redirects=5,
-            ) as session:
-                resp = await session.get(_GIFT_NIFTY_URL)
+                max_redirects=10,
+            )
+            try:
+                r1 = await self._nse_session.get(_NSE_HOME_URL)
+                if r1.status_code >= 400:
+                    logger.warning(f"GIFT Nifty: NSE homepage returned {r1.status_code} while priming session")
+                    return False
+                self._nse_session_ts = time.time()
+                return True
+            except Exception as e:
+                logger.warning(f"GIFT Nifty: NSE session priming failed: {type(e).__name__}: {e}")
+                return False
+
+    async def _fetch_gift_nifty(self) -> Optional[Dict]:
+        """GIFT Nifty via NSE's own `/api/marketStatus` endpoint — see the
+        module docstring's "SOURCE HISTORY" section for why this replaced
+        an earlier investing.com scrape (blocked with HTTP 403 from
+        Render's IP). Returns None (→ 'unavailable') on any session,
+        HTTP, or parse failure — never crashes the global-market panel."""
+        try:
+            ok = await self._ensure_nse_session()
+            if not ok:
+                return None
+            resp = await self._nse_session.get(_NSE_MARKET_STATUS_URL)
             if resp.status_code != 200:
-                # DIAGNOSTIC (temporary, 2026-08-18): was logger.debug — invisible
-                # at Render's default INFO level, so "Data Unavailable" gave no
-                # clue whether this was a bot-block, redirect, or regex mismatch.
-                # Bumped to WARNING with the actual status + a body snippet so
-                # the real cause shows up in logs. Revert to debug() once the
-                # cause is confirmed and fixed.
-                logger.warning(f"GIFT Nifty fetch got HTTP {resp.status_code} (len={len(resp.text or '')})")
+                logger.warning(f"GIFT Nifty: marketStatus returned HTTP {resp.status_code}")
+                # One retry with a forced fresh session — covers the case
+                # where cookies expired server-side before our local TTL did.
+                if not await self._ensure_nse_session(force=True):
+                    return None
+                resp = await self._nse_session.get(_NSE_MARKET_STATUS_URL)
+                if resp.status_code != 200:
+                    logger.warning(f"GIFT Nifty: marketStatus retry also returned HTTP {resp.status_code}")
+                    return None
+
+            data = resp.json()
+            gift = (data or {}).get("giftnifty") or {}
+            price = gift.get("LASTPRICE")
+            change_pct = gift.get("PERCHANGE")
+            day_change = gift.get("DAYCHANGE")
+            if price is None or change_pct is None:
+                logger.warning(f"GIFT Nifty: marketStatus response missing giftnifty fields: {gift!r}")
                 return None
-            html = resp.text
-            price_m = _GIFT_PRICE_RE.search(html)
-            prev_m  = _GIFT_PREV_CLOSE_RE.search(html)
-            if not price_m or not prev_m:
-                snippet = re.sub(r"\s+", " ", (html or "")[:300]).strip()
-                logger.warning(
-                    f"GIFT Nifty page fetched (200, len={len(html)}) but price/prev-close "
-                    f"pattern not found — page start: {snippet!r}"
-                )
-                return None
-            price = float(price_m.group(1).replace(",", ""))
-            prev  = float(prev_m.group(1).replace(",", ""))
-            if prev == 0:
-                return None
-            change_pct = ((price - prev) / prev) * 100
+
+            prev_close = None
+            if day_change is not None:
+                try:
+                    prev_close = round(float(price) - float(day_change), 2)
+                except Exception:
+                    prev_close = None
+
             return {
-                "price":          round(price, 2),
-                "prev_close":     round(prev, 2),
-                "change_percent": round(change_pct, 2),
+                "price":          round(float(price), 2),
+                "prev_close":     prev_close,
+                "change_percent": round(float(change_pct), 2),
+                "expiry":         gift.get("EXPIRYDATE"),
             }
         except Exception as e:
             logger.warning(f"GIFT Nifty fetch failed: {type(e).__name__}: {e}")
@@ -214,7 +262,8 @@ class GlobalMarketService:
             "instruments":           instruments,
             "gift_nifty_change_pct": gift_result["change_percent"] if gift_result else None,
             "gift_nifty_price":      gift_result["price"] if gift_result else None,
-            "gift_nifty_status":     "investing_com" if gift_result else "unavailable_fetch_failed",
+            "gift_nifty_expiry":     gift_result["expiry"] if gift_result else None,
+            "gift_nifty_status":     "nse_official" if gift_result else "unavailable_fetch_failed",
             "global_change_pct":     global_change_pct,
             "source":                "yahoo_finance",
         }
@@ -226,6 +275,12 @@ class GlobalMarketService:
             except Exception:
                 pass
             self._client = None
+        if self._nse_session:
+            try:
+                await self._nse_session.close()
+            except Exception:
+                pass
+            self._nse_session = None
 
 
 # Module-level singleton — same pattern as app.services.angel_one.angel_session
