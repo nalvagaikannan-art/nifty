@@ -67,6 +67,11 @@ _GIFT_NIFTY_URL       = "https://in.investing.com/indices/gift-nifty-50-c1-futur
 _GIFT_PRICE_RE        = re.compile(r"current Gift Nifty 50 Futures price is ([\d,]+\.?\d*)", re.IGNORECASE)
 _GIFT_PREV_CLOSE_RE   = re.compile(r"Prev\.\s*Close\s*\n\s*([\d,]+\.?\d*)")
 _GIFT_IMPERSONATE     = "chrome131"  # same technique as data_fetcher.py's NSE session
+_GIFT_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.google.com/",
+}
 
 # Symbols that feed the aggregate "global_change_pct" cue consumed by
 # decision_engine._score_global() — the broad overnight-cue basket, not
@@ -130,16 +135,33 @@ class GlobalMarketService:
         a page-layout change on investing.com's side degrades gracefully
         instead of crashing the global-market panel."""
         try:
-            async with CurlAsyncSession(impersonate=_GIFT_IMPERSONATE, timeout=8.0) as session:
+            async with CurlAsyncSession(
+                impersonate=_GIFT_IMPERSONATE,
+                headers=_GIFT_HEADERS,
+                timeout=10,
+                verify=True,
+                allow_redirects=True,
+                max_redirects=5,
+            ) as session:
                 resp = await session.get(_GIFT_NIFTY_URL)
             if resp.status_code != 200:
-                logger.debug(f"GIFT Nifty fetch got HTTP {resp.status_code}")
+                # DIAGNOSTIC (temporary, 2026-08-18): was logger.debug — invisible
+                # at Render's default INFO level, so "Data Unavailable" gave no
+                # clue whether this was a bot-block, redirect, or regex mismatch.
+                # Bumped to WARNING with the actual status + a body snippet so
+                # the real cause shows up in logs. Revert to debug() once the
+                # cause is confirmed and fixed.
+                logger.warning(f"GIFT Nifty fetch got HTTP {resp.status_code} (len={len(resp.text or '')})")
                 return None
             html = resp.text
             price_m = _GIFT_PRICE_RE.search(html)
             prev_m  = _GIFT_PREV_CLOSE_RE.search(html)
             if not price_m or not prev_m:
-                logger.debug("GIFT Nifty page fetched but price/prev-close pattern not found (layout change?)")
+                snippet = re.sub(r"\s+", " ", (html or "")[:300]).strip()
+                logger.warning(
+                    f"GIFT Nifty page fetched (200, len={len(html)}) but price/prev-close "
+                    f"pattern not found — page start: {snippet!r}"
+                )
                 return None
             price = float(price_m.group(1).replace(",", ""))
             prev  = float(prev_m.group(1).replace(",", ""))
@@ -152,7 +174,7 @@ class GlobalMarketService:
                 "change_percent": round(change_pct, 2),
             }
         except Exception as e:
-            logger.debug(f"GIFT Nifty fetch failed: {e}")
+            logger.warning(f"GIFT Nifty fetch failed: {type(e).__name__}: {e}")
             return None
 
     async def get_snapshot(self) -> Dict:
