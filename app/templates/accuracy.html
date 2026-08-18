@@ -3,7 +3,7 @@
 {% block content %}
 <div class="options-page">
     <div class="options-header">
-        <h2>🎯 Prediction Accuracy</h2>
+        <h2> Prediction Accuracy</h2>
         <div style="display:flex;gap:0.75rem;align-items:center;">
             <select id="symbol-select">
                 <option value="NIFTY">NIFTY</option>
@@ -29,12 +29,12 @@
     <div id="signal-status" class="card glass" style="margin-bottom:1rem;">Loading signal accuracy...</div>
 
     <div class="card glass acc-block" id="persistence-block">
-        <h3>💾 Accuracy History Storage</h3>
+        <h3> Accuracy History Storage</h3>
         <div id="persistence-status">Checking saved history...</div>
     </div>
 
     <div class="card glass acc-block" id="accuracy-chart-block" style="display:none;">
-        <h3>📈 Accuracy Trend by Time Horizon</h3>
+        <h3> Accuracy Trend by Time Horizon</h3>
         <div id="accuracy-horizon-chart" style="height:320px;"></div>
     </div>
 
@@ -48,7 +48,7 @@
         <div class="acc-breakdown" id="signal-breakdown"></div>
     </div>
 
-    <h3 style="margin:1.5rem 0 0.75rem;">💰 Option Premium Accuracy (real contract P&amp;L)</h3>
+    <h3 style="margin:1.5rem 0 0.75rem;"> Option Premium Accuracy (real contract P&amp;L)</h3>
     <div class="dashboard-grid" id="premium-summary" style="margin-bottom:0.5rem; display:none;">
         <div class="card glass"><h3>Overall (60min)</h3><div class="price" id="premium-overall-rate">--</div><div class="sub" id="premium-overall-n">--</div></div>
         <div class="card glass"><h3>Overall — Net of Est. Costs</h3><div class="price" id="premium-net-rate">--</div><div class="sub" id="premium-net-n">Est. round-trip cost subtracted</div></div>
@@ -76,6 +76,33 @@
         </table>
     </div>
 
+    <div class="card glass acc-block" id="moneyness-block" style="display:none;">
+        <h3> Strike-Specific Reliability — "எந்த strike வாங்கினால் அதிக probability?"</h3>
+        <div class="sub" style="margin-bottom:.5rem;">Same premium grading, split by which strike label was recommended (60min horizon).</div>
+        <table class="acc-table" id="moneyness-table">
+            <thead><tr><th>Strike Label</th><th>Win Rate</th><th>Samples</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="card glass acc-block" id="mfemae-block" style="display:none;">
+        <h3> MFE / MAE — how far the premium swung before the horizon</h3>
+        <div class="sub" style="margin-bottom:.5rem;">Not just where the premium ended up — the best (MFE) and worst (MAE) it got to while the trade was live. A deep MAE means the trade was uncomfortable even if it ended "correct".</div>
+        <table class="acc-table" id="mfemae-table">
+            <thead><tr><th></th><th>Avg MFE</th><th>Avg MAE</th><th>Best MFE seen</th><th>Worst MAE seen</th><th>Samples</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="card glass acc-block" id="calibration-block" style="display:none;">
+        <h3>⚖️ Signal Strength Calibration — score ≠ probability</h3>
+        <div class="sub" style="margin-bottom:.5rem;" id="calibration-disclaimer"></div>
+        <table class="acc-table" id="calibration-table">
+            <thead><tr><th>Signal Strength Range</th><th>Actual Historical Win Rate</th><th>Samples</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
     <div class="acc-grid">
         <div class="card glass acc-block" id="regime-block" style="display:none;">
             <h3>By Market Regime (VIX-based)</h3>
@@ -94,7 +121,7 @@
     </div>
 
     <div class="card glass acc-block" id="indicator-chart-block" style="display:none;">
-        <h3>📊 Indicator Accuracy Chart</h3>
+        <h3> Indicator Accuracy Chart</h3>
         <div id="indicator-accuracy-chart" style="height:420px;"></div>
     </div>
 
@@ -289,7 +316,7 @@ function loadSignalAccuracy() {
 
 function loadPremiumAccuracy() {
     $('#premium-status').removeClass('error').text('Loading premium accuracy for ' + currentSymbol + '...').show();
-    $('#premium-summary, #premium-horizon-block, #premium-breakdown-block').hide();
+    $('#premium-summary, #premium-horizon-block, #premium-breakdown-block, #moneyness-block, #mfemae-block, #calibration-block').hide();
 
     $.get('/api/accuracy/premium/' + currentSymbol + '?days=' + currentDays)
         .done(function(d) {
@@ -330,6 +357,9 @@ function loadPremiumAccuracy() {
                 </tr>`);
             });
 
+            renderMoneyness(d.by_moneyness);
+            renderMfeMae(d.mfe_mae);
+
             window.__premiumAccuracy = d;
             maybeRenderDisagreement();
         })
@@ -337,6 +367,65 @@ function loadPremiumAccuracy() {
             let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
             $('#premium-status').addClass('error').text('⚠️ Premium accuracy could not be loaded: ' + detail);
         });
+
+    loadCalibration();
+}
+
+function renderMoneyness(byMoneyness) {
+    const body = $('#moneyness-table tbody').empty();
+    const labels = Object.keys(byMoneyness || {});
+    if (!labels.length) { $('#moneyness-block').hide(); return; }
+    $('#moneyness-block').show();
+    labels.forEach(function(label) {
+        const b = byMoneyness[label];
+        body.append(`<tr>
+            <td>${label}</td>
+            <td class="${rateClass(b.success_rate)}">${fmtRate(b.success_rate, b.insufficient_data)}</td>
+            <td>${b.total_graded}</td>
+        </tr>`);
+    });
+}
+
+function renderMfeMae(mfeMae) {
+    if (!mfeMae) { $('#mfemae-block').hide(); return; }
+    $('#mfemae-block').show();
+    const body = $('#mfemae-table tbody').empty();
+    const rows = [['Overall', mfeMae.overall], ['CALL BUY', mfeMae.call_buy], ['PUT BUY', mfeMae.put_buy]];
+    rows.forEach(function(pair) {
+        const label = pair[0], m = pair[1] || {};
+        if (!m || m.insufficient_data) {
+            body.append(`<tr><td>${label}</td><td colspan="4"><i>insufficient data (${(m&&m.sample_size)||0} samples)</i></td><td>${(m&&m.sample_size)||0}</td></tr>`);
+        } else {
+            body.append(`<tr>
+                <td>${label}</td>
+                <td class="rate-good">+${m.avg_mfe_pct}%</td>
+                <td class="rate-bad">${m.avg_mae_pct}%</td>
+                <td class="rate-good">+${m.best_mfe_pct}%</td>
+                <td class="rate-bad">${m.worst_mae_pct}%</td>
+                <td>${m.sample_size}</td>
+            </tr>`);
+        }
+    });
+}
+
+function loadCalibration() {
+    // Signal Strength calibration curve — the curve itself (every bucket's
+    // historical win rate) doesn't depend on which confidence you pass in,
+    // so a fixed mid-range lookup is enough to render the full table.
+    $.get('/api/accuracy/calibration/' + currentSymbol + '?confidence=60&days=' + currentDays)
+        .done(function(d) {
+            $('#calibration-block').show();
+            $('#calibration-disclaimer').text(d.disclaimer || '');
+            const body = $('#calibration-table tbody').empty();
+            (d.calibration_curve || []).forEach(function(row) {
+                body.append(`<tr>
+                    <td>${row.range}</td>
+                    <td class="${rateClass(row.win_rate_pct)}">${fmtRate(row.win_rate_pct, row.insufficient_data)}</td>
+                    <td>${row.sample_size}</td>
+                </tr>`);
+            });
+        })
+        .fail(function() { $('#calibration-block').hide(); });
 }
 
 function maybeRenderDisagreement() {
@@ -403,3 +492,4 @@ function loadIndicatorAccuracy() {
 }
 </script>
 {% endblock %}
+
