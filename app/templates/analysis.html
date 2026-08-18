@@ -26,6 +26,7 @@
       <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.3rem;">Final Signal</div>
       <div id="sig-badge" class="ai-badge wait" style="font-size:1.4rem;padding:.5rem 1.5rem;">--</div>
       <div style="margin-top:.4rem;font-size:.8rem;">Signal Strength <b id="sig-conf">--/100</b></div>
+      <div id="sig-calibration" style="margin-top:.2rem;font-size:.7rem;color:var(--text2);"></div>
       <div id="data-completeness" style="margin-top:.25rem;font-size:.72rem;color:var(--text2);"></div>
       <div id="market-regime-badge" style="margin-top:.25rem;font-size:.72rem;color:var(--text2);"></div>
     </div>
@@ -737,6 +738,21 @@ function renderAnalysis(d){
   $('#bull-val').text(bull); $('#bull-bar').css('width',Math.min(bull/max*100,100)+'%');
   $('#bear-val').text(bear); $('#bear-bar').css('width',Math.min(bear/max*100,100)+'%');
   $('#sig-conf').text((d.signal_strength!=null?d.signal_strength:(d.confidence||0))+'/100');
+
+  // Confidence calibration (review #4/#46): Signal Strength is NOT a win
+  // probability — show the actual historical win rate for this same range,
+  // with sample size, right next to the raw score.
+  var cal = d.confidence_calibration;
+  if (cal) {
+    if (cal.insufficient_data || cal.historical_win_rate_pct == null) {
+      $('#sig-calibration').html('Historical win rate (this range): <i>insufficient data (' + (cal.sample_size||0) + ' samples, need ' + (cal.min_signals_required||5) + '+)</i>');
+    } else {
+      $('#sig-calibration').html('Historical win rate (this range): <b>' + cal.historical_win_rate_pct + '%</b> <span style="opacity:.7;">(' + cal.sample_size + ' samples, ' + (cal.lookback_days||30) + 'd)</span>');
+    }
+  } else {
+    $('#sig-calibration').text('');
+  }
+
   if (d.data_completeness_pct != null && d.data_completeness_pct < 100) {
     var dc = d.data_completeness_pct;
     var dcColor = dc < 60 ? 'var(--red)' : dc < 85 ? 'var(--yellow)' : 'var(--text2)';
