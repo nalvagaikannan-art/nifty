@@ -330,9 +330,24 @@ def _score_candidates(market_data: dict) -> dict:
     return {"candidates": candidates, "best": best, "best_score": candidates[best]}
 
 
-# ── Strike Picker (enhanced with liquidity filter) ────────────────────────
+# ── Strike Picker (liquidity + delta-band + spread hard filters) ──────────
+# Review point #26/#4 (priority): "ATM+1 என்றால் எப்போதும் safer இல்லை ...
+# strike selection-ல் Delta range கூட hard rule ஆக வேண்டும்." Previously
+# "Best Strike" was blindly ATM+1/ATM-1 regardless of how that specific
+# strike's liquidity/spread/delta actually looked. Now we score every
+# nearby strike and hard-filter on liquidity + spread + a preferred delta
+# band, so "Best Strike" is the best ACTUAL candidate, not just the closest
+# to ATM by index.
+HARD_SPREAD_MAX_PCT   = 8.0    # wider than this bid/ask spread → excluded outright, not just warned
+PREFERRED_DELTA_LOW    = 0.35  # review's example liquid zone: 0.45-0.60; widened slightly so a pick usually exists
+PREFERRED_DELTA_HIGH   = 0.65
 
-def _pick_strikes(chain_data: dict, is_call: bool, spot: float) -> list:
+
+def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0) -> list:
+    """`atr` (optional, underlying ATR in points): when provided, SL/targets
+    are computed from real delta × ATR (mirrors trade_levels.py's model)
+    instead of a flat percentage of premium — review #38: a fixed 35%/40%
+    SL/target made no sense across strikes with very different deltas."""
     rows = chain_data.get("data", [])
     if not rows:
         return []
@@ -373,16 +388,43 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float) -> list:
         # on a thin strike and overstate what you'd actually get filled at.
         entry  = mid_price(info["bid"], info["ask"], info["ltp"])
         spread = spread_pct(info["bid"], info["ask"])
-        sl     = round(entry * 0.65, 1)   # 35% SL
-        t1     = round(entry * 1.40, 1)   # T1: +40%
-        t2     = round(entry * 1.70, 1)   # T2: +70%
-        t3     = round(entry * 2.00, 1)   # T3: +100%
-        risk   = round(entry - sl, 1)
-        reward = round(t1 - entry, 1)
-        rr     = round(reward / risk, 1) if risk > 0 else 0
+        # Hard filter (not just a warning): a spread this wide means slippage
+        # alone could eat the whole expected edge — don't recommend it.
+        if spread is not None and spread > HARD_SPREAD_MAX_PCT:
+            return None
         # Review #15: Greeks — None (not fabricated) when spot/IV/expiry
         # don't support a real Black-Scholes calc.
         greeks = black_scholes_greeks(spot, strike, dte, info["iv"], "CE" if is_call else "PE")
+        strike_delta = greeks["delta"] if greeks else None
+        theta_per_day = greeks["theta_per_day"] if greeks else None
+
+        # SL/targets: prefer real delta × ATR (review #38) over a flat %,
+        # since the same premium % target is not equally realistic across
+        # strikes with very different deltas. Falls back to the old flat-%
+        # model only when ATR or Greeks aren't available.
+        if atr > 0 and strike_delta is not None:
+            opt_risk = round(atr * abs(strike_delta), 1)
+            sl = round(entry - opt_risk, 1)
+            t1 = round(entry + opt_risk * 1.0, 1)
+            t2 = round(entry + opt_risk * 2.0, 1)
+            t3 = round(entry + opt_risk * 2.5, 1)
+            if theta_per_day is not None and theta_per_day < 0:
+                decay = round(abs(theta_per_day), 1)  # 1-day decay netted out of targets
+                t1 = round(t1 - decay, 1)
+                t2 = round(t2 - decay, 1)
+                t3 = round(t3 - decay, 1)
+            sl = max(sl, round(entry * 0.40, 1))  # never let the modelled SL go below the 40% floor
+            levels_basis = "delta×ATR, net of 1-day theta"
+        else:
+            sl = round(entry * 0.65, 1)   # 35% SL
+            t1 = round(entry * 1.40, 1)   # T1: +40%
+            t2 = round(entry * 1.70, 1)   # T2: +70%
+            t3 = round(entry * 2.00, 1)   # T3: +100%
+            levels_basis = "flat % approximation (ATR/delta unavailable)"
+        risk   = round(entry - sl, 1)
+        reward = round(t1 - entry, 1)
+        rr     = round(reward / risk, 1) if risk > 0 else 0
+
         result = {
             "rank":    emoji,
             "label":   label,
@@ -402,6 +444,7 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float) -> list:
             "t2":      t2,
             "t3":      t3,
             "rr":      rr,
+            "levels_basis": levels_basis,
             "note":    note,
         }
         if greeks:
@@ -417,17 +460,39 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float) -> list:
             result["note"] = note + f" ⚠️ Wide bid/ask spread ({spread:.1f}%) — slippage risk on entry/exit"
         return result
 
-    results = []
+    # ── "Best Strike": score every nearby strike, hard-filter on liquidity
+    # + spread (inside make_strike) + delta band, pick the one closest to
+    # the review's suggested 0.45-0.60 liquid zone (widened to 0.35-0.65
+    # here so a candidate almost always exists) instead of blindly ATM+1.
+    candidate_offsets = [1, 2, 0, 3, -1] if is_call else [-1, -2, 0, -3, 1]
+    best_pick = None
+    best_delta_gap = None
+    fallback_pick = None
+    for off in candidate_offsets:
+        idx = max(0, min(atm_idx + off, len(strikes) - 1))
+        cand = make_strike(strikes[idx], "Best Strike", "🥇",
+                            f"Auto-selected — liquid, tight spread, delta in {PREFERRED_DELTA_LOW}-{PREFERRED_DELTA_HIGH} band")
+        if cand is None:
+            continue
+        if fallback_pick is None:
+            fallback_pick = cand  # first liquid+spread-ok candidate, in case none hit the delta band
+        d = cand.get("delta")
+        if d is not None and PREFERRED_DELTA_LOW <= abs(d) <= PREFERRED_DELTA_HIGH:
+            gap = abs(abs(d) - 0.50)
+            if best_delta_gap is None or gap < best_delta_gap:
+                best_delta_gap = gap
+                best_pick = cand
+    if best_pick is None and fallback_pick is not None:
+        fallback_pick["note"] = "No strike found in the preferred delta band nearby — showing best available liquid strike instead"
+        best_pick = fallback_pick
+
+    results = [best_pick]
     if is_call:
-        results.append(make_strike(strikes[min(atm_idx+1, len(strikes)-1)],
-            "Best Strike", "🥇", "ATM+1 — Best liquidity, balanced R:R"))
         results.append(make_strike(strikes[min(atm_idx+2, len(strikes)-1)],
             "Aggressive (OTM)", "🥈", "OTM — Cheaper premium, bigger move needed"))
         results.append(make_strike(strikes[max(atm_idx-1, 0)],
             "Conservative (ITM)", "🥉", "ITM — Safer, already has intrinsic value"))
     else:
-        results.append(make_strike(strikes[max(atm_idx-1, 0)],
-            "Best Strike", "🥇", "ATM-1 — Best liquidity, balanced R:R"))
         results.append(make_strike(strikes[max(atm_idx-2, 0)],
             "Aggressive (OTM)", "🥈", "OTM — Cheaper premium, bigger move needed"))
         results.append(make_strike(strikes[min(atm_idx+1, len(strikes)-1)],
@@ -568,26 +633,32 @@ async def strike_recommendation(
 
     action_label = _action_label(best, regime)
 
+    # ── V2: Strike picks (moved up so Trade Levels can reuse the SAME
+    # recommended strike below, instead of a second, independent ATM-only
+    # LTP lookup drifting from what's actually recommended) ───────────────
+    _is_call_for_picks = "CE" in best if best in ("BUY CE", "BUY PE") else True
+    _atr_for_picks = safe_float((market_data.get("technicals") or {}).get("atr", 0))
+    raw_strikes = _pick_strikes(chain, _is_call_for_picks, spot, atr=_atr_for_picks) if best in ("BUY CE", "BUY PE") else []
+
     # ── V2: Trade levels (only for directional setups) ────────────────────
+    # Bug fix: this previously always priced levels off the ATM strike's
+    # LTP regardless of which strike was actually recommended ("simplified:
+    # use ATM for levels") — now it reuses _pick_strikes' own "Best Strike"
+    # pick (mid-price entry + real delta/theta), so the SL/T1/T2/T3 shown
+    # here match the strike a user would actually buy, and (review #38)
+    # are computed from that strike's real delta × ATR instead of a fixed
+    # 0.45 approximation.
     v2_trade_levels = None
     try:
         if best in ("BUY CE", "BUY PE") and spot > 0:
             direction  = "bullish" if best == "BUY CE" else "bearish"
-            # Get best strike LTP if available
-            _chain     = market_data.get("option_chain", {})
-            _opt_ltp   = 0.0
-            if _chain.get("data"):
-                _strikes = [r["strikePrice"] for r in _chain["data"]]
-                _atm_s   = min(_strikes, key=lambda s: abs(s - spot)) if _strikes else 0
-                _offset  = 1 if direction == "bullish" else -1
-                _tgt_s   = _atm_s  # simplified: use ATM for levels
-                for r in _chain["data"]:
-                    if r["strikePrice"] == _tgt_s:
-                        side_key = "CE" if direction == "bullish" else "PE"
-                        _opt_ltp = safe_float((r.get(side_key) or {}).get("lastPrice", 0))
-                        break
+            _best_strike_pick = raw_strikes[0] if raw_strikes else None
+            _opt_ltp   = _best_strike_pick["entry_price"] if _best_strike_pick else 0.0
+            _delta     = _best_strike_pick.get("delta") if _best_strike_pick else None
+            _theta     = _best_strike_pick.get("theta_per_day") if _best_strike_pick else None
             v2_trade_levels = calculate_trade_levels(
-                market_data, direction, spot, _opt_ltp
+                market_data, direction, spot, _opt_ltp,
+                delta=_delta, theta_per_day=_theta,
             )
     except Exception as _tl:
         logger.warning(f"Trade levels error: {_tl}")
@@ -697,7 +768,10 @@ async def strike_recommendation(
 
     # ── Phase 2F: Strike picks + Liquidity filter ─────────────────────────
     is_call = "CE" in best
-    raw_strikes = _pick_strikes(chain, is_call, spot)
+    # Reuse the picks already computed above (for BUY CE/PE, Trade Levels
+    # needed them) instead of recomputing — SELL CE/PE still computes fresh.
+    if not raw_strikes:
+        raw_strikes = _pick_strikes(chain, is_call, spot, atr=_atr_for_picks)
     strikes = []
     liquidity_warnings = []
     for s in raw_strikes:

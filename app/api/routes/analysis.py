@@ -4,6 +4,7 @@ from app.services.ai_engine import AIEngine
 from app.services.history_service import save_analysis_result
 from app.exceptions import AIProviderError, MarketDataError
 from app.api.deps import get_analyzer, get_ai_engine
+from app.utils.helpers import safe_float
 import logging
 
 router = APIRouter()
@@ -30,7 +31,8 @@ def _pick_recommended_option(market_data: dict, dec: dict) -> dict:
         return {"available": False, "reason": "Option chain unavailable"}
 
     from app.api.routes.strategy import _pick_strikes  # local import — see module docstring on _pick_recommended_option
-    picks = _pick_strikes(chain, is_call=(side == "CALL"), spot=spot)
+    atr = safe_float((market_data.get("technicals") or {}).get("atr", 0))
+    picks = _pick_strikes(chain, is_call=(side == "CALL"), spot=spot, atr=atr)
     if not picks:
         return {"available": False, "reason": "No liquid strike found near ATM"}
 
@@ -43,6 +45,11 @@ def _pick_recommended_option(market_data: dict, dec: dict) -> dict:
         "strike":       chosen["strike"],
         "type":         chosen["type"],
         "expiry":       chosen["expiry"],
+        # "Best Strike" / "Aggressive (OTM)" / "Conservative (ITM)" — kept so
+        # the accuracy engine can grade premium outcomes PER STRIKE LABEL
+        # (signal_accuracy.compute_premium_accuracy's by_moneyness), not just
+        # overall — review point #39/#40 ("எந்த strike வாங்கினால் அதிக probability?").
+        "label":        chosen.get("label"),
         "entry_price":  chosen["entry_price"],   # mid-price estimate — see options_greeks.mid_price
         "entry_ltp":    chosen["ltp"],
         # Review #5: structured CALL/PUT recommendation (SL/targets/theta
@@ -159,6 +166,29 @@ async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine,
     # Review #1: the actual option-premium tracking target for this signal
     # — see _pick_recommended_option docstring.
     result["recommended_option"] = _pick_recommended_option(market_data, dec)
+
+    # Review #4/#45/#46: "Signal Strength 85% ≠ 85% win probability." Attach
+    # the historical win-rate for THIS confidence's bucket (computed from
+    # past graded signals) right alongside the live signal, so the UI can
+    # show the calibration gap instead of implying the raw score is itself
+    # a probability. Best-effort: a fresh DB / no history yet must not break
+    # the analysis response, so this is fully guarded.
+    try:
+        from app.services.signal_accuracy import calibrate_confidence  # local import — avoid circular import at module load
+        result["confidence_calibration"] = await calibrate_confidence(
+            symbol, result.get("signal_strength", 0)
+        )
+    except Exception as _cal_err:
+        logger.warning(f"Confidence calibration unavailable for {symbol}: {_cal_err}")
+        result["confidence_calibration"] = {
+            "signal_strength": result.get("signal_strength", 0),
+            "historical_win_rate_pct": None,
+            "sample_size": 0,
+            "insufficient_data": True,
+            "disclaimer": "Signal Strength ஒரு win probability இல்லை — historical calibration தற்போது கிடைக்கவில்லை.",
+        }
+
+    result["symbol"] = symbol
     result["data_quality"] = {
         "futures_premium": market_data.get("futures_premium_status", "unavailable"),
         "global_market":   market_data.get("global_status", "unavailable"),

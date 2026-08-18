@@ -19,7 +19,9 @@ from app.database import AsyncSessionLocal
 from app.models import MarketData, AnalysisResult, OptionData
 
 from app.services.accuracy_engine import compute_indicator_accuracy
-from app.services.signal_accuracy import compute_signal_accuracy, compute_premium_accuracy, HORIZONS_MINUTES
+from app.services.signal_accuracy import (
+    compute_signal_accuracy, compute_premium_accuracy, calibrate_confidence, HORIZONS_MINUTES,
+)
 import logging
 
 router = APIRouter()
@@ -74,6 +76,28 @@ async def premium_accuracy(
     except Exception as e:
         logger.error(f"Premium accuracy failed for {sym}: {e}")
         raise HTTPException(500, detail="Accuracy computation failed")
+
+
+@router.get("/calibration/{symbol}")
+async def confidence_calibration(
+    symbol: str,
+    confidence: float = Query(..., ge=0, le=100, description="Current Signal Strength (0-100) to look up"),
+    days: int = Query(30, ge=1, le=60),
+    horizon_minutes: int = Query(60, description=f"one of {HORIZONS_MINUTES}"),
+):
+    """Review #4/#46: 'Signal Strength 85% ≠ 85% win probability.' Returns
+    the historical win-rate for the confidence bucket `confidence` falls
+    into, plus the full calibration curve (every bucket), computed from
+    past graded signals — see signal_accuracy.calibrate_confidence.
+    (Note: /api/analysis/ai/{symbol} already attaches this automatically
+    under `confidence_calibration` — this endpoint is for looking it up
+    standalone, e.g. for a different confidence value than the live one.)"""
+    sym = _check_symbol(symbol)
+    try:
+        return await calibrate_confidence(sym, confidence, days=days, horizon_minutes=horizon_minutes)
+    except Exception as e:
+        logger.error(f"Confidence calibration failed for {sym}: {e}")
+        raise HTTPException(500, detail="Calibration computation failed")
 
 
 @router.get("/status/{symbol}")
