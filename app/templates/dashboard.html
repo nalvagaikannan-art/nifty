@@ -1159,7 +1159,19 @@ function ltRenderSignal(d){
   var strikes = d.strikes || [];
   var firstStrike = strikes.length ? strikes[0] : null;
 
-  if((best==='BUY CE'||best==='BUY PE') && (tl || firstStrike)){
+  // BUG FIX: this used to only fire for best==='BUY CE'/'BUY PE', so any
+  // SELL CE / SELL PE recommendation (option-selling — a strategy the
+  // backend does return, see candidates map in analysis.html) fell into
+  // the else branch, and THAT branch only shows the no-trade box for
+  // WAIT/NO TRADE. Net effect: for every SELL CE/PE signal, both the
+  // option box AND the no-trade box stayed hidden — the hero card showed
+  // only the icon+label with no entry/SL/target/reasons at all, looking
+  // like "no signal" to the user even though the backend sent full trade
+  // levels. Now SELL CE/PE renders the same levels box as BUY (entry/SL/
+  // target field names are shared across buy and sell trade levels).
+  var isTradeSignal = (best==='BUY CE'||best==='BUY PE'||best==='SELL CE'||best==='SELL PE');
+
+  if(isTradeSignal && (tl || firstStrike)){
     optBox.style.display = '';
     notrBox.style.display = 'none';
 
@@ -1171,6 +1183,14 @@ function ltRenderSignal(d){
     document.getElementById('lt-sl').textContent  = (firstStrike && firstStrike.sl)  ? '₹' + fmtN(firstStrike.sl, 1)  : (tl && tl.option_sl) ? '₹' + fmtN(tl.option_sl, 1) : '--';
     document.getElementById('lt-t1').textContent  = (firstStrike && firstStrike.t1)  ? '₹' + fmtN(firstStrike.t1, 1)  : (tl && tl.option_t1) ? '₹' + fmtN(tl.option_t1, 1) : '--';
     document.getElementById('lt-t2').textContent  = (firstStrike && firstStrike.t2)  ? '₹' + fmtN(firstStrike.t2, 1)  : (tl && tl.option_t2) ? '₹' + fmtN(tl.option_t2, 1) : '--';
+  } else if(isTradeSignal){
+    // Backend picked BUY/SELL CE/PE but sent no trade_levels/strikes yet
+    // (e.g. mid-refresh, option chain still loading) — don't silently show
+    // nothing; say so instead of leaving both boxes blank.
+    optBox.style.display = 'none';
+    notrBox.style.display = '';
+    document.getElementById('lt-notrade-triggers').innerHTML =
+      '<div class="lt-trigger-row">→ <span>Trade levels ஏற்றப்படுகிறது...</span></div>';
   } else {
     optBox.style.display = 'none';
     // NO TRADE triggers
