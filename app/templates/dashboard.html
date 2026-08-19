@@ -1,1444 +1,275 @@
-{% extends "base.html" %}
-{% block title %}Dashboard — NIFTY AI{% endblock %}
-
-{% block content %}
-<style>
-/* ═══════════════════════════════════════════════════════
-   NIFTY AI — DAY TRADING LIGHT THEME DASHBOARD
-   Mobile-first, desktop upgrades via media queries
-   API: /api/strategy/recommend/{sym} + /api/analysis/ai/{sym}
-   + /api/dashboard/snapshot/{sym}
-═══════════════════════════════════════════════════════ */
-
-/* ── Token system ── */
-:root{
-  --lt-bg:        #F5F7FA;
-  --lt-card:      #FFFFFF;
-  --lt-border:    #E2E8F0;
-  --lt-border2:   #CBD5E1;
-  --lt-text:      #1A202C;
-  --lt-text2:     #4A5568;
-  --lt-text3:     #718096;
-  --lt-green:     #16A34A;
-  --lt-green-bg:  #F0FDF4;
-  --lt-green-bd:  #BBF7D0;
-  --lt-red:       #DC2626;
-  --lt-red-bg:    #FFF5F5;
-  --lt-red-bd:    #FED7D7;
-  --lt-yellow:    #B45309;
-  --lt-yellow-bg: #FFFBEB;
-  --lt-yellow-bd: #FDE68A;
-  --lt-gray-bg:   #F8FAFC;
-  --lt-gray-bd:   #E2E8F0;
-  --lt-blue:      #1D4ED8;
-  --lt-shadow:    0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
-  --lt-shadow-md: 0 4px 12px rgba(0,0,0,.10);
-  --lt-radius:    12px;
-  --lt-radius-sm: 8px;
-}
-
-/* ── Root override — light on this page ── */
-#lt-root {
-  background: var(--lt-bg);
-  color: var(--lt-text);
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  font-size: 15px;
-  min-height: 100vh;
-  padding: 0 0 80px 0; /* bottom nav space */
-}
-#lt-root *, #lt-root *::before, #lt-root *::after { box-sizing: border-box; }
-
-/* ── Header bar ── */
-.lt-header {
-  background: #fff;
-  border-bottom: 1px solid var(--lt-border);
-  padding: 10px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  box-shadow: 0 1px 4px rgba(0,0,0,.06);
-}
-.lt-logo {
-  font-size: 15px;
-  font-weight: 800;
-  color: var(--lt-text);
-  letter-spacing: -.3px;
-}
-.lt-logo span { color: var(--lt-green); }
-.lt-header-right {
-  display: flex; align-items: center; gap: 10px;
-}
-.lt-live-dot {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; font-weight: 600;
-  color: var(--lt-green);
-}
-.lt-live-dot::before {
-  content: '';
-  width: 8px; height: 8px;
-  background: var(--lt-green);
-  border-radius: 50%;
-  display: inline-block;
-  animation: ltpulse 1.8s infinite;
-}
-.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; }
-.lt-live-dot.unavail { color: var(--lt-red); }
-.lt-live-dot.unavail::before { background: var(--lt-red); animation: none; opacity: .6; }
-@keyframes ltpulse {
-  0%,100%{ opacity:1; transform:scale(1); }
-  50%{ opacity:.5; transform:scale(.85); }
-}
-.lt-time {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--lt-text2);
-  font-feature-settings: 'tnum';
-}
-.lt-ref-btn {
-  background: none;
-  border: 1px solid var(--lt-border2);
-  border-radius: 8px;
-  padding: 5px 12px;
-  font-size: 13px;
-  color: var(--lt-text2);
-  cursor: pointer;
-  font-weight: 600;
-  transition: all .15s;
-}
-.lt-ref-btn:hover { border-color: var(--lt-green); color: var(--lt-green); background: var(--lt-green-bg); }
-.lt-ref-btn.spinning { color: var(--lt-yellow); border-color: var(--lt-yellow); }
-
-/* ── Inner content padding ── */
-.lt-body {
-  padding: 12px 12px 0 12px;
-  max-width: 480px;
-  margin: 0 auto;
-}
-
-/* ── Symbol tabs ── */
-.lt-sym-row {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 12px;
-}
-.lt-sym-btn {
-  flex: 1;
-  padding: 8px 0;
-  border: 1.5px solid var(--lt-border2);
-  border-radius: var(--lt-radius-sm);
-  background: var(--lt-card);
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--lt-text2);
-  cursor: pointer;
-  transition: all .15s;
-}
-.lt-sym-btn.active {
-  border-color: var(--lt-green);
-  background: var(--lt-green-bg);
-  color: var(--lt-green);
-}
-
-/* ── Card base ── */
-.lt-card {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius);
-  padding: 14px 16px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow);
-}
-
-/* ── Price card ── */
-.lt-price-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-}
-.lt-price-name {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--lt-text3);
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  margin-bottom: 2px;
-}
-.lt-price-val {
-  font-size: 32px;
-  font-weight: 800;
-  color: var(--lt-text);
-  letter-spacing: -1px;
-  font-feature-settings: 'tnum';
-  line-height: 1;
-}
-.lt-price-chg {
-  font-size: 16px;
-  font-weight: 700;
-  margin-top: 4px;
-  font-feature-settings: 'tnum';
-}
-.lt-price-chg.up { color: var(--lt-green); }
-.lt-price-chg.dn { color: var(--lt-red); }
-.lt-price-right {
-  text-align: right;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-.lt-mkt-badge {
-  display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 20px;
-}
-.lt-mkt-badge.open { background: var(--lt-green-bg); color: var(--lt-green); border: 1px solid var(--lt-green-bd); }
-.lt-mkt-badge.closed { background: var(--lt-red-bg); color: var(--lt-red); border: 1px solid var(--lt-red-bd); }
-.lt-regime-tag {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--lt-text3);
-  background: var(--lt-gray-bg);
-  border: 1px solid var(--lt-border);
-  border-radius: 6px;
-  padding: 3px 8px;
-}
-.lt-updated {
-  font-size: 11px;
-  color: var(--lt-text3);
-  margin-top: 8px;
-}
-
-/* ── Data health mini bar ── */
-.lt-health-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--lt-border);
-  cursor: pointer;
-}
-.lt-health-pct {
-  font-size: 12px;
-  font-weight: 700;
-}
-.lt-health-bar {
-  flex: 1;
-  height: 5px;
-  background: var(--lt-border);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.lt-health-fill {
-  height: 100%;
-  border-radius: 3px;
-  background: var(--lt-green);
-  transition: width .5s;
-}
-.lt-health-details {
-  display: none;
-  margin-top: 10px;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 12px;
-  font-size: 12px;
-}
-.lt-health-details.hidden { display: none; }
-.lt-hd-row { display: flex; justify-content: space-between; align-items: center; }
-.lt-hd-label { color: var(--lt-text2); }
-.lt-hd-val.live { color: var(--lt-green); font-weight: 700; }
-.lt-hd-val.delayed { color: var(--lt-yellow); font-weight: 700; }
-.lt-hd-val.unavail { color: var(--lt-red); font-weight: 700; }
-
-/* ── Metrics grid ── */
-.lt-metrics {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.lt-metric {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius-sm);
-  padding: 10px 12px;
-  box-shadow: var(--lt-shadow);
-}
-.lt-metric-label {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--lt-text3);
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  margin-bottom: 4px;
-}
-.lt-metric-val {
-  font-size: 18px;
-  font-weight: 800;
-  color: var(--lt-text);
-  font-feature-settings: 'tnum';
-  line-height: 1;
-}
-.lt-metric-sub {
-  font-size: 10px;
-  color: var(--lt-text3);
-  margin-top: 3px;
-  font-weight: 600;
-}
-
-/* ── SIGNAL CARD — the hero ── */
-.lt-signal-card {
-  border-radius: var(--lt-radius);
-  padding: 20px 16px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow-md);
-  text-align: center;
-}
-.lt-signal-card.call {
-  background: var(--lt-green-bg);
-  border: 2px solid var(--lt-green-bd);
-}
-.lt-signal-card.put {
-  background: var(--lt-red-bg);
-  border: 2px solid var(--lt-red-bd);
-}
-.lt-signal-card.wait {
-  background: var(--lt-yellow-bg);
-  border: 2px solid var(--lt-yellow-bd);
-}
-.lt-signal-card.notrade {
-  background: var(--lt-gray-bg);
-  border: 2px solid var(--lt-gray-bd);
-}
-
-.lt-sig-icon {
-  font-size: 36px;
-  line-height: 1;
-  margin-bottom: 4px;
-}
-.lt-sig-label {
-  font-size: 28px;
-  font-weight: 900;
-  letter-spacing: -0.5px;
-  line-height: 1.1;
-  margin-bottom: 6px;
-}
-.lt-sig-label.call { color: var(--lt-green); }
-.lt-sig-label.put  { color: var(--lt-red); }
-.lt-sig-label.wait { color: var(--lt-yellow); }
-.lt-sig-label.notrade { color: var(--lt-text2); }
-
-.lt-sig-conf-row {
-  display: flex;
-  justify-content: center;
-  gap: 20px;
-  margin: 10px 0;
-}
-.lt-sig-conf-item {
-  text-align: center;
-}
-.lt-sig-conf-num {
-  font-size: 22px;
-  font-weight: 800;
-  font-feature-settings: 'tnum';
-  line-height: 1;
-}
-.lt-sig-conf-label {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--lt-text3);
-  margin-top: 3px;
-}
-
-/* ── Option recommendation box ── */
-.lt-option-box {
-  background: rgba(0,0,0,.03);
-  border-radius: var(--lt-radius-sm);
-  padding: 14px;
-  margin: 12px 0 0 0;
-  text-align: left;
-}
-.lt-strike {
-  font-size: 22px;
-  font-weight: 800;
-  color: var(--lt-text);
-  margin-bottom: 10px;
-  text-align: center;
-}
-.lt-levels {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.lt-level-item {
-  display: flex;
-  flex-direction: column;
-}
-.lt-level-label {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--lt-text3);
-  margin-bottom: 2px;
-}
-.lt-level-val {
-  font-size: 18px;
-  font-weight: 800;
-  font-feature-settings: 'tnum';
-  color: var(--lt-text);
-}
-.lt-level-val.entry { color: var(--lt-blue); }
-.lt-level-val.sl    { color: var(--lt-red); }
-.lt-level-val.tgt   { color: var(--lt-green); }
-
-/* ── WHY card ── */
-.lt-why-card {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius);
-  padding: 14px 16px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow);
-}
-.lt-why-title {
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  color: var(--lt-text3);
-  margin-bottom: 10px;
-}
-.lt-reason-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 5px 0;
-  font-size: 13px;
-  color: var(--lt-text2);
-  border-bottom: 1px solid var(--lt-border);
-  line-height: 1.4;
-}
-.lt-reason-row:last-child { border-bottom: none; }
-.lt-reason-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
-.lt-reason-text { flex: 1; }
-
-/* ── Tamil explanation ── */
-.lt-tamil-card {
-  background: linear-gradient(135deg, #EFF6FF 0%, #F0FDF4 100%);
-  border: 1px solid #BFDBFE;
-  border-radius: var(--lt-radius);
-  padding: 14px 16px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow);
-}
-.lt-tamil-label {
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  color: #3B82F6;
-  margin-bottom: 8px;
-}
-.lt-tamil-text {
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--lt-text2);
-}
-
-/* ── No Trade box ── */
-.lt-notrade-box {
-  background: var(--lt-gray-bg);
-  border: 1px solid var(--lt-border2);
-  border-radius: var(--lt-radius-sm);
-  padding: 14px;
-  margin-top: 10px;
-  text-align: left;
-}
-.lt-notrade-title {
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--lt-text2);
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  margin-bottom: 8px;
-}
-.lt-trigger-row {
-  font-size: 13px;
-  color: var(--lt-text2);
-  padding: 4px 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-/* ── S/R levels ── */
-.lt-sr-card {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius);
-  padding: 14px 16px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow);
-}
-.lt-sr-title {
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  color: var(--lt-text3);
-  margin-bottom: 12px;
-}
-.lt-sr-row {
-  display: flex;
-  align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--lt-border);
-  gap: 10px;
-}
-.lt-sr-row:last-child { border-bottom: none; }
-.lt-sr-tag {
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: .06em;
-  width: 26px;
-  flex-shrink: 0;
-}
-.lt-sr-tag.r { color: var(--lt-red); }
-.lt-sr-tag.s { color: var(--lt-green); }
-.lt-sr-tag.cur { color: var(--lt-blue); }
-.lt-sr-bar-wrap { flex: 1; height: 4px; background: var(--lt-border); border-radius: 2px; position: relative; overflow: visible; }
-.lt-sr-marker {
-  position: absolute;
-  top: -4px;
-  height: 12px;
-  width: 3px;
-  border-radius: 2px;
-}
-.lt-sr-marker.r { background: var(--lt-red); }
-.lt-sr-marker.s { background: var(--lt-green); }
-.lt-sr-marker.cur { background: var(--lt-blue); }
-.lt-sr-val {
-  font-size: 15px;
-  font-weight: 800;
-  font-feature-settings: 'tnum';
-  width: 70px;
-  text-align: right;
-  flex-shrink: 0;
-}
-.lt-sr-val.r { color: var(--lt-red); }
-.lt-sr-val.s { color: var(--lt-green); }
-.lt-sr-val.cur { color: var(--lt-blue); }
-
-/* ── CALL vs PUT side-by-side ── */
-.lt-compare {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.lt-compare-col {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius-sm);
-  padding: 12px;
-  text-align: center;
-  box-shadow: var(--lt-shadow);
-}
-.lt-compare-col.active-call {
-  background: var(--lt-green-bg);
-  border-color: var(--lt-green-bd);
-}
-.lt-compare-col.active-put {
-  background: var(--lt-red-bg);
-  border-color: var(--lt-red-bd);
-}
-.lt-comp-type { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--lt-text3); margin-bottom: 4px; }
-.lt-comp-strike { font-size: 18px; font-weight: 800; color: var(--lt-text); margin-bottom: 4px; font-feature-settings: 'tnum'; }
-.lt-comp-ltp { font-size: 14px; font-weight: 700; color: var(--lt-text2); margin-bottom: 6px; font-feature-settings: 'tnum'; }
-.lt-comp-bias {
-  display: inline-block;
-  font-size: 11px;
-  font-weight: 800;
-  padding: 3px 10px;
-  border-radius: 12px;
-  margin-bottom: 4px;
-}
-.lt-comp-bias.buy { background: var(--lt-green-bg); color: var(--lt-green); }
-.lt-comp-bias.avoid { background: var(--lt-gray-bg); color: var(--lt-text3); }
-.lt-comp-conf { font-size: 12px; color: var(--lt-text3); margin-top: 4px; }
-.lt-comp-tgt { font-size: 11px; color: var(--lt-green); font-weight: 700; margin-top: 3px; }
-
-/* ── Advanced toggle ── */
-.lt-adv-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius);
-  margin-bottom: 10px;
-  cursor: pointer;
-  box-shadow: var(--lt-shadow);
-  user-select: none;
-}
-.lt-adv-toggle-label {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--lt-text2);
-}
-.lt-adv-toggle-arr { font-size: 16px; color: var(--lt-text3); transition: transform .2s; }
-.lt-adv-toggle-arr.open { transform: rotate(90deg); }
-
-.lt-adv-panel {
-  display: none;
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-top: none;
-  border-radius: 0 0 var(--lt-radius) var(--lt-radius);
-  padding: 12px 16px 16px;
-  margin-top: -12px;
-  margin-bottom: 10px;
-  box-shadow: var(--lt-shadow);
-}
-.lt-adv-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-.lt-adv-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 13px;
-  padding: 4px 0;
-  border-bottom: 1px solid var(--lt-border);
-}
-.lt-adv-item:nth-last-child(-n+2) { border-bottom: none; }
-.lt-adv-name { color: var(--lt-text3); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
-.lt-adv-val  { color: var(--lt-text); font-weight: 700; font-size: 13px; font-feature-settings:'tnum'; }
-
-/* ── Timeframe row ── */
-.lt-tf-row {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-bottom: 10px;
-}
-.lt-tf-box {
-  background: var(--lt-card);
-  border: 1px solid var(--lt-border);
-  border-radius: var(--lt-radius-sm);
-  padding: 8px 10px;
-  text-align: center;
-  box-shadow: var(--lt-shadow);
-}
-.lt-tf-label { font-size: 10px; font-weight: 700; color: var(--lt-text3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
-.lt-tf-val   { font-size: 15px; font-weight: 800; }
-.lt-tf-val.up   { color: var(--lt-green); }
-.lt-tf-val.down { color: var(--lt-red); }
-.lt-tf-val.side, .lt-tf-val.unavail { color: var(--lt-text3); }
-
-/* ── Action buttons ── */
-.lt-action-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.lt-action-btn {
-  padding: 12px;
-  border-radius: var(--lt-radius-sm);
-  border: 1.5px solid var(--lt-border2);
-  background: var(--lt-card);
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--lt-text2);
-  cursor: pointer;
-  text-align: center;
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  transition: all .15s;
-  box-shadow: var(--lt-shadow);
-}
-.lt-action-btn:hover { border-color: var(--lt-green); color: var(--lt-green); background: var(--lt-green-bg); }
-
-/* ── Bottom nav ── */
-.lt-bottom-nav {
-  position: fixed;
-  bottom: 0; left: 0; right: 0;
-  background: #fff;
-  border-top: 1px solid var(--lt-border);
-  display: flex;
-  z-index: 100;
-  box-shadow: 0 -2px 10px rgba(0,0,0,.08);
-  padding-bottom: env(safe-area-inset-bottom);
-}
-.lt-nav-item {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 8px 4px;
-  text-decoration: none;
-  color: var(--lt-text3);
-  font-size: 10px;
-  font-weight: 700;
-  gap: 3px;
-  transition: color .15s;
-}
-.lt-nav-item .lt-nav-icon { font-size: 20px; }
-.lt-nav-item.active, .lt-nav-item:hover { color: var(--lt-green); }
-
-/* ── Warning banner ── */
-.lt-warn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 8px 12px;
-  border-radius: var(--lt-radius-sm);
-  margin-bottom: 8px;
-}
-.lt-warn.yellow { background: var(--lt-yellow-bg); border: 1px solid var(--lt-yellow-bd); color: var(--lt-yellow); }
-.lt-warn.red    { background: var(--lt-red-bg);    border: 1px solid var(--lt-red-bd);    color: var(--lt-red); }
-
-/* ── Desktop: 2-col layout ── */
-@media(min-width:720px){
-  .lt-body { max-width: 960px; padding: 16px 24px 0; }
-  .lt-desktop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .lt-desktop-grid > * { margin-bottom: 0; }
-  #lt-root { padding-bottom: 0; }
-  .lt-bottom-nav { display: none; }
-}
-
-/* ── Skeleton loading ── */
-.lt-skel { background: linear-gradient(90deg, #e5e7eb 25%, #f3f4f6 50%, #e5e7eb 75%); background-size: 200% 100%; animation: ltskel 1.2s infinite; border-radius: 6px; }
-@keyframes ltskel { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
-
-/* ── Utility ── */
-.lt-divider { border: none; border-top: 1px solid var(--lt-border); margin: 8px 0; }
-.lt-hidden { display: none !important; }
-</style>
-
-<div id="lt-root">
-
-  <!-- ── STICKY HEADER ── -->
-  <header class="lt-header">
-    <div class="lt-logo">NIFTY <span>AI</span></div>
-    <div class="lt-header-right">
-      <span class="lt-status-group" id="lt-status-group" title="Click to refresh status">
-        <span class="lt-live-dot unavail" id="lt-status-ai">● AI</span>
-        <span class="lt-live-dot unavail" id="lt-status-angel">● Angel One</span>
-        <span class="lt-live-dot unavail" id="lt-status-market">● Market</span>
-      </span>
-      <span class="lt-time" id="lt-clock">--:-- --</span>
-      <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh()">↻ Refresh</button>
-    </div>
-  </header>
-
-  <div class="lt-body">
-
-    <!-- ── SYMBOL TABS ── -->
-    <div class="lt-sym-row">
-      <button class="lt-sym-btn active" data-sym="NIFTY" onclick="ltSetSym(this,'NIFTY')">NIFTY</button>
-      <button class="lt-sym-btn" data-sym="BANKNIFTY" onclick="ltSetSym(this,'BANKNIFTY')">BANK</button>
-      <button class="lt-sym-btn" data-sym="FINNIFTY" onclick="ltSetSym(this,'FINNIFTY')">FIN</button>
-    </div>
-
-    <!-- ── WARNINGS ── -->
-    <div id="lt-warnings"></div>
-
-    <!-- DESKTOP GRID START -->
-    <div class="lt-desktop-grid">
-
-    <!-- ── LEFT COL ── -->
-    <div id="lt-left-col">
-
-    <!-- ── PRICE CARD ── -->
-    <div class="lt-card" style="margin-bottom:10px;">
-      <div class="lt-price-row">
-        <div>
-          <div class="lt-price-name" id="lt-sym-name">NIFTY 50</div>
-          <div class="lt-price-val" id="lt-price">--</div>
-          <div class="lt-price-chg" id="lt-chg">-- (--%)</div>
-        </div>
-        <div class="lt-price-right">
-          <div class="lt-mkt-badge closed" id="lt-mkt-badge">● LOADING</div>
-          <div class="lt-regime-tag" id="lt-regime-tag">--</div>
-        </div>
-      </div>
-
-      <!-- Data Health -->
-      <div class="lt-health-row" onclick="ltToggleHealth()">
-        <span style="font-size:11px;font-weight:700;color:var(--lt-text3);">Data Health</span>
-        <div class="lt-health-bar"><div class="lt-health-fill" id="lt-health-fill" style="width:0%"></div></div>
-        <span class="lt-health-pct" id="lt-health-pct">--</span>
-        <span style="font-size:12px;color:var(--lt-text3);">▼</span>
-      </div>
-      <div class="lt-health-details hidden" id="lt-health-details">
-        <div class="lt-hd-row"><span class="lt-hd-label">Spot</span><span class="lt-hd-val" id="hd-spot">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">Option Chain</span><span class="lt-hd-val" id="hd-chain">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">VIX</span><span class="lt-hd-val" id="hd-vix">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">Futures</span><span class="lt-hd-val" id="hd-fut">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">Intraday</span><span class="lt-hd-val" id="hd-intra">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">FII/DII</span><span class="lt-hd-val" id="hd-fii">--</span></div>
-        <div class="lt-hd-row"><span class="lt-hd-label">Global</span><span class="lt-hd-val" id="hd-global">--</span></div>
-      </div>
-
-      <div class="lt-updated" id="lt-updated">Loading...</div>
-    </div>
-
-    <!-- ── METRICS 3×2 ── -->
-    <div class="lt-metrics">
-      <div class="lt-metric">
-        <div class="lt-metric-label">India VIX</div>
-        <div class="lt-metric-val" id="m-vix">--</div>
-        <div class="lt-metric-sub" id="m-vix-sub">--</div>
-      </div>
-      <div class="lt-metric">
-        <div class="lt-metric-label">PCR</div>
-        <div class="lt-metric-val" id="m-pcr">--</div>
-        <div class="lt-metric-sub" id="m-pcr-sub">--</div>
-      </div>
-      <div class="lt-metric">
-        <div class="lt-metric-label">Max Pain</div>
-        <div class="lt-metric-val" id="m-mp">--</div>
-        <div class="lt-metric-sub">Strike</div>
-      </div>
-      <div class="lt-metric">
-        <div class="lt-metric-label">ATM Strike</div>
-        <div class="lt-metric-val" id="m-atm">--</div>
-        <div class="lt-metric-sub">Current</div>
-      </div>
-      <div class="lt-metric">
-        <div class="lt-metric-label">Futures</div>
-        <div class="lt-metric-val" id="m-fut">--</div>
-        <div class="lt-metric-sub" id="m-fut-sub">Premium</div>
-      </div>
-      <div class="lt-metric">
-        <div class="lt-metric-label">ATM IV</div>
-        <div class="lt-metric-val" id="m-iv">--</div>
-        <div class="lt-metric-sub">Implied Vol</div>
-      </div>
-    </div>
-
-    <!-- ── TIMEFRAMES ── -->
-    <div class="lt-tf-row">
-      <div class="lt-tf-box"><div class="lt-tf-label">5 Min</div><div class="lt-tf-val" id="tf-5m">--</div></div>
-      <div class="lt-tf-box"><div class="lt-tf-label">15 Min</div><div class="lt-tf-val" id="tf-15m">--</div></div>
-      <div class="lt-tf-box"><div class="lt-tf-label">1 Hour</div><div class="lt-tf-val" id="tf-1h">--</div></div>
-    </div>
-
-    </div><!-- /lt-left-col -->
-
-    <!-- ── RIGHT COL ── -->
-    <div id="lt-right-col">
-
-    <!-- ── SIGNAL CARD ── -->
-    <div class="lt-signal-card wait" id="lt-sig-card">
-      <div class="lt-sig-icon" id="lt-sig-icon">⏳</div>
-      <div class="lt-sig-label wait" id="lt-sig-label">LOADING...</div>
-
-      <div class="lt-sig-conf-row">
-        <div class="lt-sig-conf-item">
-          <div class="lt-sig-conf-num" id="lt-conf-num">--</div>
-          <div class="lt-sig-conf-label">Signal Strength</div>
-        </div>
-        <div class="lt-sig-conf-item">
-          <div class="lt-sig-conf-num" id="lt-risk-num">--</div>
-          <div class="lt-sig-conf-label">Risk Level</div>
-        </div>
-      </div>
-
-      <!-- Option recommendation (shown when CALL/PUT) -->
-      <div class="lt-option-box" id="lt-opt-box" style="display:none;">
-        <div class="lt-strike" id="lt-opt-strike">--</div>
-        <div class="lt-levels">
-          <div class="lt-level-item">
-            <div class="lt-level-label">Entry</div>
-            <div class="lt-level-val entry" id="lt-entry">--</div>
-          </div>
-          <div class="lt-level-item">
-            <div class="lt-level-label">Stop Loss</div>
-            <div class="lt-level-val sl" id="lt-sl">--</div>
-          </div>
-          <div class="lt-level-item">
-            <div class="lt-level-label">Target 1</div>
-            <div class="lt-level-val tgt" id="lt-t1">--</div>
-          </div>
-          <div class="lt-level-item">
-            <div class="lt-level-label">Target 2</div>
-            <div class="lt-level-val tgt" id="lt-t2">--</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- NO TRADE triggers -->
-      <div class="lt-notrade-box" id="lt-notrade-box" style="display:none;">
-        <div class="lt-notrade-title">காத்திருங்கள் — Entry எங்கே?</div>
-        <div id="lt-notrade-triggers"></div>
-      </div>
-    </div>
-
-    <!-- ── CALL vs PUT comparison ── -->
-    <div class="lt-compare" id="lt-compare" style="display:none;">
-      <div class="lt-compare-col" id="lt-call-col">
-        <div class="lt-comp-type">CALL CE</div>
-        <div class="lt-comp-strike" id="cmp-ce-strike">--</div>
-        <div class="lt-comp-ltp" id="cmp-ce-ltp">₹--</div>
-        <div class="lt-comp-bias" id="cmp-ce-bias">--</div>
-        <div class="lt-comp-conf" id="cmp-ce-conf">--</div>
-        <div class="lt-comp-tgt" id="cmp-ce-tgt"></div>
-      </div>
-      <div class="lt-compare-col" id="lt-put-col">
-        <div class="lt-comp-type">PUT PE</div>
-        <div class="lt-comp-strike" id="cmp-pe-strike">--</div>
-        <div class="lt-comp-ltp" id="cmp-pe-ltp">₹--</div>
-        <div class="lt-comp-bias" id="cmp-pe-bias">--</div>
-        <div class="lt-comp-conf" id="cmp-pe-conf">--</div>
-        <div class="lt-comp-tgt" id="cmp-pe-tgt"></div>
-      </div>
-    </div>
-
-    <!-- ── WHY? ── -->
-    <div class="lt-why-card" id="lt-why-card">
-      <div class="lt-why-title">ஏன் இந்த signal?</div>
-      <div id="lt-reasons"></div>
-    </div>
-
-    <!-- ── TAMIL EXPLANATION ── -->
-    <div class="lt-tamil-card" id="lt-tamil-card" style="display:none;">
-      <div class="lt-tamil-label">📖 தமிழில் விளக்கம்</div>
-      <div class="lt-tamil-text" id="lt-tamil-text">--</div>
-    </div>
-
-    </div><!-- /lt-right-col -->
-    </div><!-- /lt-desktop-grid -->
-
-    <!-- ── SUPPORT / RESISTANCE ── -->
-    <div class="lt-sr-card">
-      <div class="lt-sr-title">Support / Resistance நிலைகள்</div>
-      <div id="lt-sr-rows">
-        <div class="lt-sr-row"><span class="lt-sr-tag r">R2</span><div class="lt-sr-bar-wrap"><div class="lt-sr-marker r" style="left:85%"></div></div><span class="lt-sr-val r">--</span></div>
-        <div class="lt-sr-row"><span class="lt-sr-tag r">R1</span><div class="lt-sr-bar-wrap"><div class="lt-sr-marker r" style="left:65%"></div></div><span class="lt-sr-val r">--</span></div>
-        <div class="lt-sr-row"><span class="lt-sr-tag cur">●</span><div class="lt-sr-bar-wrap"><div class="lt-sr-marker cur" style="left:50%"></div></div><span class="lt-sr-val cur" id="lt-spot-sr">--</span></div>
-        <div class="lt-sr-row"><span class="lt-sr-tag s">S1</span><div class="lt-sr-bar-wrap"><div class="lt-sr-marker s" style="left:35%"></div></div><span class="lt-sr-val s">--</span></div>
-        <div class="lt-sr-row"><span class="lt-sr-tag s">S2</span><div class="lt-sr-bar-wrap"><div class="lt-sr-marker s" style="left:15%"></div></div><span class="lt-sr-val s">--</span></div>
-      </div>
-    </div>
-
-    <!-- ── ADVANCED TOGGLE ── -->
-    <div class="lt-adv-toggle" onclick="ltToggleAdv()">
-      <span class="lt-adv-toggle-label">▶ Advanced Indicators</span>
-      <span class="lt-adv-toggle-arr" id="lt-adv-arr">›</span>
-    </div>
-    <div class="lt-adv-panel" id="lt-adv-panel">
-      <div class="lt-adv-grid">
-        <div class="lt-adv-item"><span class="lt-adv-name">RSI</span><span class="lt-adv-val" id="adv-rsi">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">MACD</span><span class="lt-adv-val" id="adv-macd">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">ADX</span><span class="lt-adv-val" id="adv-adx">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">EMA20</span><span class="lt-adv-val" id="adv-ema20">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">EMA50</span><span class="lt-adv-val" id="adv-ema50">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">VWAP</span><span class="lt-adv-val" id="adv-vwap">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">Supertrend</span><span class="lt-adv-val" id="adv-st">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">ATR</span><span class="lt-adv-val" id="adv-atr">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">Bull Score</span><span class="lt-adv-val" id="adv-bull">--</span></div>
-        <div class="lt-adv-item"><span class="lt-adv-name">Bear Score</span><span class="lt-adv-val" id="adv-bear">--</span></div>
-      </div>
-    </div>
-
-    <!-- ── ACTION LINKS ── -->
-    <div class="lt-action-row">
-      <a class="lt-action-btn" href="/analysis">📊 Full Analysis</a>
-      <a class="lt-action-btn" href="/options">🔗 Option Chain</a>
-    </div>
-    <div class="lt-action-row">
-      <a class="lt-action-btn" href="/accuracy">🎯 Accuracy</a>
-      <a class="lt-action-btn" href="/market">🌍 Market Intel</a>
-    </div>
-
-    <div style="font-size:11px;color:var(--lt-text3);text-align:center;padding:12px 0 4px;">
-      Analysis + Decision Support மட்டும். இது investment advice அல்ல.
-    </div>
-
-  </div><!-- /lt-body -->
-
-  <!-- ── BOTTOM NAV ── -->
-  <nav class="lt-bottom-nav">
-    <a class="lt-nav-item active" href="/dashboard"><span class="lt-nav-icon">🏠</span>Home</a>
-    <a class="lt-nav-item" href="/analysis"><span class="lt-nav-icon">📊</span>Analysis</a>
-    <a class="lt-nav-item" href="/options"><span class="lt-nav-icon">🔗</span>Options</a>
-    <a class="lt-nav-item" href="/accuracy"><span class="lt-nav-icon">🎯</span>Accuracy</a>
-    <a class="lt-nav-item" href="/settings"><span class="lt-nav-icon">⚙️</span>Settings</a>
-  </nav>
-
-</div><!-- /lt-root -->
-
-<script>
-// ═══════════════════════════════════════════════════
-//  NIFTY AI Light Dashboard — JS
-//  APIs: /api/strategy/recommend/{sym}
-//        /api/analysis/ai/{sym}  (for tamil + reasons)
-//        /api/dashboard/snapshot/{sym} (spot+metrics)
-// ═══════════════════════════════════════════════════
-
-var ltSym = 'NIFTY';
-var ltLoading = false;
-var ltLastData = null;
-var ltAutoInterval = null;
-
-// ── Clock ──
-function ltClock(){
-  var now = new Date();
-  var h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
-  var ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  document.getElementById('lt-clock').textContent =
-    pad2(h)+':'+pad2(m)+':'+pad2(s)+' '+ampm;
-}
-function pad2(n){ return n < 10 ? '0'+n : ''+n; }
-setInterval(ltClock, 1000);
-ltClock();
-
-// ── Symbol selector ──
-function ltSetSym(btn, sym){
-  document.querySelectorAll('.lt-sym-btn').forEach(function(b){ b.classList.remove('active'); });
-  btn.classList.add('active');
-  ltSym = sym;
-  document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
-  ltRefresh();
-}
-
-// ── Refresh ──
-// ── AI / Angel One / Market status badges (replaces the old always-on static 'LIVE' text) ──
-function ltUpdateStatus(){
-  fetch('/api/dashboard/status')
-    .then(function(r){ return r.json(); })
-    .then(function(s){
-      var ai = document.getElementById('lt-status-ai');
-      ai.className = 'lt-live-dot ' + (s.ai_provider_configured ? 'live' : 'unavail');
-      ai.textContent = '● AI' + (s.ai_provider_configured && s.ai_providers_available && s.ai_providers_available.length
-        ? ' (' + s.ai_providers_available[0] + ')' : '');
-
-      var angel = document.getElementById('lt-status-angel');
-      angel.className = 'lt-live-dot ' + (s.angel_one_connected ? 'live' : 'unavail');
-      angel.textContent = '● Angel One';
-
-      var mkt = document.getElementById('lt-status-market');
-      mkt.className = 'lt-live-dot ' + (s.market_open ? 'live' : 'unavail');
-      mkt.textContent = s.market_open ? '● Market Open' : '● Market Closed';
-    })
-    .catch(function(){
-      ['lt-status-ai','lt-status-angel','lt-status-market'].forEach(function(id){
-        var el = document.getElementById(id);
-        el.className = 'lt-live-dot unavail';
-      });
-    });
-}
-
-function ltRefresh(){
-  if(ltLoading) return;
-  ltLoading = true;
-  var btn = document.getElementById('lt-ref-btn');
-  btn.textContent = '⏳';
-  btn.classList.add('spinning');
-
-  ltUpdateStatus();
-
-  // Fetch strategy (primary — has strikes, levels, regime, confluence)
-  fetch('/api/strategy/recommend/' + ltSym)
-    .then(function(r){ return r.json(); })
-    .then(function(d){
-      ltLastData = d;
-      ltRenderSignal(d);
-      ltRenderMetrics(d);
-      ltRenderSR(d);
-      ltRenderCompare(d);
-      ltRenderAdvanced(d);
-      ltRenderTimeframes(d);
-      ltRenderWarnings(d);
-      ltRenderDataHealth(d);
-      document.getElementById('lt-updated').textContent = 'Updated: ' + ltNow();
-    })
-    .catch(function(e){
-      ltShowWarn('red', '⚠ Strategy data fetch failed: ' + e.message);
-    })
-    .finally(function(){
-      ltLoading = false;
-      btn.textContent = '↻ Refresh';
-      btn.classList.remove('spinning');
-    });
-
-  // Fetch AI analysis for tamil explanation + reason text
-  fetch('/api/analysis/ai/' + ltSym)
-    .then(function(r){ return r.json(); })
-    .then(function(d){ ltRenderTamil(d); ltRenderReasons(d); })
-    .catch(function(){});
-}
-
-// ── Signal card ──
-function ltRenderSignal(d){
-  var best = (d.best_strategy || 'WAIT').toUpperCase();
-  var card = document.getElementById('lt-sig-card');
-  var icon = document.getElementById('lt-sig-icon');
-  var label = document.getElementById('lt-sig-label');
-  var conf = document.getElementById('lt-conf-num');
-  var risk = document.getElementById('lt-risk-num');
-  var optBox = document.getElementById('lt-opt-box');
-  var notrBox = document.getElementById('lt-notrade-box');
-
-  // Card theme
-  card.className = 'lt-signal-card';
-  label.className = 'lt-sig-label';
-
-  if(best === 'BUY CE'){
-    card.classList.add('call'); label.classList.add('call');
-    icon.textContent = '🟢'; label.textContent = 'CALL BUY';
-  } else if(best === 'BUY PE'){
-    card.classList.add('put'); label.classList.add('put');
-    icon.textContent = '🔴'; label.textContent = 'PUT BUY';
-  } else if(best === 'SELL CE'){
-    card.classList.add('wait'); label.classList.add('wait');
-    icon.textContent = '🟡'; label.textContent = 'SELL CE';
-  } else if(best === 'SELL PE'){
-    card.classList.add('wait'); label.classList.add('wait');
-    icon.textContent = '🟡'; label.textContent = 'SELL PE';
-  } else if((d.action||'').toUpperCase().includes('NO TRADE')){
-    card.classList.add('notrade'); label.classList.add('notrade');
-    icon.textContent = '⚪'; label.textContent = 'NO TRADE';
-  } else {
-    card.classList.add('wait'); label.classList.add('wait');
-    icon.textContent = '🟡'; label.textContent = 'WAIT';
-  }
-
-  conf.textContent = (d.signal_strength || d.confidence || '--') + ' / 100';
-  var rl = (d.v2_risk && d.v2_risk.risk_level) || 'MEDIUM';
-  risk.textContent = rl;
-  risk.style.color = rl==='LOW'?'var(--lt-green)':rl==='HIGH'||rl==='EXTREME'?'var(--lt-red)':'var(--lt-yellow)';
-
-  // Option box
-  var tl = d.v2_trade_levels;
-  var strikes = d.strikes || [];
-  var firstStrike = strikes.length ? strikes[0] : null;
-
-  if((best==='BUY CE'||best==='BUY PE') && (tl || firstStrike)){
-    optBox.style.display = '';
-    notrBox.style.display = 'none';
-
-    var strikeTxt = firstStrike ? (firstStrike.strike + ' ' + firstStrike.type + (firstStrike.expiry?' ('+firstStrike.expiry+')':'')) : '--';
-    document.getElementById('lt-opt-strike').textContent = strikeTxt;
-
-    var entryLow = firstStrike ? firstStrike.entry_price : (tl ? tl.option_entry : 0);
-    document.getElementById('lt-entry').textContent = entryLow ? '₹' + fmtN(entryLow, 1) : '--';
-    document.getElementById('lt-sl').textContent  = (firstStrike && firstStrike.sl)  ? '₹' + fmtN(firstStrike.sl, 1)  : (tl && tl.option_sl) ? '₹' + fmtN(tl.option_sl, 1) : '--';
-    document.getElementById('lt-t1').textContent  = (firstStrike && firstStrike.t1)  ? '₹' + fmtN(firstStrike.t1, 1)  : (tl && tl.option_t1) ? '₹' + fmtN(tl.option_t1, 1) : '--';
-    document.getElementById('lt-t2').textContent  = (firstStrike && firstStrike.t2)  ? '₹' + fmtN(firstStrike.t2, 1)  : (tl && tl.option_t2) ? '₹' + fmtN(tl.option_t2, 1) : '--';
-  } else {
-    optBox.style.display = 'none';
-    // NO TRADE triggers
-    if(best==='WAIT' || (d.action||'').includes('NO TRADE') || (d.action||'').includes('WAIT')){
-      notrBox.style.display = '';
-      var trigs = document.getElementById('lt-notrade-triggers');
-      var spot = d.spot || 0;
-      var sr = (d.market_regime && d.market_regime.reasons) ? d.market_regime.reasons : [];
-      var waitR = d.wait_reasons || [];
-      var lines = waitR.concat(sr).slice(0,4);
-      if(!lines.length) lines = ['Direction confirmation-க்கு காத்திருக்கவும்'];
-      trigs.innerHTML = lines.map(function(r){
-        return '<div class="lt-trigger-row">→ <span>' + ltEsc(r) + '</span></div>';
-      }).join('');
-    } else {
-      notrBox.style.display = 'none';
+from fastapi import APIRouter, Depends, HTTPException
+from app.services.market_analyzer import MarketAnalyzer
+from app.services.ai_engine import AIEngine
+from app.services.history_service import save_analysis_result
+from app.exceptions import AIProviderError, MarketDataError
+from app.api.deps import get_analyzer, get_ai_engine
+from app.utils.helpers import safe_float
+import logging
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _pick_recommended_option(market_data: dict, dec: dict) -> dict:
+    """Picks ONE concrete strike (contract) matching the rule engine's
+    preferred_side + recommended_strike label (ATM / ATM+1), with a
+    mid-price entry estimate. Review #1: this is what lets the accuracy
+    engine grade the SIGNAL AN OPTION BUYER WOULD ACTUALLY TAKE — a specific
+    contract's premium — instead of only grading spot direction, which the
+    review correctly points out can be "right" while the option itself
+    loses money to theta/IV crush. Reuses strategy.py's own strike-picking
+    (`_pick_strikes` — liquidity filter, mid-price, Greeks) as the single
+    source of truth instead of a second, drifting implementation."""
+    side = (dec.get("preferred_side") or "NONE").upper()
+    if side not in ("CALL", "PUT"):
+        return {"available": False, "reason": "No directional signal (NONE) — nothing to track premium for"}
+
+    chain = market_data.get("option_chain") or {}
+    spot = (market_data.get("spot") or {}).get("price", 0)
+    if not chain.get("data") or spot <= 0:
+        return {"available": False, "reason": "Option chain unavailable"}
+
+    from app.api.routes.strategy import _pick_strikes  # local import — see module docstring on _pick_recommended_option
+    atr = safe_float((market_data.get("technicals") or {}).get("atr", 0))
+    picks = _pick_strikes(chain, is_call=(side == "CALL"), spot=spot, atr=atr)
+    if not picks:
+        return {"available": False, "reason": "No liquid strike found near ATM"}
+
+    # recommended_strike label from decision_engine is "ATM" or "ATM+1" —
+    # _pick_strikes' first ("Best Strike") pick IS the ATM+1/ATM-1 liquidity
+    # pick already; fall back to it either way since it's always liquid.
+    chosen = picks[0]
+    return {
+        "available":    True,
+        "strike":       chosen["strike"],
+        "type":         chosen["type"],
+        "expiry":       chosen["expiry"],
+        # "Best Strike" / "Aggressive (OTM)" / "Conservative (ITM)" — kept so
+        # the accuracy engine can grade premium outcomes PER STRIKE LABEL
+        # (signal_accuracy.compute_premium_accuracy's by_moneyness), not just
+        # overall — review point #39/#40 ("எந்த strike வாங்கினால் அதிக probability?").
+        "label":        chosen.get("label"),
+        "entry_price":  chosen["entry_price"],   # mid-price estimate — see options_greeks.mid_price
+        "entry_ltp":    chosen["ltp"],
+        # Review #5: structured CALL/PUT recommendation (SL/targets/theta
+        # risk alongside strike/entry), not just a bare "CALL BUY" string —
+        # _pick_strikes already computes all of this for the /strategy
+        # route; surfacing it here too means the SAME numbers a user would
+        # see on the Strategy page are what the Accuracy engine grades
+        # against, instead of two independent SL/target calculations
+        # potentially drifting apart.
+        "sl":           chosen.get("sl"),
+        "t1":           chosen.get("t1"),
+        "t2":           chosen.get("t2"),
+        "t3":           chosen.get("t3"),
+        "risk_reward":  chosen.get("rr"),
+        "delta":        chosen.get("delta"),
+        "theta_per_day": chosen.get("theta_per_day"),
+        "theta_pct_of_entry": chosen.get("theta_pct_of_entry"),
+        "vega":         chosen.get("vega"),
+        "spread_pct":   chosen.get("spread_pct"),
+        "liquidity_note": chosen.get("note"),
     }
-  }
-}
 
-// ── Market metrics ──
-function ltRenderMetrics(d){
-  var vix = d.vix || 0;
-  var vixSub = vix < 12 ? 'LOW' : vix < 20 ? 'NORMAL' : vix < 30 ? 'ELEVATED' : 'HIGH';
-  var vixColor = vix < 12 ? 'var(--lt-green)' : vix >= 25 ? 'var(--lt-red)' : 'var(--lt-text)';
-  setEl('m-vix', fmtN(vix,2), vixColor);
-  document.getElementById('m-vix-sub').textContent = vixSub;
 
-  var pcr = d.pcr || 0;
-  var pcrSub = pcr > 1.3 ? 'Bullish' : pcr < 0.8 ? 'Bearish' : 'Neutral';
-  var pcrColor = pcr > 1.3 ? 'var(--lt-green)' : pcr < 0.8 ? 'var(--lt-red)' : 'var(--lt-text)';
-  setEl('m-pcr', fmtN(pcr,2), pcrColor);
-  document.getElementById('m-pcr-sub').textContent = pcrSub;
+async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine, expiry: str = None) -> dict:
+    """Builds the exact same result shape /api/analysis/ai/{symbol} returns —
+    factored out so both the HTTP route AND the background history collector
+    (app/services/history_collector.py) save identical, compatible rows.
+    Previously this logic lived only inside the route handler, which meant
+    AnalysisResult rows (needed by the Accuracy page / signal_accuracy.py)
+    only got written when a human happened to have the Analysis page open —
+    the background collector calls this function on its own schedule so
+    history keeps accumulating even with zero browser tabs open."""
+    try:
+        market_data = await analyzer.get_full_market_overview(symbol, expiry=expiry)
+    except MarketDataError as e:
+        raise HTTPException(502, detail=f"Market data unavailable: {e}")
 
-  setEl('m-mp', fmtN(d.max_pain,0));
+    try:
+        result = await ai.analyze_market(market_data)
+    except AIProviderError as e:
+        # AI fail ஆனாலும் rule-engine result return செய் — analysis only,
+        # no buy/sell instruction anywhere in this fallback either.
+        dec = market_data.get("decision", {})
+        result = {
+            "market_bias":         dec.get("market_bias", "Sideways"),
+            "bullish_probability": dec.get("bullish_probability", 50),
+            "bearish_probability": dec.get("bearish_probability", 50),
+            "preferred_side":      dec.get("preferred_side", "NONE"),
+            "market_trend":        market_data.get("trend", "sideways"),
+            "reason":              "AI unavailable. Rule-engine analysis shown.",
+            "key_factors":         [r for r in dec.get("reasons", [])[:5]],
+            "timeframe_trend":     {"5min": "N/A", "15min": "N/A", "1hr": "N/A"},
+            "support":             market_data.get("support_resistance", {}).get("support", []),
+            "resistance":          market_data.get("support_resistance", {}).get("resistance", []),
+            "risk":                dec.get("risk", "Medium"),
+            "vix":                 market_data.get("vix", 0),
+            "pcr":                 market_data.get("pcr", 0),
+            "bull_score":          dec.get("bull_score", 0),
+            "bear_score":          dec.get("bear_score", 0),
+            "confidence":          dec.get("confidence", 0),
+            "forecast":            dec.get("forecast", "Neutral"),
+            "ai_agrees":           True,
+            "_provider":           "rule_engine_only",
+            "disclaimer":          "Informational analysis only — not investment advice.",
+        }
 
-  // ATM from strikes
-  var strikes = d.strikes || [];
-  var atm = strikes.length ? strikes[0].strike : '--';
-  setEl('m-atm', fmtN(atm,0));
+    # Full reasons list + strategy/price-level detail சேர்க்க
+    dec = market_data.get("decision", {})
+    result["all_reasons"]        = dec.get("reasons", [])
+    result["recommended_strike"] = dec.get("recommended_strike", "NONE")
+    result["strategy"]           = dec.get("strategy", "")
+    result["strategy_reason"]    = dec.get("strategy_reason", "")
+    result["strategy_detail"]    = dec.get("strategy_detail")
+    result["price_levels"]       = dec.get("price_levels")
+    result["max_pain"]           = market_data.get("max_pain", 0)
+    result["technicals"]         = market_data.get("technicals", {})
+    result["oi_summary"]         = market_data.get("oi_summary", {})
+    result["option_volume"]      = market_data.get("option_volume", {})
+    result["expiry"]             = market_data.get("option_chain", {}).get("expiry", "")
+    result["all_expiries"]       = market_data.get("option_chain", {}).get("all_expiries", [])
 
-  // Futures
-  var tl = d.v2_trade_levels || {};
-  var fut = 0;
-  if(ltLastData && ltLastData.market_regime) {
-    // Not in strategy response directly — show from decision data if available
-    fut = 0;
-  }
-  document.getElementById('m-fut').textContent = fut ? (fut > 0 ? '+' : '') + fmtN(fut,1) : '--';
-  document.getElementById('m-fut-sub').textContent = fut > 0 ? 'Premium' : fut < 0 ? 'Discount' : '--';
+    # AI can hallucinate a 5min/15min/1hr trend from daily-only data — when
+    # this app actually HAS real intraday candles (Angel One configured),
+    # overwrite the AI's guess with the real, computed one. When Angel One
+    # isn't configured, mark every frame "unavailable" instead of silently
+    # keeping the AI's made-up numbers.
+    multi_tf = market_data.get("multi_timeframe", {})
+    real_tf = {}
+    label_map = {"5min": "5min", "15min": "15min", "1hr": "1hr"}
+    for label in label_map:
+        frame = multi_tf.get(label, {})
+        real_tf[label] = frame.get("trend", "unavailable")
+    result["timeframe_trend"] = real_tf
+    result["multi_timeframe"] = multi_tf
 
-  // ATM IV from confluence
-  var cf = d.confluence || {};
-  var factors = (cf.factors || []).find(function(f){ return f.id === 'india_vix'; });
-  // We don't have ATM IV directly in strategy response, show from best available
-  document.getElementById('m-iv').textContent = '--';
+    # Tamil indicator explanations, scenarios+invalidation, signal-strength
+    # framing, expiry/market-status — the fields the Analysis page needs to
+    # actually build the layout the user asked for (see review doc §7, §8,
+    # §17, §19, §20).
+    result["tamil_indicators"]       = market_data.get("tamil_indicators", [])
+    result["scenarios"]              = dec.get("scenarios", [])
+    result["signal_strength"]        = dec.get("signal_strength", dec.get("confidence", 0))
+    result["data_completeness_pct"]  = dec.get("data_completeness_pct", 100)
+    result["volatility_regime"]      = dec.get("volatility_regime", "unknown")
+    # Review #4: market-regime-adaptive weighting result — see decision_engine.py.
+    result["market_regime"]          = dec.get("market_regime", "unknown")
+    result["market_regime_confidence"] = dec.get("market_regime_confidence", "LOW")
+    result["market_regime_reasons"]  = dec.get("market_regime_reasons", [])
+    result["volatility_label"]       = dec.get("volatility_label", "")
+    result["oi_change_tracked"]      = market_data.get("oi_change_tracked", {"available": False})
+    result["support_resistance"]     = market_data.get("support_resistance", {})
+    result["market_open"]            = market_data.get("market_open", True)
+    result["expiry_risk"]            = market_data.get("expiry_risk", {})
+    # Review #1: the actual option-premium tracking target for this signal
+    # — see _pick_recommended_option docstring.
+    result["recommended_option"] = _pick_recommended_option(market_data, dec)
 
-  // Market open badge + spot
-  setEl('lt-price', d.spot ? fmtN(d.spot, 2) : '--');
-  var mktOpen = true; // default
-  var mktBadge = document.getElementById('lt-mkt-badge');
-  mktBadge.className = 'lt-mkt-badge ' + (mktOpen ? 'open' : 'closed');
-  mktBadge.textContent = mktOpen ? '● LIVE' : '● CLOSED';
+    # Review #4/#45/#46: "Signal Strength 85% ≠ 85% win probability." Attach
+    # the historical win-rate for THIS confidence's bucket (computed from
+    # past graded signals) right alongside the live signal, so the UI can
+    # show the calibration gap instead of implying the raw score is itself
+    # a probability. Best-effort: a fresh DB / no history yet must not break
+    # the analysis response, so this is fully guarded.
+    try:
+        from app.services.signal_accuracy import calibrate_confidence  # local import — avoid circular import at module load
+        result["confidence_calibration"] = await calibrate_confidence(
+            symbol, result.get("signal_strength", 0)
+        )
+    except Exception as _cal_err:
+        logger.warning(f"Confidence calibration unavailable for {symbol}: {_cal_err}")
+        result["confidence_calibration"] = {
+            "signal_strength": result.get("signal_strength", 0),
+            "historical_win_rate_pct": None,
+            "sample_size": 0,
+            "insufficient_data": True,
+            "disclaimer": "Signal Strength ஒரு win probability இல்லை — historical calibration தற்போது கிடைக்கவில்லை.",
+        }
 
-  // Market regime tag
-  var regime = (d.market_regime && d.market_regime.regime) || '--';
-  document.getElementById('lt-regime-tag').textContent = regime.replace(/_/g,' ');
-}
+    result["symbol"] = symbol
+    result["data_quality"] = {
+        "futures_premium": market_data.get("futures_premium_status", "unavailable"),
+        "global_market":   market_data.get("global_status", "unavailable"),
+        "gift_nifty":      market_data.get("gift_status", "unavailable"),
+        "fii":             market_data.get("fii_status", "unavailable"),
+        "dii":             market_data.get("dii_status", "unavailable"),
+        "technicals_source": market_data.get("technical_data_source", "unknown"),
+    }
+    # BUG FIX: dashboard's "Futures" metric card needs the actual number,
+    # not just the live/unavailable status string above. market_analyzer
+    # already computes this (futures_premium / futures_premium_pct) — it
+    # just never made it into any route's response before now.
+    result["futures_premium_value"]     = market_data.get("futures_premium", 0.0)
+    result["futures_premium_pct_value"] = market_data.get("futures_premium_pct", 0.0)
 
-// ── Support / Resistance ──
-function ltRenderSR(d){
-  var rg = d.market_regime || {};
-  // S/R comes from analysis endpoint in real use;
-  // for now use spot and expected_move as proxy
-  var spot = d.spot || 0;
-  var em = d.expected_move || {};
-  var up = em.up || 0; var dn = em.dn || 0;
-  setEl('lt-spot-sr', spot ? fmtN(spot, 2) : '--');
+    await save_analysis_result(symbol, "ai", result)
+    return result
 
-  // Try to read from v2_trade_levels price levels
-  var tl = d.v2_trade_levels || {};
-  var rows = document.querySelectorAll('#lt-sr-rows .lt-sr-row');
-  if(rows.length >= 5 && spot > 0){
-    var r2 = tl.target_2_spot || (spot + (up * 1.5)) || 0;
-    var r1 = tl.target_1_spot || tl.trigger || (spot + up) || 0;
-    var s1 = tl.stop_loss_spot || (spot - dn) || 0;
-    var s2 = s1 ? (s1 - (spot - s1) * 0.6) : 0;
 
-    rows[0].querySelector('.lt-sr-val').textContent = r2 ? fmtN(r2,0) : '--';
-    rows[1].querySelector('.lt-sr-val').textContent = r1 ? fmtN(r1,0) : '--';
-    rows[3].querySelector('.lt-sr-val').textContent = s1 ? fmtN(s1,0) : '--';
-    rows[4].querySelector('.lt-sr-val').textContent = s2 ? fmtN(s2,0) : '--';
-  }
-}
+@router.get("/ai/{symbol}")
+async def ai_analysis(
+    symbol: str,
+    expiry: str = None,
+    analyzer: MarketAnalyzer = Depends(get_analyzer),
+    ai: AIEngine = Depends(get_ai_engine),
+):
+    """`expiry`: optional, e.g. "28-Aug-2025" (one of option_chain.all_expiries).
+    Omit for the nearest expiry (previous/default behaviour)."""
+    return await build_ai_analysis(symbol, analyzer, ai, expiry=expiry)
 
-// ── CALL vs PUT compare ──
-function ltRenderCompare(d){
-  var best = (d.best_strategy || '').toUpperCase();
-  var strikes = d.strikes || [];
-  var ceSt = strikes.find(function(s){ return s.type === 'CE'; });
-  var peSt = strikes.find(function(s){ return s.type === 'PE'; });
 
-  document.getElementById('lt-compare').style.display = (ceSt || peSt) ? '' : 'none';
-  if(!ceSt && !peSt) return;
-
-  var bull = d.bullish_probability || 50;
-  var bear = d.bearish_probability || 50;
-
-  // CE column
-  if(ceSt){
-    document.getElementById('cmp-ce-strike').textContent = fmtN(ceSt.strike, 0) + ' CE';
-    document.getElementById('cmp-ce-ltp').textContent = '₹' + fmtN(ceSt.ltp, 1);
-    var ceActive = best === 'BUY CE';
-    document.getElementById('lt-call-col').className = 'lt-compare-col' + (ceActive ? ' active-call' : '');
-    var ceBiasEl = document.getElementById('cmp-ce-bias');
-    ceBiasEl.textContent = ceActive ? '🟢 BUY BIAS' : 'AVOID';
-    ceBiasEl.className = 'lt-comp-bias ' + (ceActive ? 'buy' : 'avoid');
-    document.getElementById('cmp-ce-conf').textContent = 'Confidence ' + bull + '%';
-    document.getElementById('cmp-ce-tgt').textContent = ceSt.t1 ? 'Target ₹' + fmtN(ceSt.t1,1) : '';
-  }
-
-  // PE column
-  if(peSt){
-    document.getElementById('cmp-pe-strike').textContent = fmtN(peSt.strike, 0) + ' PE';
-    document.getElementById('cmp-pe-ltp').textContent = '₹' + fmtN(peSt.ltp, 1);
-    var peActive = best === 'BUY PE';
-    document.getElementById('lt-put-col').className = 'lt-compare-col' + (peActive ? ' active-put' : '');
-    var peBiasEl = document.getElementById('cmp-pe-bias');
-    peBiasEl.textContent = peActive ? '🔴 BUY BIAS' : 'AVOID';
-    peBiasEl.className = 'lt-comp-bias ' + (peActive ? 'buy' : 'avoid');
-    document.getElementById('cmp-pe-conf').textContent = 'Confidence ' + bear + '%';
-    document.getElementById('cmp-pe-tgt').textContent = peSt.t1 ? 'Target ₹' + fmtN(peSt.t1,1) : '';
-  }
-}
-
-// ── Reasons from confluence factors ──
-function ltRenderReasons(d){
-  var reasons = document.getElementById('lt-reasons');
-  var cf = d.confluence || {};
-  var factors = cf.factors || [];
-  if(!factors.length){
-    var allR = d.all_reasons || d.reasons || [];
-    reasons.innerHTML = allR.slice(0,6).map(function(r){
-      var icon = r.startsWith('🟢') ? '🟢' : r.startsWith('🔴') ? '🔴' : '🟡';
-      return '<div class="lt-reason-row"><span class="lt-reason-icon">'+icon+'</span><span class="lt-reason-text">'+ltEsc(r.replace(/^[🟢🔴⚪🟡]/,'').trim())+'</span></div>';
-    }).join('') || '<div style="font-size:13px;color:var(--lt-text3);">Loading reasons...</div>';
-    return;
-  }
-
-  // Show top bullish/bearish/caution from factors
-  var bulls = factors.filter(function(f){ return f.direction==='bullish' && f.score > 0; }).slice(0,4);
-  var bears = factors.filter(function(f){ return f.direction==='bearish' && f.score > 0; }).slice(0,2);
-  var html = '';
-  bulls.forEach(function(f){ html += '<div class="lt-reason-row"><span class="lt-reason-icon">🟢</span><span class="lt-reason-text">'+ltEsc(f.reason)+'</span></div>'; });
-  bears.forEach(function(f){ html += '<div class="lt-reason-row"><span class="lt-reason-icon">🔴</span><span class="lt-reason-text">'+ltEsc(f.reason)+'</span></div>'; });
-  if(!html) html = '<div style="font-size:13px;color:var(--lt-text3);">Market analysis loading...</div>';
-  reasons.innerHTML = html;
-}
-
-// ── Tamil explanation ──
-function ltRenderTamil(d){
-  var txt = d.reason || '';
-  if(!txt){ document.getElementById('lt-tamil-card').style.display='none'; return; }
-  document.getElementById('lt-tamil-card').style.display = '';
-  document.getElementById('lt-tamil-text').textContent = txt;
-}
-
-// ── Advanced indicators ──
-function ltRenderAdvanced(d){
-  var tech = d.technicals || {};
-  if(ltLastData && ltLastData.technicals) tech = ltLastData.technicals;
-  setEl('adv-rsi', fmtN(tech.rsi || d.rsi || 0, 1));
-  var macd = tech.macd || {};
-  setEl('adv-macd', macd.macd != null ? fmtN(macd.macd, 1) : '--');
-  setEl('adv-adx', fmtN(tech.adx || 0, 1));
-  setEl('adv-ema20', fmtN(tech.ema20 || 0, 0));
-  setEl('adv-ema50', fmtN(tech.ema50 || 0, 0));
-  setEl('adv-vwap', fmtN(tech.vwap || 0, 0));
-  setEl('adv-st', tech.supertrend || '--');
-  setEl('adv-atr', fmtN(tech.atr || 0, 1));
-  setEl('adv-bull', d.bull_score || '--');
-  setEl('adv-bear', d.bear_score || '--');
-}
-
-// ── Timeframes ──
-function ltRenderTimeframes(d){
-  var tf = {};
-  if(d.multi_timeframe) tf = d.multi_timeframe;
-  ['5min','15min','1hr'].forEach(function(k, i){
-    var el = document.getElementById(['tf-5m','tf-15m','tf-1h'][i]);
-    var trend = (tf[k] && tf[k].trend) || 'unavail';
-    el.className = 'lt-tf-val ' + (trend==='up'?'up':trend==='down'?'down':trend==='sideways'?'side':'unavail');
-    el.textContent = trend==='up'?'▲ UP':trend==='down'?'▼ DOWN':trend==='sideways'?'→ SIDE':'N/A';
-  });
-}
-
-// ── Warnings ──
-function ltRenderWarnings(d){
-  var box = document.getElementById('lt-warnings');
-  var ws = d.warnings || [];
-  box.innerHTML = ws.map(function(w){
-    var cls = w.includes('⚠') ? 'yellow' : 'red';
-    return '<div class="lt-warn '+cls+'">'+ltEsc(w)+'</div>';
-  }).join('');
-}
-
-// ── Data health ──
-function ltRenderDataHealth(d){
-  var dq = d.data_quality || {};
-  var cf = d.confluence || {};
-  var scores = {
-    spot: 'live',
-    chain: d.expiry ? 'live' : 'unavail',
-    vix: 'live',
-    futures: dq.futures_premium || 'unavail',
-    intraday: dq.technicals_source === 'intraday_5min_ohlc' ? 'live' : 'delayed',
-    fii: dq.fii || 'unavail',
-    global: dq.global_market || 'unavail',
-  };
-  var keys = Object.values(scores);
-  var liveCount = keys.filter(function(v){ return v==='live'; }).length;
-  var pct = Math.round(liveCount / keys.length * 100);
-
-  var fill = document.getElementById('lt-health-fill');
-  var pctEl = document.getElementById('lt-health-pct');
-  fill.style.width = pct + '%';
-  fill.style.background = pct >= 80 ? 'var(--lt-green)' : pct >= 50 ? 'var(--lt-yellow)' : 'var(--lt-red)';
-  pctEl.textContent = pct + '%';
-  pctEl.style.color = pct >= 80 ? 'var(--lt-green)' : pct >= 50 ? 'var(--lt-yellow)' : 'var(--lt-red)';
-
-  function hdClass(v){ return v==='live'?'live':v==='delayed'?'delayed':'unavail'; }
-  function hdText(v){ return v==='live'?'🟢 Live':v==='delayed'?'🟡 Delayed':'🔴 Unavail'; }
-  document.getElementById('hd-spot').className = 'lt-hd-val ' + hdClass(scores.spot);
-  document.getElementById('hd-spot').textContent = hdText(scores.spot);
-  document.getElementById('hd-chain').className = 'lt-hd-val ' + hdClass(scores.chain);
-  document.getElementById('hd-chain').textContent = hdText(scores.chain);
-  document.getElementById('hd-vix').className = 'lt-hd-val ' + hdClass(scores.vix);
-  document.getElementById('hd-vix').textContent = hdText(scores.vix);
-  document.getElementById('hd-fut').className = 'lt-hd-val ' + hdClass(scores.futures);
-  document.getElementById('hd-fut').textContent = hdText(scores.futures);
-  document.getElementById('hd-intra').className = 'lt-hd-val ' + hdClass(scores.intraday);
-  document.getElementById('hd-intra').textContent = hdText(scores.intraday);
-  document.getElementById('hd-fii').className = 'lt-hd-val ' + hdClass(scores.fii);
-  document.getElementById('hd-fii').textContent = hdText(scores.fii);
-  document.getElementById('hd-global').className = 'lt-hd-val ' + hdClass(scores.global);
-  document.getElementById('hd-global').textContent = hdText(scores.global);
-}
-
-// ── Toggle health details ──
-function ltToggleHealth(){
-  var el = document.getElementById('lt-health-details');
-  el.classList.toggle('hidden');
-}
-
-// ── Toggle advanced ──
-function ltToggleAdv(){
-  var panel = document.getElementById('lt-adv-panel');
-  var arr = document.getElementById('lt-adv-arr');
-  var open = panel.style.display === 'block';
-  panel.style.display = open ? 'none' : 'block';
-  arr.classList.toggle('open', !open);
-  document.querySelector('.lt-adv-toggle .lt-adv-toggle-label').textContent =
-    (open ? '▶' : '▼') + ' Advanced Indicators';
-}
-
-// ── Helpers ──
-function setEl(id, val, color){
-  var el = document.getElementById(id);
-  if(!el) return;
-  el.textContent = val != null ? val : '--';
-  if(color) el.style.color = color;
-}
-function fmtN(v, d){
-  if(v == null || v === '' || isNaN(Number(v))) return '--';
-  var n = Number(v);
-  if(d != null) return n.toFixed(d);
-  return n.toLocaleString('en-IN');
-}
-function ltNow(){
-  var now = new Date();
-  return pad2(now.getHours())+':'+pad2(now.getMinutes())+':'+pad2(now.getSeconds());
-}
-function ltEsc(s){ var d=document.createElement('div'); d.textContent=String(s||''); return d.innerHTML; }
-function ltShowWarn(type, msg){
-  var box = document.getElementById('lt-warnings');
-  box.innerHTML += '<div class="lt-warn '+type+'">'+ltEsc(msg)+'</div>';
-}
-
-// ── Auto refresh every 30s ──
-ltAutoInterval = setInterval(function(){ ltRefresh(); }, 30000);
-
-// ── Initial load ──
-ltRefresh();
-</script>
-
-{% endblock %}
+@router.get("/decision/{symbol}")
+async def rule_decision(symbol: str, analyzer: MarketAnalyzer = Depends(get_analyzer)):
+    """Rule engine analysis மட்டும் — AI இல்லாமல் fast. Bias/probability/risk
+    காட்டும், buy/sell instruction எதுவும் தராது."""
+    try:
+        data = await analyzer.get_full_market_overview(symbol)
+        dec  = data.get("decision", {})
+        return {
+            "symbol":               symbol,
+            "market_bias":          dec.get("market_bias", "Sideways"),
+            "bullish_probability":  dec.get("bullish_probability", 50),
+            "bearish_probability":  dec.get("bearish_probability", 50),
+            "preferred_side":       dec.get("preferred_side", "NONE"),
+            "recommended_strike":   dec.get("recommended_strike", "NONE"),
+            "bull_score":           dec.get("bull_score", 0),
+            "bear_score":           dec.get("bear_score", 0),
+            "confidence":           dec.get("confidence", 0),
+            "signal_strength":      dec.get("signal_strength", dec.get("confidence", 0)),
+            "forecast":             dec.get("forecast", "Neutral"),
+            "volatility_regime":    dec.get("volatility_regime", "unknown"),
+            "volatility_label":     dec.get("volatility_label", ""),
+            "risk":                 dec.get("risk", "Medium"),
+            "reasons":              dec.get("reasons", []),
+            "strategy":             dec.get("strategy", ""),
+            "strategy_reason":      dec.get("strategy_reason", ""),
+            "strategy_detail":      dec.get("strategy_detail"),
+            "price_levels":         dec.get("price_levels"),
+            "scenarios":            dec.get("scenarios", []),
+            "pcr":                  data.get("pcr", 0),
+            "max_pain":             data.get("max_pain", 0),
+            "vix":                  data.get("vix", 0),
+            "rsi":                  data.get("rsi", 50),
+            "macd":                 data.get("macd", {}),
+            "technicals":           data.get("technicals", {}),
+            "multi_timeframe":      data.get("multi_timeframe", {}),
+            "oi_change_tracked":    data.get("oi_change_tracked", {"available": False}),
+            "support_resistance":   data.get("support_resistance", {}),
+            "tamil_indicators":     data.get("tamil_indicators", []),
+            "option_volume":        data.get("option_volume", {}),
+            "market_open":          data.get("market_open", True),
+            "expiry_risk":          data.get("expiry_risk", {}),
+            "data_quality": {
+                "futures_premium": data.get("futures_premium_status", "unavailable"),
+                "global_market":   data.get("global_status", "unavailable"),
+                "gift_nifty":      data.get("gift_status", "unavailable"),
+                "fii":             data.get("fii_status", "unavailable"),
+                "dii":             data.get("dii_status", "unavailable"),
+                "technicals_source": data.get("technical_data_source", "unknown"),
+            },
+            "disclaimer":           "Informational analysis only — not investment advice.",
+        }
+    except MarketDataError as e:
+        raise HTTPException(502, detail=str(e))
