@@ -899,25 +899,66 @@ class DataFetcher:
         FIX: equity-stockIndices NSE 404 (endpoint deprecated) — removed.
         Now directly uses allIndices which is already called for VIX/sectors.
         One endpoint, one call, cached 30s — no more repeated 404 log lines.
+
+        FIX (2026-08-19): the old code only looked for a nested
+        {"advance": {"advances": .., "declines": .., "unchanged": ..}}
+        object under the NIFTY 50 row. NSE's allIndices payload does not
+        reliably nest breadth that way for the NIFTY 50 row itself — the
+        keys are sometimes flat on the item ("advances"/"declines"
+        directly, not inside "advance"), sometimes absent entirely for
+        that row, and sometimes present only as strings. This version
+        tries the nested shape first, then a flat-keys fallback, and
+        logs the row's actual keys ONCE (first failure) so the real
+        payload shape is visible in the logs instead of a bare warning.
         """
         try:
             data = await self._get("allIndices")
             items = (data or {}).get("data", [])
+
+            nifty50_item = None
             for item in items:
                 if not isinstance(item, dict):
                     continue
                 sym = item.get("indexSymbol", "")
                 # "NIFTY 50" match, exclude "NIFTY BANK", "NIFTY 500" etc.
                 if sym.strip().upper() == "NIFTY 50":
-                    adv = item.get("advance", {})
-                    if adv and (adv.get("advances") or adv.get("declines")):
-                        return {
-                            "advances":  safe_int(adv.get("advances",  0)),
-                            "declines":  safe_int(adv.get("declines",  0)),
-                            "unchanged": safe_int(adv.get("unchanged", 0)),
-                            "source":    "nse_allIndices",
-                        }
-            logger.warning("Market breadth: NIFTY 50 advance/decline not in allIndices")
+                    nifty50_item = item
+                    break
+
+            if nifty50_item is not None:
+                # Shape 1: nested {"advance": {"advances":.., "declines":.., "unchanged":..}}
+                adv = nifty50_item.get("advance")
+                if isinstance(adv, dict) and (adv.get("advances") or adv.get("declines")):
+                    return {
+                        "advances":  safe_int(adv.get("advances",  0)),
+                        "declines":  safe_int(adv.get("declines",  0)),
+                        "unchanged": safe_int(adv.get("unchanged", 0)),
+                        "source":    "nse_allIndices",
+                    }
+
+                # Shape 2: flat keys directly on the item
+                flat_adv = safe_int(nifty50_item.get("advances", 0))
+                flat_dec = safe_int(nifty50_item.get("declines", 0))
+                flat_unc = safe_int(nifty50_item.get("unchanged", 0))
+                if flat_adv or flat_dec:
+                    return {
+                        "advances":  flat_adv,
+                        "declines":  flat_dec,
+                        "unchanged": flat_unc,
+                        "source":    "nse_allIndices",
+                    }
+
+                # Neither shape had usable data — log the actual keys once
+                # so the payload shape can be diagnosed from logs.
+                logger.warning(
+                    "Market breadth: NIFTY 50 row has no usable advance/decline "
+                    f"data — available keys: {sorted(nifty50_item.keys())}"
+                )
+            else:
+                logger.warning(
+                    "Market breadth: no 'NIFTY 50' row found in allIndices — "
+                    f"symbols present: {sorted({i.get('indexSymbol','') for i in items if isinstance(i, dict)})}"
+                )
         except Exception as e:
             logger.error(f"Market breadth error: {e}")
 
