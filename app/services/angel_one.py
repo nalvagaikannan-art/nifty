@@ -11,6 +11,7 @@ Angel One SmartAPI மூலம் live market data, option chain, login/logout.
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -21,17 +22,35 @@ from app.utils.helpers import safe_float
 logger = logging.getLogger(__name__)
 
 
-def _normalize_expiry(value: Optional[str]) -> Optional[str]:
-    """Normalize common expiry formats to Angel's canonical DDMMMYYYY form."""
-    if not value:
-        return None
-    raw = str(value).strip().upper()
-    for fmt in ("%d%b%Y", "%d-%b-%Y", "%d-%b-%y", "%d/%m/%Y", "%Y-%m-%d"):
+def _normalize_expiry(e: str) -> str:
+    """Expiry string-ஐ canonical date format (YYYY-MM-DD) ஆக மாற்றுகிறது.
+
+    Angel One instrument master: '01SEP2026' format.
+    UI / API caller: '01-Sep-2026' அல்லது '2026-09-01' format.
+    இந்த mismatch-ஐ தடுக்க — compare செய்வதற்கு முன்பு
+    இரண்டையும் ஒரே canonical format-க்கு convert செய்கிறோம்.
+
+    Returns the original string unchanged if parsing fails
+    (so callers still see something useful in logs).
+    """
+    if not e:
+        return e
+    e2 = e.strip()
+    m = re.match(r"(\d{1,2})[-/]?([A-Za-z]{3})[-/]?(\d{4})", e2)
+    if m:
         try:
-            return datetime.strptime(raw, fmt).strftime("%d%b%Y").upper()
+            dt = datetime.strptime(
+                f"{m.group(1)}{m.group(2).title()}{m.group(3)}", "%d%b%Y"
+            )
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(e2, fmt).strftime("%Y-%m-%d")
         except ValueError:
             continue
-    return raw
+    return e  # unparseable — return as-is
 
 
 class AngelOneError(Exception):
@@ -324,7 +343,7 @@ class AngelOneSession:
         }
 
     async def get_option_chain(
-        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: Optional[int] = None
+        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 15
     ) -> Dict:
         """
         Builds an NSE-shaped option chain by hand, since SmartAPI has no
@@ -376,15 +395,27 @@ class AngelOneSession:
         expiries = sorted(set(r["expiry"] for r in rows if r.get("expiry")))
         if not expiries:
             raise AngelOneError(f"No expiries found for {sym}")
-        requested_expiry = _normalize_expiry(expiry)
-        normalized = {_normalize_expiry(x): x for x in expiries}
 
-        if requested_expiry:
-            chosen_expiry = normalized.get(requested_expiry)
-            if not chosen_expiry:
-                raise AngelOneError(
-                    f"Requested expiry {expiry} not found. Available: {expiries[:10]}"
+        # Normalize expiry comparison — Angel One instrument master may use
+        # '01SEP2026' while the UI/caller sends '01-Sep-2026' or '2026-09-01'.
+        # Exact string match fails silently and returns zero rows.
+        # Solution: normalize BOTH sides to 'YYYY-MM-DD' before comparing.
+        if expiry:
+            norm_requested = _normalize_expiry(expiry)
+            # Find the raw master expiry string that maps to the same date
+            matched = next(
+                (e for e in expiries if _normalize_expiry(e) == norm_requested),
+                None,
+            )
+            if matched:
+                chosen_expiry = matched
+            else:
+                logger.warning(
+                    "Requested expiry %r (normalized: %s) not found in master expiries %s "
+                    "— falling back to nearest expiry %r",
+                    expiry, norm_requested, expiries[:5], expiries[0],
                 )
+                chosen_expiry = expiries[0]
         else:
             chosen_expiry = expiries[0]
 
@@ -407,15 +438,9 @@ class AngelOneSession:
             raise AngelOneError(f"No valid strikes parsed for {sym} {chosen_expiry}")
 
         atm_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
-
-        if strikes_each_side is None:
-            # Full expiry chain for analytics. This is the default used by
-            # MarketAnalyzer so PCR/Max Pain/OI walls see the entire expiry.
-            selected_strikes = set(all_strikes)
-        else:
-            lo = max(0, atm_idx - int(strikes_each_side))
-            hi = min(len(all_strikes), atm_idx + int(strikes_each_side) + 1)
-            selected_strikes = set(all_strikes[lo:hi])
+        lo = max(0, atm_idx - strikes_each_side)
+        hi = min(len(all_strikes), atm_idx + strikes_each_side + 1)
+        selected_strikes = set(all_strikes[lo:hi])
 
         selected_rows = [r for r in rows if _strike(r) in selected_strikes]
         tokens = [r["token"] for r in selected_rows if r.get("token")]
@@ -495,8 +520,7 @@ class AngelOneSession:
                 "openInterest":         safe_float(q.get("opnInterest", q.get("openInterest", 0))),
                 "changeinOpenInterest": safe_float(q.get("opnInterestChange", 0)),
                 "lastPrice":            safe_float(q.get("ltp", 0)),
-                "change":               safe_float(q.get("netChange", q.get("change", 0))),
-                "percentChange":        safe_float(q.get("percentChange", 0)),
+                "change":               safe_float(q.get("netChange", 0)),
                 "impliedVolatility":    0,  # Angel's quote API doesn't return IV
                 "totalTradedVolume":    safe_float(q.get("tradeVolume", 0)),
             }
