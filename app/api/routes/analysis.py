@@ -197,6 +197,12 @@ async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine,
         "dii":             market_data.get("dii_status", "unavailable"),
         "technicals_source": market_data.get("technical_data_source", "unknown"),
     }
+    # BUG FIX: dashboard's "Futures" metric card needs the actual number,
+    # not just the live/unavailable status string above. market_analyzer
+    # already computes this (futures_premium / futures_premium_pct) — it
+    # just never made it into any route's response before now.
+    result["futures_premium_value"]     = market_data.get("futures_premium", 0.0)
+    result["futures_premium_pct_value"] = market_data.get("futures_premium_pct", 0.0)
 
     await save_analysis_result(symbol, "ai", result)
     return result
