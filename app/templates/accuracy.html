@@ -174,10 +174,23 @@ $(document).ready(function() {
 });
 
 function loadAll() {
-    loadSignalAccuracy();
-    loadPremiumAccuracy();
-    loadIndicatorAccuracy();
-    loadPersistenceStatus();
+    // Bug fix (Tamil review): these 4 calls used to fire in PARALLEL the
+    // instant this page opened. Each one independently scans up to
+    // `currentDays` days of history — 4 of those running at once was
+    // enough to overload the process on a low-memory host (Render free
+    // tier), which is why this page sometimes crashed and showed a dead
+    // "server error" / "Data unavailable" instead of real numbers.
+    // Running them one after another (status first, since it's cheapest
+    // and tells us whether there's even any data worth computing on)
+    // trades a little load time for the page actually working reliably.
+    loadPersistenceStatus()
+        .catch(function() {})
+        .then(function() { return loadIndicatorAccuracy(); })
+        .catch(function() {})
+        .then(function() { return loadSignalAccuracy(); })
+        .catch(function() {})
+        .then(function() { return loadPremiumAccuracy(); })
+        .catch(function() {});
 }
 
 function renderBreakdown(targetSel, d, gradedField) {
@@ -209,7 +222,7 @@ function fmtRate(rate, insufficient) {
 }
 
 function loadPersistenceStatus() {
-    $.get('/api/accuracy/status/' + currentSymbol)
+    return $.get('/api/accuracy/status/' + currentSymbol)
       .done(function(d) {
         const s = d.saved || {};
         const db = d.database_configured;
@@ -225,11 +238,31 @@ function loadPersistenceStatus() {
         } else {
           html += '<div class="persist-ok">✅ External database configured.</div>';
         }
+        // Bug fix (Tamil review): "ஒவ்வொரு call-உம் save பண்ணி பேஜ்ல
+        // warning கொடுக்கணும்" — show the last few real backend failures
+        // (any of this page's 4 endpoints) instead of leaving the user
+        // guessing when something goes wrong.
+        const errs = d.recent_errors || [];
+        if (errs.length) {
+          html += '<div class="persist-warn" style="margin-top:0.5rem;">⚠️ சமீபத்திய பிழைகள் (' + errs.length + '):<ul style="margin:0.3rem 0 0 1.2rem;">' +
+            errs.map(function(e) {
+              return '<li>[' + e.endpoint + '] ' + e.at_utc + ' — ' + e.detail + '</li>';
+            }).join('') + '</ul></div>';
+        }
         $('#persistence-status').html(html);
       })
       .fail(function(xhr) {
-        $('#persistence-status').html('<span class="persist-bad">⚠️ Storage status unavailable: ' +
-          ((xhr.responseJSON && xhr.responseJSON.detail) || 'server error') + '</span>');
+        const status = xhr.status;
+        const detail = (xhr.responseJSON && xhr.responseJSON.detail);
+        // A clean JSON error means the server itself responded (e.g. a
+        // real 500/504 from our own timeout guard). No responseJSON at
+        // all (status 0, or an HTML body) means the connection was cut
+        // before a response formed — that's the "process overloaded /
+        // restarting" case, not a normal error.
+        const msg = detail || (status === 0
+          ? 'Server-உடன் connection ஆகல் — app restart ஆகிக்கொண்டிருக்கலாம், சில வினாடிகளில் மறுபடியும் முயற்சி செய்யுங்க.'
+          : 'server error (HTTP ' + status + ')');
+        $('#persistence-status').html('<span class="persist-bad">⚠️ Storage status unavailable: ' + msg + '</span>');
       });
 }
 
@@ -274,7 +307,7 @@ function loadSignalAccuracy() {
     $('#signal-status').removeClass('error').text('Loading signal accuracy for ' + currentSymbol + '...').show();
     $('#signal-summary, #horizon-block, #signal-breakdown-block').hide();
 
-    $.get('/api/accuracy/signals/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/signals/' + currentSymbol + '?days=' + currentDays)
         .done(function(d) {
             $('#signal-status').hide();
             $('#signal-summary, #horizon-block, #signal-breakdown-block').show();
@@ -309,7 +342,8 @@ function loadSignalAccuracy() {
             maybeRenderDisagreement();
         })
         .fail(function(xhr) {
-            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
+                (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#signal-status').addClass('error').text('⚠️ Signal accuracy could not be loaded: ' + detail);
         });
 }
@@ -318,7 +352,7 @@ function loadPremiumAccuracy() {
     $('#premium-status').removeClass('error').text('Loading premium accuracy for ' + currentSymbol + '...').show();
     $('#premium-summary, #premium-horizon-block, #premium-breakdown-block, #moneyness-block, #mfemae-block, #calibration-block').hide();
 
-    $.get('/api/accuracy/premium/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/premium/' + currentSymbol + '?days=' + currentDays)
         .done(function(d) {
             $('#premium-status').hide();
             $('#premium-summary, #premium-horizon-block, #premium-breakdown-block').show();
@@ -364,11 +398,16 @@ function loadPremiumAccuracy() {
             maybeRenderDisagreement();
         })
         .fail(function(xhr) {
-            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
+                (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#premium-status').addClass('error').text('⚠️ Premium accuracy could not be loaded: ' + detail);
-        });
-
-    loadCalibration();
+        })
+        // Bug fix: loadCalibration() used to fire here unconditionally and
+        // in parallel with everything else on the page — a 5th simultaneous
+        // heavy computation. Chaining it AFTER premium accuracy finishes
+        // (success or fail) keeps it in the same one-at-a-time sequence as
+        // the rest of loadAll(), instead of adding to the pile-up.
+        .always(function() { loadCalibration(); });
 }
 
 function renderMoneyness(byMoneyness) {
@@ -470,7 +509,7 @@ function loadIndicatorAccuracy() {
     $('#indicator-status').removeClass('error').text('Loading indicator accuracy for ' + currentSymbol + '...').show();
     $('#indicator-block').hide();
 
-    $.get('/api/accuracy/indicators/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/indicators/' + currentSymbol + '?days=' + currentDays)
         .done(function(d) {
             window.__indicatorAccuracy = d.indicators || [];
             const body = $('#indicator-table tbody').empty();
@@ -486,7 +525,8 @@ function loadIndicatorAccuracy() {
             renderAccuracyCharts({by_horizon:{}, _indicator_cache: window.__indicatorAccuracy});
         })
         .fail(function(xhr) {
-            let detail = (xhr.responseJSON && xhr.responseJSON.detail) || 'Data unavailable.';
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
+                (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#indicator-status').addClass('error').text('⚠️ Indicator accuracy could not be loaded: ' + detail);
         });
 }
