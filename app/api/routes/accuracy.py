@@ -13,6 +13,7 @@ needed:
       overall, CALL BUY, PUT BUY, by market regime, by confidence range,
       at 5/10/15/30/60-minute horizons (signal_accuracy.py, new).
 """
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select, func
 from app.database import AsyncSessionLocal
@@ -22,12 +23,22 @@ from app.services.accuracy_engine import compute_indicator_accuracy
 from app.services.signal_accuracy import (
     compute_signal_accuracy, compute_premium_accuracy, calibrate_confidence, HORIZONS_MINUTES,
 )
+from app.services.error_log import record_error, recent_errors
 import logging
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+
+# Each accuracy computation scans up to 60 days of MarketData/AnalysisResult
+# rows in-process. Left unbounded, a slow/heavy computation on Render's free
+# tier (shared CPU, 512MB) can run long enough that Render's own proxy kills
+# the connection with an HTML 502/504 — which the browser can't parse as
+# JSON, so it shows a blank "server error" with no useful detail. Failing
+# fast here instead, with a real JSON error, is strictly better: the user
+# gets an honest "try fewer days" message instead of a dead connection.
+COMPUTE_TIMEOUT_SECONDS = 20
 
 
 def _check_symbol(symbol: str) -> str:
@@ -37,14 +48,28 @@ def _check_symbol(symbol: str) -> str:
     return sym
 
 
+async def _run_with_timeout(coro, *, endpoint: str, sym: str, timeout_detail: str, error_detail: str):
+    try:
+        return await asyncio.wait_for(coro, timeout=COMPUTE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(f"{endpoint} accuracy timed out for {sym} after {COMPUTE_TIMEOUT_SECONDS}s")
+        record_error(endpoint, sym, timeout_detail)
+        raise HTTPException(504, detail=timeout_detail)
+    except Exception as e:
+        logger.error(f"{endpoint} accuracy failed for {sym}: {e}")
+        record_error(endpoint, sym, f"{error_detail}: {e}")
+        raise HTTPException(500, detail=error_detail)
+
+
 @router.get("/indicators/{symbol}")
 async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
     sym = _check_symbol(symbol)
-    try:
-        return await compute_indicator_accuracy(sym, days=days)
-    except Exception as e:
-        logger.error(f"Indicator accuracy failed for {sym}: {e}")
-        raise HTTPException(500, detail="Accuracy computation failed")
+    return await _run_with_timeout(
+        compute_indicator_accuracy(sym, days=days),
+        endpoint="indicators", sym=sym,
+        timeout_detail=f"Indicator accuracy for {days} days is taking too long — try a smaller range (7 days).",
+        error_detail="Accuracy computation failed",
+    )
 
 
 @router.get("/signals/{symbol}")
@@ -54,11 +79,12 @@ async def signal_accuracy(
     horizon_minutes: int = Query(60, description=f"one of {HORIZONS_MINUTES}"),
 ):
     sym = _check_symbol(symbol)
-    try:
-        return await compute_signal_accuracy(sym, days=days, horizon_minutes=horizon_minutes)
-    except Exception as e:
-        logger.error(f"Signal accuracy failed for {sym}: {e}")
-        raise HTTPException(500, detail="Accuracy computation failed")
+    return await _run_with_timeout(
+        compute_signal_accuracy(sym, days=days, horizon_minutes=horizon_minutes),
+        endpoint="signals", sym=sym,
+        timeout_detail=f"Signal accuracy for {days} days is taking too long — try a smaller range (7 days).",
+        error_detail="Accuracy computation failed",
+    )
 
 
 @router.get("/premium/{symbol}")
@@ -71,11 +97,12 @@ async def premium_accuracy(
     recommended contract have made money), as a distinct metric from
     /signals' spot-direction accuracy — see signal_accuracy.compute_premium_accuracy."""
     sym = _check_symbol(symbol)
-    try:
-        return await compute_premium_accuracy(sym, days=days, horizon_minutes=horizon_minutes)
-    except Exception as e:
-        logger.error(f"Premium accuracy failed for {sym}: {e}")
-        raise HTTPException(500, detail="Accuracy computation failed")
+    return await _run_with_timeout(
+        compute_premium_accuracy(sym, days=days, horizon_minutes=horizon_minutes),
+        endpoint="premium", sym=sym,
+        timeout_detail=f"Premium accuracy for {days} days is taking too long — try a smaller range (7 days).",
+        error_detail="Accuracy computation failed",
+    )
 
 
 @router.get("/calibration/{symbol}")
@@ -93,11 +120,12 @@ async def confidence_calibration(
     under `confidence_calibration` — this endpoint is for looking it up
     standalone, e.g. for a different confidence value than the live one.)"""
     sym = _check_symbol(symbol)
-    try:
-        return await calibrate_confidence(sym, confidence, days=days, horizon_minutes=horizon_minutes)
-    except Exception as e:
-        logger.error(f"Confidence calibration failed for {sym}: {e}")
-        raise HTTPException(500, detail="Calibration computation failed")
+    return await _run_with_timeout(
+        calibrate_confidence(sym, confidence, days=days, horizon_minutes=horizon_minutes),
+        endpoint="calibration", sym=sym,
+        timeout_detail=f"Calibration for {days} days is taking too long — try a smaller range.",
+        error_detail="Calibration computation failed",
+    )
 
 
 @router.get("/status/{symbol}")
@@ -137,8 +165,16 @@ async def accuracy_status(symbol: str):
                     "analysis": last_analysis.isoformat() if last_analysis else None,
                 },
                 "database_configured": bool(__import__("app.config", fromlist=["settings"]).settings.database_url),
-                "note": "If DATABASE_URL is empty on Render, SQLite is local/ephemeral and history can disappear after restart/redeploy."
+                "note": "If DATABASE_URL is empty on Render, SQLite is local/ephemeral and history can disappear after restart/redeploy.",
+                # Review (Tamil bug report): "ஒவ்வொரு call-உம் save பண்ணி
+                # பேஜ்ல warning கொடுக்கணும்" — every accuracy-route failure
+                # (from any of the 4 endpoints this page calls) is recorded
+                # by _run_with_timeout()/record_error() above, and surfaced
+                # here so the page itself shows *why* things failed instead
+                # of a dead "server error".
+                "recent_errors": recent_errors(sym, limit=5),
             }
     except Exception as e:
         logger.exception("Persistence status failed for %s", sym)
+        record_error("status", sym, f"Persistence status failed: {e}")
         raise HTTPException(500, detail="Persistence status failed")
