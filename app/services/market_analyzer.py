@@ -329,7 +329,7 @@ class MarketAnalyzer:
         try:
             return await self.fetcher.get_option_chain(symbol, expiry=expiry)
         except Exception as e:
-            logger.warning(f"Option chain fetch failed for {symbol}, showing spot/technicals only: {e}")
+            logger.warning(f"Option chain unavailable for {symbol}; using spot/technical fallback: {e}")
             return {"symbol": symbol, "expiry": "", "all_expiries": [], "underlying_price": 0, "data": []}
 
     async def _safe_volatility(self) -> float:
