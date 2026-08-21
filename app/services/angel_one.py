@@ -311,117 +311,13 @@ class AngelOneSession:
 
     async def _ensure_instruments(self) -> None:
         """
-        Angel One has no single "get option chain" API call — unlike NSE,
-        option data has to be fetched strike-by-strike via the Market Quote
-        API, and each strike needs its numeric instrument `token`. Angel
-        publishes those tokens in a daily public JSON file (~100k+ rows,
-        no auth needed). We cache it for 24h since it only changes once a
-        day (new listings/expiries roll in).
+        Render-safe mode:
+        Skip downloading the 36MB instrument master.
+        Option-chain callers will fall back to NSE instead of blocking.
         """
-        if self._instruments and (time.time() - self._instruments_ts) < 86400:
-            return
-        async with self._instruments_lock:
-            if self._instruments and (time.time() - self._instruments_ts) < 86400:
-                return
+        raise AngelOneError("Instrument master disabled on Render; use NSE fallback.")
 
-            # FIX (2026-08-21, round 3b): persist a successful download to
-            # local disk so a process restart (very common on Render during
-            # active deploys) doesn't have to re-fight this flaky endpoint
-            # every time — only the first success each day needs the
-            # network at all. /tmp is ephemeral across *deploys* but
-            # persists across in-process restarts/crashes within the same
-            # container, which is where this was mattering. Best-effort:
-            # any read/write failure here just falls through to a normal
-            # network fetch, same as before.
-            cached = self._read_instrument_cache()
-            if cached is not None:
-                self._instruments, self._instruments_ts = cached
-                logger.info(
-                    f"Angel One instrument master loaded from local disk cache — "
-                    f"{len(self._instruments)} rows"
-                )
-                return
 
-            # FIX (2026-08-21, round 3): rounds 1-2 (bigger timeout, then
-            # streaming + more retries) both still died mid-download with
-            # httpx.RemoteProtocolError — "peer closed connection without
-            # sending complete message body" — at wildly different byte
-            # counts each time (1MB, 1.3MB, 2.4MB, 4.6MB, 6.4MB, 7.5MB out
-            # of ~37MB expected), each after roughly 60-90s. That pattern —
-            # different cutoff point, similar elapsed time — points to
-            # something (the origin server or a proxy in front of it)
-            # closing long-lived connections to this file after a fixed
-            # duration, not a fixed byte count. Retrying the same one big
-            # request just re-triggers the same cutoff every time; this is
-            # also a widely-reported issue for this exact Angel One
-            # endpoint independent of us (community forum reports of
-            # timeouts/503s/nulls on OpenAPIScripMaster.json).
-            #
-            # Fix: download it in small Range-request chunks instead of one
-            # long connection — each chunk finishes well inside whatever
-            # the duration limit is. Falls back to the old whole-file
-            # streaming approach if the server doesn't honor Range (some
-            # CDNs don't), so this never makes things worse than round 2.
-            try:
-                loaded = await self._download_instrument_master_chunked()
-            except Exception as e:
-                logger.warning(
-                    f"Chunked instrument master download failed — "
-                    f"{type(e).__name__}: {e or '(no message)'} — "
-                    f"falling back to whole-file download"
-                )
-                loaded = await self._download_instrument_master_whole()
-
-            if not isinstance(loaded, list):
-                raise AngelOneError(
-                    f"Instrument master response was not a list — got {type(loaded).__name__}. "
-                    f"URL/format may have changed: {self.INSTRUMENT_MASTER_URL}"
-                )
-            self._instruments = loaded
-            self._instruments_ts = time.time()
-            logger.info(f"Angel One instrument master loaded — {len(self._instruments)} rows")
-            self._write_instrument_cache(loaded, self._instruments_ts)
-
-    _INSTRUMENT_CACHE_PATH = "/tmp/angel_instrument_master_cache.json"
-
-    def _read_instrument_cache(self) -> Optional[tuple]:
-        """Returns (instruments, timestamp) from local disk cache if present
-        and still within the 24h TTL, else None. Never raises."""
-        try:
-            import os
-            if not os.path.exists(self._INSTRUMENT_CACHE_PATH):
-                return None
-            with open(self._INSTRUMENT_CACHE_PATH, "r") as f:
-                envelope = json.load(f)
-            ts = envelope.get("ts", 0)
-            data = envelope.get("data")
-            if not isinstance(data, list) or (time.time() - ts) >= 86400:
-                return None
-            return data, ts
-        except Exception as e:
-            logger.debug(f"Instrument disk cache read skipped: {type(e).__name__}: {e}")
-            return None
-
-    def _write_instrument_cache(self, data: list, ts: float) -> None:
-        """Best-effort write of a successful download to local disk so a
-        process restart within the same day can skip the network entirely.
-        Never raises — a failed write just means next restart re-downloads."""
-        try:
-            with open(self._INSTRUMENT_CACHE_PATH, "w") as f:
-                json.dump({"ts": ts, "data": data}, f)
-        except Exception as e:
-            logger.debug(f"Instrument disk cache write skipped: {type(e).__name__}: {e}")
-
-    _INSTRUMENT_MASTER_HEADERS = {
-        # Some CDNs truncate responses to clients that don't look like a
-        # real browser — matches the header set already used elsewhere.
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/json, */*",
-    }
 
     async def _download_instrument_master_chunked(self):
         """
@@ -526,7 +422,7 @@ class AngelOneSession:
         return loaded
 
     async def warmup_instruments(self) -> None:
-        logger.info("Instrument warmup skipped on startup (lazy loading enabled).")
+        logger.info("Instrument warmup disabled on Render.")
         return
         """
         Call once at app startup (e.g. in main.py's startup event, right
