@@ -68,7 +68,10 @@ async def lifespan(app: FastAPI):
     # instrument master gets downloaded lazily on first use as before —
     # startup is never blocked or failed by this.
     from app.services.angel_one import angel_session
-    app.state.angel_warmup_task = asyncio.create_task(angel_session.warmup_instruments())
+    if angel_session.is_configured:
+        app.state.angel_warmup_task = asyncio.create_task(angel_session.warmup_instruments())
+    else:
+        app.state.angel_warmup_task = None
     yield
     logger.info("Shutting down...")
     app.state.history_collector_task.cancel()
@@ -76,7 +79,7 @@ async def lifespan(app: FastAPI):
         await app.state.history_collector_task
     except asyncio.CancelledError:
         pass
-    if not app.state.angel_warmup_task.done():
+    if app.state.angel_warmup_task and not app.state.angel_warmup_task.done():
         app.state.angel_warmup_task.cancel()
         try:
             await app.state.angel_warmup_task
