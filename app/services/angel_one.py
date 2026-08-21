@@ -21,16 +21,12 @@ import logging
 import re
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional, Dict, List
 import httpx
 from app.config import settings
 from app.utils.helpers import safe_float
 
 logger = logging.getLogger(__name__)
-
-CACHE_FILE = Path("/tmp/angel_instruments.json")
-CACHE_TTL = 86400
 
 
 def _normalize_expiry(e: str) -> str:
@@ -82,7 +78,7 @@ class AngelOneAuthError(AngelOneError):
 # Angel One throttles at least one of them. A minimum gap between calls,
 # shared across the whole process via one lock, fixes this without needing
 # to change how dashboard.py fetches symbols.
-_MIN_CALL_INTERVAL = 2.2  # seconds between any two Angel One SmartAPI calls
+_MIN_CALL_INTERVAL = 1.0  # seconds between any two Angel One SmartAPI calls
 
 
 class AngelOneSession:
@@ -314,17 +310,6 @@ class AngelOneSession:
     QUOTE_URL = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote"
 
     async def _ensure_instruments(self) -> None:
-        if CACHE_FILE.exists():
-            age=time.time()-CACHE_FILE.stat().st_mtime
-            if age<CACHE_TTL:
-                with open(CACHE_FILE,'r',encoding='utf-8') as f:
-                    self._instruments=json.load(f)
-                self._instruments_ts=time.time()
-            with open(CACHE_FILE,'w',encoding='utf-8') as f:
-                json.dump(self._instruments,f)
-                logger.info("Angel One instrument cache loaded from disk.")
-                return
-
         """
         Angel One has no single "get option chain" API call — unlike NSE,
         option data has to be fetched strike-by-strike via the Market Quote
@@ -541,6 +526,8 @@ class AngelOneSession:
         return loaded
 
     async def warmup_instruments(self) -> None:
+        logger.info("Instrument warmup skipped on startup (lazy loading enabled).")
+        return
         """
         Call once at app startup (e.g. in main.py's startup event, right
         after the history collector starts) to pre-download the instrument
