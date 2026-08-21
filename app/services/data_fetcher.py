@@ -830,7 +830,7 @@ class DataFetcher:
                 params={"symbol": sym}
             )
 
-        records = (raw or {}).get("records")self._ensure_session(force=True)
+        records = (raw or {}).get("records") self._ensure_session(force=True)
         raw = await self._get("option-chain-indices", params={"symbol": sym})
         except Exception:
             await self._ensure_session(force=True)
