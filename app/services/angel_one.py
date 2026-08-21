@@ -82,7 +82,7 @@ class AngelOneAuthError(AngelOneError):
 # Angel One throttles at least one of them. A minimum gap between calls,
 # shared across the whole process via one lock, fixes this without needing
 # to change how dashboard.py fetches symbols.
-_MIN_CALL_INTERVAL = 1.8  # seconds between any two Angel One SmartAPI calls
+_MIN_CALL_INTERVAL = 2.2  # seconds between any two Angel One SmartAPI calls
 
 
 class AngelOneSession:
