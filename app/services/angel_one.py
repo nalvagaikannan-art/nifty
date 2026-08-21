@@ -324,64 +324,53 @@ class AngelOneSession:
             if self._instruments and (time.time() - self._instruments_ts) < 86400:
                 return
 
-            # FIX (2026-08-21): this file is ~15-30MB / 100k+ rows. On
-            # Render's network the first download of the day routinely took
-            # longer than the old 30s timeout, and httpx's timeout
-            # exceptions (ReadTimeout/ConnectTimeout) raise with an EMPTY
-            # str() — which is exactly why get_option_chain / get_futures_ltp
-            # were logging "...falling back to NSE: " and "...fetch failed
-            # for NIFTY: " with nothing after the colon. Bumped the timeout
-            # and added retries so a slow-but-working download doesn't
-            # get treated the same as a real failure, and made the error
-            # message explicit about what happened either way.
-            #
-            # FIX (2026-08-21, round 2): the timeout/retry fix above surfaced
-            # a second, different failure — httpx.RemoteProtocolError, "peer
-            # closed connection without sending complete message body"
-            # (~1-1.3MB received out of ~37MB expected, every attempt). This
-            # isn't a timeout, it's the remote server/CDN dropping the TCP
-            # connection partway through a single large response — seen
-            # consistently enough (both deploys) that one quick retry isn't
-            # enough. Switched to a streaming read (client.stream +
-            # aiter_bytes) with a real User-Agent header (some CDNs truncate
-            # responses to clients that look like bare scripts), bumped to
-            # 4 attempts, and added a growing backoff between attempts so a
-            # transient CDN hiccup has time to clear before retrying.
-            last_err: Optional[Exception] = None
-            loaded = None
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "Accept": "application/json, */*",
-            }
-            for attempt in range(4):
-                try:
-                    chunks = bytearray()
-                    async with httpx.AsyncClient(timeout=90, headers=headers) as client:
-                        async with client.stream("GET", self.INSTRUMENT_MASTER_URL) as resp:
-                            resp.raise_for_status()
-                            async for chunk in resp.aiter_bytes():
-                                chunks.extend(chunk)
-                    loaded = json.loads(chunks)
-                    break
-                except Exception as e:
-                    last_err = e
-                    logger.warning(
-                        f"Angel One instrument master download attempt {attempt + 1}/4 "
-                        f"failed — {type(e).__name__}: {e or '(no message — likely a timeout)'} "
-                        f"({len(chunks)} bytes received before failure)"
-                    )
-                    loaded = None
-                    if attempt < 3:
-                        await asyncio.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
-            if loaded is None:
-                raise AngelOneError(
-                    f"Instrument master download failed after 4 attempts — "
-                    f"{type(last_err).__name__}: {last_err or '(no message — likely a timeout)'}"
+            # FIX (2026-08-21, round 3b): persist a successful download to
+            # local disk so a process restart (very common on Render during
+            # active deploys) doesn't have to re-fight this flaky endpoint
+            # every time — only the first success each day needs the
+            # network at all. /tmp is ephemeral across *deploys* but
+            # persists across in-process restarts/crashes within the same
+            # container, which is where this was mattering. Best-effort:
+            # any read/write failure here just falls through to a normal
+            # network fetch, same as before.
+            cached = self._read_instrument_cache()
+            if cached is not None:
+                self._instruments, self._instruments_ts = cached
+                logger.info(
+                    f"Angel One instrument master loaded from local disk cache — "
+                    f"{len(self._instruments)} rows"
                 )
+                return
+
+            # FIX (2026-08-21, round 3): rounds 1-2 (bigger timeout, then
+            # streaming + more retries) both still died mid-download with
+            # httpx.RemoteProtocolError — "peer closed connection without
+            # sending complete message body" — at wildly different byte
+            # counts each time (1MB, 1.3MB, 2.4MB, 4.6MB, 6.4MB, 7.5MB out
+            # of ~37MB expected), each after roughly 60-90s. That pattern —
+            # different cutoff point, similar elapsed time — points to
+            # something (the origin server or a proxy in front of it)
+            # closing long-lived connections to this file after a fixed
+            # duration, not a fixed byte count. Retrying the same one big
+            # request just re-triggers the same cutoff every time; this is
+            # also a widely-reported issue for this exact Angel One
+            # endpoint independent of us (community forum reports of
+            # timeouts/503s/nulls on OpenAPIScripMaster.json).
+            #
+            # Fix: download it in small Range-request chunks instead of one
+            # long connection — each chunk finishes well inside whatever
+            # the duration limit is. Falls back to the old whole-file
+            # streaming approach if the server doesn't honor Range (some
+            # CDNs don't), so this never makes things worse than round 2.
+            try:
+                loaded = await self._download_instrument_master_chunked()
+            except Exception as e:
+                logger.warning(
+                    f"Chunked instrument master download failed — "
+                    f"{type(e).__name__}: {e or '(no message)'} — "
+                    f"falling back to whole-file download"
+                )
+                loaded = await self._download_instrument_master_whole()
 
             if not isinstance(loaded, list):
                 raise AngelOneError(
@@ -391,6 +380,150 @@ class AngelOneSession:
             self._instruments = loaded
             self._instruments_ts = time.time()
             logger.info(f"Angel One instrument master loaded — {len(self._instruments)} rows")
+            self._write_instrument_cache(loaded, self._instruments_ts)
+
+    _INSTRUMENT_CACHE_PATH = "/tmp/angel_instrument_master_cache.json"
+
+    def _read_instrument_cache(self) -> Optional[tuple]:
+        """Returns (instruments, timestamp) from local disk cache if present
+        and still within the 24h TTL, else None. Never raises."""
+        try:
+            import os
+            if not os.path.exists(self._INSTRUMENT_CACHE_PATH):
+                return None
+            with open(self._INSTRUMENT_CACHE_PATH, "r") as f:
+                envelope = json.load(f)
+            ts = envelope.get("ts", 0)
+            data = envelope.get("data")
+            if not isinstance(data, list) or (time.time() - ts) >= 86400:
+                return None
+            return data, ts
+        except Exception as e:
+            logger.debug(f"Instrument disk cache read skipped: {type(e).__name__}: {e}")
+            return None
+
+    def _write_instrument_cache(self, data: list, ts: float) -> None:
+        """Best-effort write of a successful download to local disk so a
+        process restart within the same day can skip the network entirely.
+        Never raises — a failed write just means next restart re-downloads."""
+        try:
+            with open(self._INSTRUMENT_CACHE_PATH, "w") as f:
+                json.dump({"ts": ts, "data": data}, f)
+        except Exception as e:
+            logger.debug(f"Instrument disk cache write skipped: {type(e).__name__}: {e}")
+
+    _INSTRUMENT_MASTER_HEADERS = {
+        # Some CDNs truncate responses to clients that don't look like a
+        # real browser — matches the header set already used elsewhere.
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, */*",
+    }
+
+    async def _download_instrument_master_chunked(self):
+        """
+        Downloads OpenAPIScripMaster.json in ~4MB Range-request chunks
+        instead of one ~37MB request. See the FIX note in _ensure_instruments
+        for why: the server appears to cut off long-lived connections to
+        this file after a fixed duration, and a 4MB chunk finishes well
+        inside that window even at the slow throughput observed in prod
+        (~60-150 KB/s from Render to this host).
+
+        Raises (never returns a partial/invalid result) if the server
+        doesn't support Range requests, or if any chunk fails after its own
+        retries — the caller falls back to _download_instrument_master_whole
+        in that case.
+        """
+        CHUNK = 4 * 1024 * 1024  # 4MB
+        async with httpx.AsyncClient(timeout=30, headers=self._INSTRUMENT_MASTER_HEADERS) as client:
+            # Probe: ask for just the first byte range. If the server
+            # answers 206 with a Content-Range header, it supports ranged
+            # requests and tells us the true total size.
+            probe = await client.get(
+                self.INSTRUMENT_MASTER_URL, headers={"Range": "bytes=0-0"}
+            )
+            if probe.status_code != 206:
+                raise AngelOneError(
+                    f"Server does not support Range requests (probe status {probe.status_code})"
+                )
+            content_range = probe.headers.get("Content-Range", "")
+            # Format: "bytes 0-0/36952921"
+            total_size = None
+            if "/" in content_range:
+                try:
+                    total_size = int(content_range.rsplit("/", 1)[-1])
+                except ValueError:
+                    pass
+            if not total_size:
+                raise AngelOneError(f"Could not parse total size from Content-Range: {content_range!r}")
+
+            buf = bytearray()
+            pos = 0
+            while pos < total_size:
+                end = min(pos + CHUNK, total_size) - 1
+                chunk_bytes = None
+                for attempt in range(3):
+                    try:
+                        r = await client.get(
+                            self.INSTRUMENT_MASTER_URL,
+                            headers={"Range": f"bytes={pos}-{end}"},
+                        )
+                        if r.status_code not in (200, 206):
+                            raise AngelOneError(f"Chunk fetch got HTTP {r.status_code}")
+                        chunk_bytes = r.content
+                        break
+                    except Exception as e:
+                        if attempt == 2:
+                            raise AngelOneError(
+                                f"Chunk [{pos}-{end}] failed after 3 attempts — "
+                                f"{type(e).__name__}: {e or '(no message)'}"
+                            )
+                        await asyncio.sleep(1.0 * (attempt + 1))
+                buf.extend(chunk_bytes)
+                pos = end + 1
+            logger.info(
+                f"Angel One instrument master downloaded via {(total_size // CHUNK) + 1} "
+                f"Range chunks — {len(buf)} bytes"
+            )
+            return json.loads(buf)
+
+    async def _download_instrument_master_whole(self):
+        """
+        Fallback used when the server doesn't honor Range requests (some
+        CDNs don't) — same streaming-with-retries approach as round 2, kept
+        as a safety net rather than the primary path now.
+        """
+        last_err: Optional[Exception] = None
+        loaded = None
+        for attempt in range(4):
+            try:
+                chunks = bytearray()
+                async with httpx.AsyncClient(timeout=90, headers=self._INSTRUMENT_MASTER_HEADERS) as client:
+                    async with client.stream("GET", self.INSTRUMENT_MASTER_URL) as resp:
+                        resp.raise_for_status()
+                        async for chunk in resp.aiter_bytes():
+                            chunks.extend(chunk)
+                loaded = json.loads(chunks)
+                break
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    f"Angel One instrument master whole-file download attempt {attempt + 1}/4 "
+                    f"failed — {type(e).__name__}: {e or '(no message — likely a timeout)'} "
+                    f"({len(chunks)} bytes received before failure)"
+                )
+                loaded = None
+                if attempt < 3:
+                    await asyncio.sleep(2 * (attempt + 1))
+        if loaded is None:
+            raise AngelOneError(
+                f"Instrument master whole-file download failed after 4 attempts — "
+                f"{type(last_err).__name__}: {last_err or '(no message — likely a timeout)'}"
+            )
+        return loaded
 
     async def warmup_instruments(self) -> None:
         """
