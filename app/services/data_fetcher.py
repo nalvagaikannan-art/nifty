@@ -278,7 +278,15 @@ class DataFetcher:
             raw = await angel_session.get_option_chain(symbol, expiry or "")
         except Exception as e:
             health_metrics.record("angel_one", "other_error")
-            logger.warning(f"Angel One option chain failed for {symbol}, falling back to NSE: {e}")
+            # FIX (2026-08-21): include the exception type alongside str(e).
+            # Timeout-style exceptions (httpx.ReadTimeout etc, now also
+            # AngelOneError wrapping one — see angel_one._ensure_instruments)
+            # can have an EMPTY str(), which made this log line end in a
+            # bare ": " with no way to tell what actually went wrong.
+            logger.warning(
+                f"Angel One option chain failed for {symbol}, falling back to NSE — "
+                f"{type(e).__name__}: {e or '(no message)'}"
+            )
             return None
         health_metrics.record("angel_one", "ok")
 
@@ -645,7 +653,12 @@ class DataFetcher:
         try:
             fut = await angel_session.get_futures_ltp(symbol)
         except Exception as e:
-            logger.warning(f"Futures premium fetch failed for {symbol}: {e}")
+            # FIX (2026-08-21): see matching note in _try_angel_option_chain
+            # above — same empty-str(e) timeout issue, same fix.
+            logger.warning(
+                f"Futures premium fetch failed for {symbol} — "
+                f"{type(e).__name__}: {e or '(no message)'}"
+            )
             return {"status": "unavailable", "premium": 0.0, "premium_pct": 0.0}
         if not fut:
             return {"status": "unavailable", "premium": 0.0, "premium_pct": 0.0}

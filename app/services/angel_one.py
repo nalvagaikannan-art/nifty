@@ -322,10 +322,38 @@ class AngelOneSession:
         async with self._instruments_lock:
             if self._instruments and (time.time() - self._instruments_ts) < 86400:
                 return
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(self.INSTRUMENT_MASTER_URL)
-                resp.raise_for_status()
-                loaded = resp.json()
+
+            # FIX (2026-08-21): this file is ~15-30MB / 100k+ rows. On
+            # Render's network the first download of the day routinely took
+            # longer than the old 30s timeout, and httpx's timeout
+            # exceptions (ReadTimeout/ConnectTimeout) raise with an EMPTY
+            # str() — which is exactly why get_option_chain / get_futures_ltp
+            # were logging "...falling back to NSE: " and "...fetch failed
+            # for NIFTY: " with nothing after the colon. Bumped the timeout
+            # and added one retry so a slow-but-working download doesn't
+            # get treated the same as a real failure, and made the error
+            # message explicit about what happened either way.
+            last_err: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        resp = await client.get(self.INSTRUMENT_MASTER_URL)
+                        resp.raise_for_status()
+                        loaded = resp.json()
+                    break
+                except Exception as e:
+                    last_err = e
+                    logger.warning(
+                        f"Angel One instrument master download attempt {attempt + 1}/2 "
+                        f"failed — {type(e).__name__}: {e or '(no message — likely a timeout)'}"
+                    )
+                    loaded = None
+            if loaded is None:
+                raise AngelOneError(
+                    f"Instrument master download failed after 2 attempts — "
+                    f"{type(last_err).__name__}: {last_err or '(no message — likely a timeout)'}"
+                )
+
             if not isinstance(loaded, list):
                 raise AngelOneError(
                     f"Instrument master response was not a list — got {type(loaded).__name__}. "
@@ -334,6 +362,24 @@ class AngelOneSession:
             self._instruments = loaded
             self._instruments_ts = time.time()
             logger.info(f"Angel One instrument master loaded — {len(self._instruments)} rows")
+
+    async def warmup_instruments(self) -> None:
+        """
+        Call once at app startup (e.g. in main.py's startup event, right
+        after the history collector starts) to pre-download the instrument
+        master in the background. Without this, the FIRST user request that
+        touches the option chain or futures premium pays the ~15-30MB
+        download cost inline and can time out under load — see the FIX
+        note in _ensure_instruments above. Safe to call even when Angel One
+        isn't configured or the fetch fails; errors are logged, not raised,
+        since this is a best-effort prewarm, not a required startup step.
+        """
+        if not self.is_configured:
+            return
+        try:
+            await self._ensure_instruments()
+        except Exception as e:
+            logger.warning(f"Instrument master warmup failed (will retry on first real request): {e}")
 
     def _quote_headers(self) -> Dict:
         return {
