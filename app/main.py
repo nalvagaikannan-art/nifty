@@ -67,8 +67,8 @@ async def lifespan(app: FastAPI):
     # a warning rather than raising, so a failed warmup just means the
     # instrument master gets downloaded lazily on first use as before —
     # startup is never blocked or failed by this.
+    
     from app.services.angel_one import angel_session
-
     if angel_session.is_configured:
         app.state.angel_warmup_task = asyncio.create_task(
             angel_session.warmup_instruments()
