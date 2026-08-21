@@ -7,6 +7,12 @@ Angel One SmartAPI மூலம் live market data, option chain, login/logout.
 - TOTP (Google Authenticator) required for login.
 - Session refresh happens automatically on token expiry.
 - Falls back to NSE scraping if Angel One credentials are not configured.
+
+FIXES (2026-08-20):
+  - get_option_chain(): use_sdk check-க்கு INFO log சேர்த்தோம் —
+    "use_sdk=False" வந்தா SmartAPI SDK upgrade தேவை என்று தெரியும்.
+  - REST fallback-ல் WARNING log சேர்த்தோம் — "Invalid Token" error
+    silent-ஆ fail ஆகாமல் logs-ல் தெரியும்.
 """
 
 import asyncio
@@ -447,8 +453,23 @@ class AngelOneSession:
         if not tokens:
             raise AngelOneError(f"No tokens resolved for {sym} {chosen_expiry}")
 
-        quotes: Dict[str, Dict] = {}
+        # FIX (2026-08-20): use_sdk check-க்கு INFO log சேர்த்தோம்.
+        # "use_sdk=False" வந்தா SmartAPI SDK-ல் getMarketData இல்லை —
+        # REST fallback try ஆகும், அது "Invalid Token" error குடுக்கும்.
+        # Solution: pip install --upgrade smartapi-python
         use_sdk = hasattr(self._obj, "getMarketData")
+        logger.info(
+            f"Angel One option chain: {sym} expiry={chosen_expiry}, "
+            f"tokens={len(tokens)}, spot={spot}, use_sdk={use_sdk}"
+        )
+        if not use_sdk:
+            logger.warning(
+                "Angel One SDK does not have getMarketData method — "
+                "will try REST fallback which may fail with 'Invalid Token'. "
+                "Fix: pip install --upgrade smartapi-python (in requirements.txt)"
+            )
+
+        quotes: Dict[str, Dict] = {}
         async with httpx.AsyncClient(timeout=15) as client:
             for i in range(0, len(tokens), 50):  # FULL mode limit: 50 tokens/call
                 batch = tokens[i:i + 50]
@@ -466,12 +487,28 @@ class AngelOneSession:
                     except Exception as e:
                         raise AngelOneError(f"SDK getMarketData failed: {e}")
                 else:
+                    # FIX (2026-08-20): REST fallback-ல் explicit WARNING —
+                    # இது "Invalid Token" error-உடன் fail ஆகும்.
+                    # getMarketData SDK method இல்லன்னா இங்கே வரும்.
+                    logger.warning(
+                        f"Angel One REST quote fallback for batch {i//50 + 1} "
+                        f"({len(batch)} tokens) — likely to fail with 'Invalid Token'. "
+                        f"Check logs below for exact error."
+                    )
                     resp = await client.post(
                         self.QUOTE_URL,
                         headers=self._quote_headers(),
                         json={"mode": "FULL", "exchangeTokens": {"NFO": batch}},
                     )
                     body = resp.json() if resp.content else {}
+                    # REST response log — exact error visible in logs
+                    if isinstance(body, dict) and body.get("status") is False:
+                        logger.error(
+                            f"Angel One REST quote error: "
+                            f"status={body.get('status')}, "
+                            f"message={body.get('message')!r}, "
+                            f"errorcode={body.get('errorcode')!r}"
+                        )
 
                 if not isinstance(body, dict) or not body or body.get("status") is False:
                     msg = (
@@ -503,6 +540,8 @@ class AngelOneSession:
                     if token:
                         quotes[token] = item
 
+        logger.info(f"Angel One option chain quotes fetched: {len(quotes)} tokens matched out of {len(tokens)}")
+
         strike_map: Dict[float, Dict] = {}
         for r in selected_rows:
             token = r.get("token")
@@ -531,6 +570,7 @@ class AngelOneSession:
         if not chain_rows:
             raise AngelOneError("Quote batch returned no matchable rows")
 
+        logger.info(f"Angel One option chain built: {len(chain_rows)} strikes for {sym} {chosen_expiry}")
         return {
             "symbol":           sym,
             "expiry":           chosen_expiry,
