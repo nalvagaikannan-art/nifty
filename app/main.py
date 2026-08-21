@@ -123,20 +123,24 @@ else:
     logger.info(f"CORS allowed origins: {settings.cors_allowed_origins}")
 app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.api_rate_limit_per_minute)
 
+
 @app.exception_handler(MarketDataError)
 async def market_data_error_handler(request: Request, exc: MarketDataError):
     logger.error(f"Unhandled MarketDataError on {request.url.path}: {exc}")
     return JSONResponse(status_code=502, content={"error": "market_data_unavailable", "detail": str(exc)})
+
 
 @app.exception_handler(AIProviderError)
 async def ai_provider_error_handler(request: Request, exc: AIProviderError):
     logger.error(f"Unhandled AIProviderError on {request.url.path}: {exc}")
     return JSONResponse(status_code=503, content={"error": "ai_provider_unavailable", "detail": str(exc)})
 
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception on {request.url.path}")
     return JSONResponse(status_code=500, content={"error": "internal_server_error", "detail": "An unexpected error occurred."})
+
 
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
@@ -160,45 +164,56 @@ async def service_worker():
     from fastapi.responses import FileResponse
     return FileResponse("app/static/sw.js", media_type="application/javascript")
 
+
 @app.get("/")
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
+
 
 @app.get("/dashboard")
 async def dashboard_page(request: Request):
     return templates.TemplateResponse("dashboard.html", {"request": request})
 
+
 @app.get("/terminal")
 async def terminal_page(request: Request):
     return templates.TemplateResponse("terminal.html", {"request": request})
+
 
 @app.get("/live")
 async def live_page(request: Request):
     return templates.TemplateResponse("live.html", {"request": request})
 
+
 @app.get("/option-view")
 async def option_view_page(request: Request):
     return templates.TemplateResponse("option-view.html", {"request": request})
+
 
 @app.get("/market")
 async def market_page(request: Request):
     return templates.TemplateResponse("market.html", {"request": request})
 
+
 @app.get("/options")
 async def options_page(request: Request):
     return templates.TemplateResponse("options.html", {"request": request})
+
 
 @app.get("/analysis")
 async def analysis_page(request: Request):
     return templates.TemplateResponse("analysis.html", {"request": request})
 
+
 @app.get("/settings")
 async def settings_page(request: Request):
     return templates.TemplateResponse("settings.html", {"request": request})
 
+
 @app.get("/accuracy")
 async def accuracy_page(request: Request):
     return templates.TemplateResponse("accuracy.html", {"request": request})
+
 
 @app.get("/positions")
 async def positions_page(request: Request):
