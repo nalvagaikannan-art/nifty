@@ -69,7 +69,10 @@ async def lifespan(app: FastAPI):
     # startup is never blocked or failed by this.
     from app.services.angel_one import angel_session
     if angel_session.is_configured:
+        if angel_session.is_configured:
         app.state.angel_warmup_task = asyncio.create_task(angel_session.warmup_instruments())
+    else:
+        app.state.angel_warmup_task = None
     else:
         app.state.angel_warmup_task = None
     yield
