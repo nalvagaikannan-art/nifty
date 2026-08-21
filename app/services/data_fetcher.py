@@ -278,15 +278,7 @@ class DataFetcher:
             raw = await angel_session.get_option_chain(symbol, expiry or "")
         except Exception as e:
             health_metrics.record("angel_one", "other_error")
-            # FIX (2026-08-21): include the exception type alongside str(e).
-            # Timeout-style exceptions (httpx.ReadTimeout etc, now also
-            # AngelOneError wrapping one — see angel_one._ensure_instruments)
-            # can have an EMPTY str(), which made this log line end in a
-            # bare ": " with no way to tell what actually went wrong.
-            logger.warning(
-                f"Angel One option chain failed for {symbol}, falling back to NSE — "
-                f"{type(e).__name__}: {e or '(no message)'}"
-            )
+            logger.warning(f"Angel One option chain failed for {symbol}, falling back to NSE: {e}")
             return None
         health_metrics.record("angel_one", "ok")
 
@@ -653,12 +645,7 @@ class DataFetcher:
         try:
             fut = await angel_session.get_futures_ltp(symbol)
         except Exception as e:
-            # FIX (2026-08-21): see matching note in _try_angel_option_chain
-            # above — same empty-str(e) timeout issue, same fix.
-            logger.warning(
-                f"Futures premium fetch failed for {symbol} — "
-                f"{type(e).__name__}: {e or '(no message)'}"
-            )
+            logger.warning(f"Futures premium fetch failed for {symbol}: {e}")
             return {"status": "unavailable", "premium": 0.0, "premium_pct": 0.0}
         if not fut:
             return {"status": "unavailable", "premium": 0.0, "premium_pct": 0.0}
@@ -813,33 +800,7 @@ class DataFetcher:
         if zerodha_result is not None:
             return zerodha_result
 
-                # Render-safe NSE option chain fallback
-        try:
-            raw = await self._get(
-                "option-chain-indices",
-                params={"symbol": sym}
-            )
-        except Exception as e:
-            logger.warning(
-                f"NSE option chain fetch failed for {sym}: "
-                f"{type(e).__name__}: {e}"
-            )
-            await self._ensure_session(force=True)
-            raw = await self._get(
-                "option-chain-indices",
-                params={"symbol": sym}
-            )
-
-          records = (raw or {}).get("records")
-self._ensure_session(force=True)
-except Exception:
-    logger.error(f"Failed to get option chain for {sym}")
-    return []
-url = f"{self.BASE_URL}/option-chain-indices"
-resp = await self._session.get(url, params={"symbol": sym})
-if resp.status_code != 200:
-        raise MarketDataError(f"NSE option chain failed ({resp.status_code})")
-        raw = clean_nse_response(resp.json())
+        raw = await self._get("option-chain-indices", params={"symbol": sym})
         records = (raw or {}).get("records")
         if not records:
             raise MarketDataError("NSE option-chain: missing 'records' block")
