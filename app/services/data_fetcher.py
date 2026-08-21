@@ -813,12 +813,24 @@ class DataFetcher:
         if zerodha_result is not None:
             return zerodha_result
 
-        # Render-safe NSE option chain fallback
+                # Render-safe NSE option chain fallback
         try:
-            try:
-            raw = await self._get("option-chain-indices", params={"symbol": sym})
-        except Exception:
+            raw = await self._get(
+                "option-chain-indices",
+                params={"symbol": sym}
+            )
+        except Exception as e:
+            logger.warning(
+                f"NSE option chain fetch failed for {sym}: "
+                f"{type(e).__name__}: {e}"
+            )
             await self._ensure_session(force=True)
+            raw = await self._get(
+                "option-chain-indices",
+                params={"symbol": sym}
+            )
+
+        records = (raw or {}).get("records") self._ensure_session(force=True)
             raw = await self._get("option-chain-indices", params={"symbol": sym})
         except Exception:
             await self._ensure_session(force=True)
