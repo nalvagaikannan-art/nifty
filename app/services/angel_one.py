@@ -16,6 +16,7 @@ FIXES (2026-08-20):
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -330,27 +331,55 @@ class AngelOneSession:
             # str() — which is exactly why get_option_chain / get_futures_ltp
             # were logging "...falling back to NSE: " and "...fetch failed
             # for NIFTY: " with nothing after the colon. Bumped the timeout
-            # and added one retry so a slow-but-working download doesn't
+            # and added retries so a slow-but-working download doesn't
             # get treated the same as a real failure, and made the error
             # message explicit about what happened either way.
+            #
+            # FIX (2026-08-21, round 2): the timeout/retry fix above surfaced
+            # a second, different failure — httpx.RemoteProtocolError, "peer
+            # closed connection without sending complete message body"
+            # (~1-1.3MB received out of ~37MB expected, every attempt). This
+            # isn't a timeout, it's the remote server/CDN dropping the TCP
+            # connection partway through a single large response — seen
+            # consistently enough (both deploys) that one quick retry isn't
+            # enough. Switched to a streaming read (client.stream +
+            # aiter_bytes) with a real User-Agent header (some CDNs truncate
+            # responses to clients that look like bare scripts), bumped to
+            # 4 attempts, and added a growing backoff between attempts so a
+            # transient CDN hiccup has time to clear before retrying.
             last_err: Optional[Exception] = None
-            for attempt in range(2):
+            loaded = None
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                ),
+                "Accept": "application/json, */*",
+            }
+            for attempt in range(4):
                 try:
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        resp = await client.get(self.INSTRUMENT_MASTER_URL)
-                        resp.raise_for_status()
-                        loaded = resp.json()
+                    chunks = bytearray()
+                    async with httpx.AsyncClient(timeout=90, headers=headers) as client:
+                        async with client.stream("GET", self.INSTRUMENT_MASTER_URL) as resp:
+                            resp.raise_for_status()
+                            async for chunk in resp.aiter_bytes():
+                                chunks.extend(chunk)
+                    loaded = json.loads(chunks)
                     break
                 except Exception as e:
                     last_err = e
                     logger.warning(
-                        f"Angel One instrument master download attempt {attempt + 1}/2 "
-                        f"failed — {type(e).__name__}: {e or '(no message — likely a timeout)'}"
+                        f"Angel One instrument master download attempt {attempt + 1}/4 "
+                        f"failed — {type(e).__name__}: {e or '(no message — likely a timeout)'} "
+                        f"({len(chunks)} bytes received before failure)"
                     )
                     loaded = None
+                    if attempt < 3:
+                        await asyncio.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
             if loaded is None:
                 raise AngelOneError(
-                    f"Instrument master download failed after 2 attempts — "
+                    f"Instrument master download failed after 4 attempts — "
                     f"{type(last_err).__name__}: {last_err or '(no message — likely a timeout)'}"
                 )
 
