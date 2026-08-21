@@ -813,7 +813,16 @@ class DataFetcher:
         if zerodha_result is not None:
             return zerodha_result
 
-        raw = await self._get("option-chain-indices", params={"symbol": sym})
+        # Render-safe NSE option chain fallback
+        try:
+            raw = await self._get("option-chain-indices", params={"symbol": sym})
+        except Exception:
+            await self._ensure_session(force=True)
+            url = f"{self.BASE_URL}/option-chain-indices"
+            resp = await self._session.get(url, params={"symbol": sym})
+            if resp.status_code != 200:
+                raise MarketDataError(f"NSE option chain failed ({resp.status_code})")
+            raw = clean_nse_response(resp.json())
         records = (raw or {}).get("records")
         if not records:
             raise MarketDataError("NSE option-chain: missing 'records' block")
