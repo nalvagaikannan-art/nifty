@@ -68,11 +68,12 @@ async def lifespan(app: FastAPI):
     # instrument master gets downloaded lazily on first use as before —
     # startup is never blocked or failed by this.
     from app.services.angel_one import angel_session
+       from app.services.angel_one import angel_session
+
     if angel_session.is_configured:
-        if angel_session.is_configured:
-        app.state.angel_warmup_task = asyncio.create_task(angel_session.warmup_instruments())
-    else:
-        app.state.angel_warmup_task = None
+        app.state.angel_warmup_task = asyncio.create_task(
+            angel_session.warmup_instruments()
+        )
     else:
         app.state.angel_warmup_task = None
     yield
