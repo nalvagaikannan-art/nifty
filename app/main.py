@@ -54,6 +54,21 @@ async def lifespan(app: FastAPI):
     app.state.history_collector_task = asyncio.create_task(
         run_periodic_collection(app.state.market_analyzer)
     )
+    # FIX (2026-08-21): Angel One's option-chain/futures-premium calls both
+    # need the ~15-30MB instrument master file (see angel_one._ensure_
+    # instruments). Previously that file was only downloaded lazily, on
+    # whichever request happened to touch it first — under Render's network
+    # that cold download could exceed the old 30s timeout and fail with an
+    # empty-message exception, taking option chain + futures premium down
+    # together and forcing a fallback to NSE (which then often 404s too).
+    # Pre-downloading it here, in the background, means it's already cached
+    # by the time the first real dashboard/analysis request comes in.
+    # Fire-and-forget: warmup_instruments() catches its own errors and logs
+    # a warning rather than raising, so a failed warmup just means the
+    # instrument master gets downloaded lazily on first use as before —
+    # startup is never blocked or failed by this.
+    from app.services.angel_one import angel_session
+    app.state.angel_warmup_task = asyncio.create_task(angel_session.warmup_instruments())
     yield
     logger.info("Shutting down...")
     app.state.history_collector_task.cancel()
@@ -61,6 +76,12 @@ async def lifespan(app: FastAPI):
         await app.state.history_collector_task
     except asyncio.CancelledError:
         pass
+    if not app.state.angel_warmup_task.done():
+        app.state.angel_warmup_task.cancel()
+        try:
+            await app.state.angel_warmup_task
+        except asyncio.CancelledError:
+            pass
     await app.state.data_fetcher.close()
     from app.services.global_market import global_market_service
     from app.services.economic_calendar import economic_calendar_service
