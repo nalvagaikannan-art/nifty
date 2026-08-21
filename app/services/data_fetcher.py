@@ -815,6 +815,10 @@ class DataFetcher:
 
         # Render-safe NSE option chain fallback
         try:
+            try:
+            raw = await self._get("option-chain-indices", params={"symbol": sym})
+        except Exception:
+            await self._ensure_session(force=True)
             raw = await self._get("option-chain-indices", params={"symbol": sym})
         except Exception:
             await self._ensure_session(force=True)
