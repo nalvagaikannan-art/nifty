@@ -426,6 +426,52 @@ class AngelOneSession:
         logger.info("Instrument warmup skipped on Render startup.")
         return
 
+    @staticmethod
+    def _expiry_sort_key(e: str):
+        for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(e, fmt)
+            except ValueError:
+                continue
+        return datetime.max
+
+    async def get_option_chain(self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 10) -> Dict:
+        """
+        Composes an option chain for `symbol` from the instrument master +
+        live quotes. Angel One has no single "get option chain" endpoint
+        the way NSE does — this resolves CE/PE strike tokens near spot for
+        the requested (or nearest) expiry from the instrument master, then
+        batches live quotes for those tokens.
+
+        NOTE: on Render, _ensure_instruments() raises immediately (instrument
+        master download is disabled there — see its docstring). Callers
+        (data_fetcher) already catch AngelOneError and fall back to NSE.
+
+        FIX (2026-08-21): this method previously had no `def` line — its
+        body had been left dangling inside warmup_instruments() after an
+        early `return`, so it was dead code and the method didn't exist on
+        the class at all ('AngelOneSession' object has no attribute
+        'get_option_chain'). Restored as its own method here.
+        """
+        await self.ensure_session()
+        await self._ensure_instruments()
+        if not isinstance(self._instruments, list) or not self._instruments:
+            raise AngelOneError("Instrument master not available")
+
+        sym = self.NFO_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
+        rows = [
+            r for r in self._instruments
+            if isinstance(r, dict)
+            and r.get("name") == sym
+            and r.get("instrumenttype") == "OPTIDX"
+            and r.get("exch_seg") == "NFO"
+            and r.get("expiry")
+        ]
+        if not rows:
+            raise AngelOneError(f"No option instruments found for {sym}")
+
+        expiries = sorted({r["expiry"] for r in rows}, key=self._expiry_sort_key)
+
         # '01SEP2026' while the UI/caller sends '01-Sep-2026' or '2026-09-01'.
         # Exact string match fails silently and returns zero rows.
         # Solution: normalize BOTH sides to 'YYYY-MM-DD' before comparing.
