@@ -78,7 +78,7 @@ class AngelOneAuthError(AngelOneError):
 # Angel One throttles at least one of them. A minimum gap between calls,
 # shared across the whole process via one lock, fixes this without needing
 # to change how dashboard.py fetches symbols.
-_MIN_CALL_INTERVAL = 1.0  # seconds between any two Angel One SmartAPI calls
+_MIN_CALL_INTERVAL = 2.2  # seconds between any two Angel One SmartAPI calls
 
 
 class AngelOneSession:
@@ -422,93 +422,10 @@ class AngelOneSession:
         return loaded
 
     async def warmup_instruments(self) -> None:
-        logger.info("Instrument warmup disabled on Render.")
+        """Render-safe: skip startup warmup."""
+        logger.info("Instrument warmup skipped on Render startup.")
         return
-        """
-        Call once at app startup (e.g. in main.py's startup event, right
-        after the history collector starts) to pre-download the instrument
-        master in the background. Without this, the FIRST user request that
-        touches the option chain or futures premium pays the ~15-30MB
-        download cost inline and can time out under load — see the FIX
-        note in _ensure_instruments above. Safe to call even when Angel One
-        isn't configured or the fetch fails; errors are logged, not raised,
-        since this is a best-effort prewarm, not a required startup step.
-        """
-        if not self.is_configured:
-            return
-        try:
-            await self._ensure_instruments()
-        except Exception as e:
-            logger.warning(f"Instrument master warmup failed (will retry on first real request): {e}")
 
-    def _quote_headers(self) -> Dict:
-        return {
-            "Authorization":     f"Bearer {self._auth_token}",
-            "Content-Type":      "application/json",
-            "Accept":            "application/json",
-            "X-UserType":        "USER",
-            "X-SourceID":        "WEB",
-            "X-ClientLocalIP":   "127.0.0.1",
-            "X-ClientPublicIP":  "127.0.0.1",
-            "X-MACAddress":      "00:00:00:00:00:00",
-            "X-PrivateKey":      settings.angel_api_key,
-        }
-
-    async def get_option_chain(
-        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 15
-    ) -> Dict:
-        """
-        Builds an NSE-shaped option chain by hand, since SmartAPI has no
-        single "option chain" endpoint:
-          1. Load the instrument master, filter to this symbol's OPTIDX rows.
-          2. Pick the nearest expiry if none was given.
-          3. Take `strikes_each_side` strikes above/below ATM (keeps the
-             quote batch small — the full chain across every strike would
-             be hundreds of tokens for no real benefit; traders look near
-             ATM anyway).
-          4. Batch-fetch CE+PE quotes via Angel's Market Quote API (FULL
-             mode, ≤50 tokens/call) and merge into
-             {"strikePrice", "expiryDate", "CE": {...}, "PE": {...}} rows —
-             the same shape option_analyzer.py expects from NSE.
-
-        Calls Angel's REST quote endpoint directly with httpx rather than
-        through the SmartApi SDK, since the SDK's method name/response
-        shape for batched quotes isn't reliably documented across versions.
-        NOT verified against a live account — field names below follow
-        Angel's public API docs but may need adjusting against real
-        responses (check logs after enabling). Any failure here raises and
-        the caller (data_fetcher._try_angel_option_chain) falls back to
-        NSE — this never crashes the app either way.
-        """
-        await self.ensure_session()
-        await self._ensure_instruments()
-
-        if not isinstance(self._instruments, list) or not self._instruments:
-            raise AngelOneError(
-                f"Instrument master has unexpected shape: {type(self._instruments).__name__}"
-            )
-        if not isinstance(self._instruments[0], dict):
-            raise AngelOneError(
-                f"Instrument master rows are not dicts — got {type(self._instruments[0]).__name__} "
-                f"(sample: {str(self._instruments[0])[:150]})"
-            )
-
-        sym = self.NFO_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
-        rows = [
-            r for r in self._instruments
-            if isinstance(r, dict)
-            and r.get("name") == sym
-            and r.get("instrumenttype") == "OPTIDX"
-            and r.get("exch_seg") == "NFO"
-        ]
-        if not rows:
-            raise AngelOneError(f"No option instruments found for {sym} in instrument master")
-
-        expiries = sorted(set(r["expiry"] for r in rows if r.get("expiry")))
-        if not expiries:
-            raise AngelOneError(f"No expiries found for {sym}")
-
-        # Normalize expiry comparison — Angel One instrument master may use
         # '01SEP2026' while the UI/caller sends '01-Sep-2026' or '2026-09-01'.
         # Exact string match fails silently and returns zero rows.
         # Solution: normalize BOTH sides to 'YYYY-MM-DD' before comparing.
