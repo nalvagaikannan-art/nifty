@@ -659,6 +659,7 @@ async def strike_recommendation(
             v2_trade_levels = calculate_trade_levels(
                 market_data, direction, spot, _opt_ltp,
                 delta=_delta, theta_per_day=_theta,
+                regime=regime.get("regime"),
             )
     except Exception as _tl:
         logger.warning(f"Trade levels error: {_tl}")
