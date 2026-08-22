@@ -786,6 +786,61 @@ class DataFetcher:
             "timestamp":            datetime.now().isoformat(),
         }
 
+    async def _nse_option_chain_v3(self, sym: str, expiry: Optional[str]) -> Dict:
+        """
+        NSE moved its option-chain API to a two-step v3 contract at some
+        point after this project's original single-call integration
+        (`option-chain-indices`) was written — that endpoint now 404s
+        (confirmed in production: "NSE 404 on option-chain-indices").
+        New flow:
+          1. GET option-chain-contract-info?symbol=SYM  -> expiry dates
+          2. GET option-chain-v3?type=Indices&symbol=SYM&expiry=<one of those>
+        Both steps reuse the existing _get() (session/cookie/retry
+        handling unchanged). Raises on any failure — the caller falls
+        back to the old endpoint, so this can't newly break anything.
+        """
+        info = await self._get("option-chain-contract-info", params={"symbol": sym})
+        expiry_list = (
+            (info or {}).get("expiryDates")
+            or ((info or {}).get("records") or {}).get("expiryDates")
+            or []
+        )
+        if not expiry_list:
+            raise MarketDataError("NSE option-chain-v3: no expiry dates from contract-info")
+
+        if not expiry:
+            today = datetime.now().date()
+            future = [(d, e) for e in expiry_list if (d := _parse_expiry_date(e)) >= today]
+            if not future:
+                raise MarketDataError("No future expiry found in NSE option-chain-v3 contract-info")
+            future.sort()
+            expiry = future[0][1]
+
+        raw = await self._get(
+            "option-chain-v3", params={"type": "Indices", "symbol": sym, "expiry": expiry}
+        )
+        # v3's response shape isn't confirmed from this sandbox (no network
+        # access to NSE) — handle both a "records"-wrapped shape (like the
+        # old endpoint) and a flat top-level shape, whichever it turns out
+        # to be, rather than assuming one.
+        records = (raw or {}).get("records")
+        records = records if isinstance(records, dict) else (raw or {})
+        all_strikes = records.get("data", [])
+        if not all_strikes:
+            raise MarketDataError("NSE option-chain-v3: empty data for expiry")
+
+        chain_rows = [r for r in all_strikes if r.get("expiryDate") == expiry] or all_strikes
+        underlying = safe_float(records.get("underlyingValue", (raw or {}).get("underlyingValue", 0)))
+        sorted_expiries = sorted(expiry_list, key=_parse_expiry_date)
+        return {
+            "symbol":           sym,
+            "expiry":           expiry,
+            "all_expiries":     sorted_expiries,
+            "underlying_price": underlying,
+            "data":             chain_rows,
+            "data_source":      f"nse_curl_cffi_v3/{IMPERSONATE}",
+        }
+
     @async_cache(ttl=30)
     async def get_option_chain(self, symbol: str, expiry: Optional[str] = None) -> Dict:
         sym = symbol.upper()
@@ -799,6 +854,14 @@ class DataFetcher:
         zerodha_result = await self._try_zerodha_option_chain(sym, expiry)
         if zerodha_result is not None:
             return zerodha_result
+
+        try:
+            return await self._nse_option_chain_v3(sym, expiry)
+        except Exception as e_v3:
+            logger.warning(
+                f"NSE option-chain-v3 failed for {sym}, trying legacy "
+                f"option-chain-indices: {e_v3}"
+            )
 
         raw = await self._get("option-chain-indices", params={"symbol": sym})
         records = (raw or {}).get("records")
