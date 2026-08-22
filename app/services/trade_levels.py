@@ -31,6 +31,40 @@ logger = logging.getLogger(__name__)
 MIN_RR = 1.5
 PREFERRED_RR = 2.0
 
+# ── Regime-adaptive target/SL profile ──────────────────────────────────────
+# BUG FIX (2026-08-22): targets were ALWAYS 1R / 2R / 2.5R and SL fallback
+# was ALWAYS 1.5×ATR, regardless of market regime. In a RANGE / LOW_VOLATILITY
+# session (low ADX, tiny ATR — exactly what a "no clear trend" day looks
+# like) price rarely travels a full 2R after triggering, so T2/T3 were
+# effectively unreachable — trades sat open with neither target nor SL hit.
+# In HIGH_VOLATILITY / expiry-gamma sessions the opposite problem shows up:
+# a 1.5×ATR SL is too tight and gets stopped out by normal noise before the
+# real move happens. This profile scales BOTH the target R-multiples and the
+# ATR-based SL buffer/fallback to the regime so levels match what that
+# regime can realistically deliver.
+#   t1_r, t2_r, t3_r      -> target R-multiples (t2 defines the quoted RR)
+#   sl_atr_mult           -> ATR multiplier for the "no structure" SL fallback
+#   trigger_buf_mult      -> ATR multiplier for trigger/entry-zone buffers
+#   sl_struct_buf_mult    -> ATR multiplier for the buffer added past support/resistance
+REGIME_LEVEL_PROFILES: Dict[str, Dict[str, float]] = {
+    "TREND_UP":            {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 2.5, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3},
+    "TREND_DOWN":          {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 2.5, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3},
+    "BREAKOUT":            {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 3.0, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3},
+    "BREAKDOWN":           {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 3.0, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3},
+    "HIGH_VOLATILITY":     {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 3.0, "sl_atr_mult": 2.0, "trigger_buf_mult": 0.4, "sl_struct_buf_mult": 0.4},
+    # RANGE / LOW_VOLATILITY: market itself is telling us it won't extend
+    # far after a trigger (low ADX, compressed ATR) — take profit sooner so
+    # T1/T2 are actually reachable, and keep SL close since the "room" this
+    # regime offers is small to begin with.
+    "RANGE":               {"t1_r": 0.75, "t2_r": 1.25, "t3_r": 1.5, "sl_atr_mult": 1.0, "trigger_buf_mult": 0.2, "sl_struct_buf_mult": 0.2},
+    "LOW_VOLATILITY":      {"t1_r": 0.75, "t2_r": 1.25, "t3_r": 1.5, "sl_atr_mult": 1.0, "trigger_buf_mult": 0.2, "sl_struct_buf_mult": 0.2},
+    # Expiry day: fast gamma moves but also fast reversals — tighter targets,
+    # shorter assumed hold (theta bites hard).
+    "EXPIRY_HIGH_GAMMA":   {"t1_r": 0.75, "t2_r": 1.5,  "t3_r": 2.0, "sl_atr_mult": 1.2, "trigger_buf_mult": 0.25, "sl_struct_buf_mult": 0.25},
+    "NO_TRADE":            {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 2.5, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3},
+}
+DEFAULT_LEVEL_PROFILE = {"t1_r": 1.0, "t2_r": 2.0, "t3_r": 2.5, "sl_atr_mult": 1.5, "trigger_buf_mult": 0.3, "sl_struct_buf_mult": 0.3}
+
 
 def _nearest_support(spot: float, supports: List[float]) -> Optional[float]:
     """Spot-க்கு கீழே உள்ள closest support"""
@@ -58,6 +92,7 @@ def calculate_trade_levels(
     delta: Optional[float] = None,          # real Black-Scholes delta for the chosen strike, if known
     theta_per_day: Optional[float] = None,  # ₹/day decay for the chosen strike, if known (negative)
     assumed_hold_days: float = 1.0,         # how long you expect to hold before hitting T2 — used to net out theta
+    regime: Optional[str] = None,           # market_regime.classify_market_regime()'s "regime" string
 ) -> Dict:
     """
     Structure + ATR அடிப்படையில் trade levels calculate செய்கிறோம்.
@@ -92,6 +127,11 @@ def calculate_trade_levels(
     atr_pct = (atr / spot * 100) if spot > 0 and atr > 0 else 0
     reasons: List[str] = []
 
+    # ── Regime-adaptive profile (see REGIME_LEVEL_PROFILES docstring) ─────
+    profile = REGIME_LEVEL_PROFILES.get(str(regime or "").upper(), DEFAULT_LEVEL_PROFILE)
+    if regime:
+        reasons.append(f"Levels adapted for {regime} regime (T2={profile['t2_r']:.2g}R, SL≈{profile['sl_atr_mult']:.2g}×ATR)")
+
     # Guard: invalid spot
     if spot <= 0:
         return {
@@ -114,24 +154,24 @@ def calculate_trade_levels(
             trigger = vwap
             reasons.append(f"Trigger: NIFTY > {trigger:.0f} (reclaim VWAP)")
         else:
-            trigger = spot + _atr_buffer(atr, 0.3)
+            trigger = spot + _atr_buffer(atr, profile["trigger_buf_mult"])
             reasons.append(f"Trigger: NIFTY > {trigger:.0f} (ATR-based breakout)")
 
         # Entry zone: just above trigger
         entry_low  = trigger
-        entry_high = trigger + _atr_buffer(atr, 0.2)
+        entry_high = trigger + _atr_buffer(atr, profile["trigger_buf_mult"] * 0.67)
 
         # SL: nearest support below spot
         near_sup = _nearest_support(spot, supports)
         if near_sup and (spot - near_sup) / spot < 0.025:
-            sl_spot  = near_sup - _atr_buffer(atr, 0.3)   # buffer below support
+            sl_spot  = near_sup - _atr_buffer(atr, profile["sl_struct_buf_mult"])   # buffer below support
             sl_method = f"structure SL at {near_sup:.0f} support − buffer"
         elif vwap > 0:
-            sl_spot  = vwap - _atr_buffer(atr, 0.5)
+            sl_spot  = vwap - _atr_buffer(atr, profile["sl_struct_buf_mult"] + 0.2)
             sl_method = f"VWAP {vwap:.0f} − ATR buffer"
         else:
-            sl_spot  = spot - atr * 1.5
-            sl_method = f"1.5× ATR below entry ({atr:.0f})"
+            sl_spot  = spot - atr * profile["sl_atr_mult"]
+            sl_method = f"{profile['sl_atr_mult']:.2g}× ATR below entry ({atr:.0f})"
 
         reasons.append(f"SL basis: {sl_method}")
 
@@ -145,23 +185,23 @@ def calculate_trade_levels(
             trigger = vwap
             reasons.append(f"Trigger: NIFTY < {trigger:.0f} (lose VWAP)")
         else:
-            trigger = spot - _atr_buffer(atr, 0.3)
+            trigger = spot - _atr_buffer(atr, profile["trigger_buf_mult"])
             reasons.append(f"Trigger: NIFTY < {trigger:.0f} (ATR-based breakdown)")
 
-        entry_low  = trigger - _atr_buffer(atr, 0.2)
+        entry_low  = trigger - _atr_buffer(atr, profile["trigger_buf_mult"] * 0.67)
         entry_high = trigger
 
         # SL: nearest resistance above spot
         near_res = _nearest_resistance(spot, resistances)
         if near_res and (near_res - spot) / spot < 0.025:
-            sl_spot  = near_res + _atr_buffer(atr, 0.3)
+            sl_spot  = near_res + _atr_buffer(atr, profile["sl_struct_buf_mult"])
             sl_method = f"structure SL at {near_res:.0f} resistance + buffer"
         elif vwap > 0:
-            sl_spot  = vwap + _atr_buffer(atr, 0.5)
+            sl_spot  = vwap + _atr_buffer(atr, profile["sl_struct_buf_mult"] + 0.2)
             sl_method = f"VWAP {vwap:.0f} + ATR buffer"
         else:
-            sl_spot  = spot + atr * 1.5
-            sl_method = f"1.5× ATR above entry ({atr:.0f})"
+            sl_spot  = spot + atr * profile["sl_atr_mult"]
+            sl_method = f"{profile['sl_atr_mult']:.2g}× ATR above entry ({atr:.0f})"
 
         reasons.append(f"SL basis: {sl_method}")
 
@@ -174,17 +214,18 @@ def calculate_trade_levels(
     if risk_spot <= 0:
         risk_spot = atr * 1.0   # fallback
 
-    # ── 3. Targets (1R, 2R, 2.5R) on underlying ──────────────────────────
+    # ── 3. Targets (regime-adaptive R-multiples — see REGIME_LEVEL_PROFILES) ─
+    t1_r, t2_r, t3_r = profile["t1_r"], profile["t2_r"], profile["t3_r"]
     if direction == "bullish":
-        t1_spot = entry_low + risk_spot * 1.0
-        t2_spot = entry_low + risk_spot * 2.0
-        t3_spot = entry_low + risk_spot * 2.5
+        t1_spot = entry_low + risk_spot * t1_r
+        t2_spot = entry_low + risk_spot * t2_r
+        t3_spot = entry_low + risk_spot * t3_r
     else:
-        t1_spot = entry_high - risk_spot * 1.0
-        t2_spot = entry_high - risk_spot * 2.0
-        t3_spot = entry_high - risk_spot * 2.5
+        t1_spot = entry_high - risk_spot * t1_r
+        t2_spot = entry_high - risk_spot * t2_r
+        t3_spot = entry_high - risk_spot * t3_r
 
-    rr_ratio = round(risk_spot * 2.0 / risk_spot, 1)  # T2 = 2R always
+    rr_ratio = round(t2_r, 2)  # T2 defines the quoted R:R for this regime
 
     # ── 4. Option premium levels ────────────────────────────────────────────
     # Fallback constant only used when a real per-strike delta isn't
@@ -197,9 +238,9 @@ def calculate_trade_levels(
     if option_ltp > 0:
         opt_risk = round(risk_spot * eff_delta, 1)
         opt_sl   = round(option_ltp - opt_risk, 1)
-        opt_t1   = round(option_ltp + opt_risk * 1.0, 1)
-        opt_t2   = round(option_ltp + opt_risk * 2.0, 1)
-        opt_t3   = round(option_ltp + opt_risk * 2.5, 1)
+        opt_t1   = round(option_ltp + opt_risk * t1_r, 1)
+        opt_t2   = round(option_ltp + opt_risk * t2_r, 1)
+        opt_t3   = round(option_ltp + opt_risk * t3_r, 1)
 
         # Net theta decay OUT of the targets (review #23/#38: a
         # directionally-correct trade can still lose money to time decay —
@@ -231,17 +272,30 @@ def calculate_trade_levels(
         reasons.append("Option premium data unavailable — spot-based SL only")
 
     # ── 5. Risk per lot ───────────────────────────────────────────────────
-    risk_per_lot = round(opt_risk * lot_size, 0) if opt_risk > 0 else round(risk_spot * DELTA_APPROX * lot_size, 0)
+    # BUG FIX (2026-08-22): this referenced an undefined name `DELTA_APPROX`
+    # (only `DELTA_APPROX_FALLBACK` exists) — any call with option_ltp <= 0
+    # would raise NameError instead of returning a usable fallback.
+    risk_per_lot = round(opt_risk * lot_size, 0) if opt_risk > 0 else round(risk_spot * DELTA_APPROX_FALLBACK * lot_size, 0)
 
     # ── 6. Setup quality ──────────────────────────────────────────────────
-    has_structure_sl = any(s in reasons[1] for s in ["structure", "VWAP", "support", "resistance"])
-    if rr_ratio >= PREFERRED_RR and has_structure_sl and atr_pct > 0:
+    # BUG FIX (2026-08-22): this used to grab reasons[1] positionally to find
+    # the "SL basis: ..." line — inserting the regime note above shifted that
+    # index. Search by content instead so it can't silently break again.
+    sl_basis_reason = next((r for r in reasons if r.startswith("SL basis")), "")
+    has_structure_sl = any(s in sl_basis_reason for s in ["structure", "VWAP", "support", "resistance"])
+    # Regime-adaptive minimum/preferred R:R — a RANGE/LOW_VOL regime's own
+    # T2 (e.g. 1.25R) IS the realistic ceiling for that regime, so grading it
+    # against a flat 2.0R "preferred" would mislabel every range-day setup
+    # as LOW quality even when it matches what the regime can deliver.
+    regime_min_rr = min(MIN_RR, t2_r)
+    regime_preferred_rr = min(PREFERRED_RR, t2_r)
+    if rr_ratio >= regime_preferred_rr and has_structure_sl and atr_pct > 0:
         quality = "HIGH"
-    elif rr_ratio >= MIN_RR:
+    elif rr_ratio >= regime_min_rr:
         quality = "MEDIUM"
     else:
         quality = "LOW"
-        reasons.append(f"⚠️ R:R {rr_ratio:.1f} below minimum {MIN_RR} — consider skipping")
+        reasons.append(f"⚠️ R:R {rr_ratio:.1f} below minimum {regime_min_rr:.2g} — consider skipping")
 
     return {
         "direction":       direction,
