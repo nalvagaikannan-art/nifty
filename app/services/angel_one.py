@@ -309,13 +309,85 @@ class AngelOneSession:
     INSTRUMENT_MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
     QUOTE_URL = "https://apiconnect.angelone.in/rest/secure/angelbroking/market/v1/quote"
 
+    # BUG FIX (2026-08-22): referenced by _download_instrument_master_chunked/
+    # _download_instrument_master_whole below but never actually defined —
+    # calling either of those would have raised
+    # AttributeError: 'AngelOneSession' object has no attribute
+    # '_INSTRUMENT_MASTER_HEADERS'. This is almost certainly *why*
+    # _ensure_instruments() below was short-circuited to always raise
+    # instead of calling them — a plain User-Agent is enough for this
+    # static-file CDN (it isn't behind the same bot-detection as NSE).
+    _INSTRUMENT_MASTER_HEADERS = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+    }
+
+    # Instrument master is published once per trading day — cache well
+    # under that so a whole trading session reuses one download.
+    _INSTRUMENT_MASTER_TTL = 12 * 3600  # 12 hours
+
     async def _ensure_instruments(self) -> None:
         """
-        Render-safe mode:
-        Skip downloading the 36MB instrument master.
-        Option-chain callers will fall back to NSE instead of blocking.
+        Downloads (or reuses a cached copy of) Angel One's instrument
+        master, needed to resolve option/future strike → token.
+
+        BUG FIX (2026-08-22): this used to unconditionally
+        `raise AngelOneError("Instrument master disabled on Render...")` —
+        it never called the chunked/whole download methods below at all,
+        even though both were already fully written (and tested) in this
+        same file. That's why option chain / futures premium / OI always
+        fell back to NSE (and then further to "unavailable" once NSE's
+        own endpoint also 404s) even when Angel One login succeeded.
+        The chunked downloader (~4MB Range-request pages) exists
+        specifically to make this safe on Render's memory/timeout limits,
+        so re-enabling it here is the actual fix rather than a permanent
+        disable. If it turns out to still be too slow/unreliable in a
+        given deployment, both download paths already retry with backoff
+        and raise a clear AngelOneError that callers already catch and
+        fall back to NSE for — so this can't newly break anything that
+        was working before.
         """
-        raise AngelOneError("Instrument master disabled on Render; use NSE fallback.")
+        now = time.time()
+        if (
+            isinstance(self._instruments, list)
+            and self._instruments
+            and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
+        ):
+            return
+
+        async with self._instruments_lock:
+            # Re-check after acquiring the lock — another concurrent
+            # caller may have just finished the download.
+            now = time.time()
+            if (
+                isinstance(self._instruments, list)
+                and self._instruments
+                and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
+            ):
+                return
+
+            try:
+                loaded = await self._download_instrument_master_chunked()
+            except Exception as e_chunked:
+                logger.warning(
+                    f"Instrument master chunked download failed, "
+                    f"falling back to whole-file download: {e_chunked}"
+                )
+                try:
+                    loaded = await self._download_instrument_master_whole()
+                except Exception as e_whole:
+                    raise AngelOneError(
+                        f"Instrument master download failed (chunked: {e_chunked}; "
+                        f"whole: {e_whole})"
+                    )
+
+            if not isinstance(loaded, list) or not loaded:
+                raise AngelOneError("Instrument master download returned no rows")
+
+            self._instruments = loaded
+            self._instruments_ts = time.time()
+            logger.info(f"Angel One instrument master cached — {len(loaded)} rows")
 
 
 
@@ -422,9 +494,20 @@ class AngelOneSession:
         return loaded
 
     async def warmup_instruments(self) -> None:
-        """Render-safe: skip startup warmup."""
-        logger.info("Instrument warmup skipped on Render startup.")
-        return
+        """
+        Pre-fetches and caches the instrument master at startup so the
+        first real option-chain/futures request doesn't pay the download
+        cost inline. BUG FIX (2026-08-22): this used to be a no-op
+        ("Render-safe: skip startup warmup") to match _ensure_instruments()
+        being permanently disabled — now that _ensure_instruments() does
+        the real (chunked, Render-safe) download, warmup should actually
+        run it. Failure here is non-fatal — it's just a head start; the
+        first real caller will retry via _ensure_instruments() anyway.
+        """
+        try:
+            await self._ensure_instruments()
+        except Exception as e:
+            logger.warning(f"Instrument warmup failed (will retry on first use): {e}")
 
     @staticmethod
     def _expiry_sort_key(e: str):
@@ -443,9 +526,11 @@ class AngelOneSession:
         the requested (or nearest) expiry from the instrument master, then
         batches live quotes for those tokens.
 
-        NOTE: on Render, _ensure_instruments() raises immediately (instrument
-        master download is disabled there — see its docstring). Callers
-        (data_fetcher) already catch AngelOneError and fall back to NSE.
+        NOTE (2026-08-22): _ensure_instruments() now actually downloads and
+        caches the instrument master (see its docstring for the bug that
+        used to disable this) instead of always raising. It can still
+        raise AngelOneError if the download genuinely fails — callers
+        (data_fetcher) already catch that and fall back to NSE.
 
         FIX (2026-08-21): this method previously had no `def` line — its
         body had been left dangling inside warmup_instruments() after an
