@@ -611,7 +611,13 @@ class DataFetcher:
             "data_source": "zerodha_intraday",
         }
 
-    @async_cache(ttl=15)
+    # BUG FIX (2026-08-22): TTL was 15s but the dashboard auto-refreshes
+    # every 30s (see ltAutoInterval in dashboard.html) — every single
+    # auto-refresh cycle was guaranteed to miss this cache and fire a fresh
+    # Angel One call, adding to the account-wide call volume that was
+    # tripping Angel's rate limiter. 25s still keeps the number fresh
+    # within roughly one refresh cycle, just no longer *always* refetching.
+    @async_cache(ttl=25)
     async def get_futures_premium(self, symbol: str) -> Dict:
         """
         Real futures premium/discount = front-month NFO futures LTP - spot,
@@ -841,7 +847,14 @@ class DataFetcher:
             "data_source":      f"nse_curl_cffi_v3/{IMPERSONATE}",
         }
 
-    @async_cache(ttl=30)
+    # BUG FIX (2026-08-22): TTL == the dashboard's own 30s auto-refresh
+    # interval (see ltAutoInterval in dashboard.html) means the cache
+    # expires right around when the next refresh asks for it — timing
+    # drift makes this a near-coin-flip cache hit, not a reliable one.
+    # 40s guarantees at least one full refresh cycle is served from cache,
+    # cutting this endpoint's Angel One call volume meaningfully without
+    # making the option chain noticeably less fresh.
+    @async_cache(ttl=40)
     async def get_option_chain(self, symbol: str, expiry: Optional[str] = None) -> Dict:
         sym = symbol.upper()
         if sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
