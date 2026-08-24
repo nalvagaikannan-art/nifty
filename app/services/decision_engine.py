@@ -7,10 +7,31 @@ AI இந்த score-ஐ verify செய்து reasoning மட்டும
 
 from typing import Dict, List, Tuple
 import logging
+import time
 
 from app.services.market_regime import classify_market_regime
 
 logger = logging.getLogger(__name__)
+
+# ── Signal hysteresis (BUG FIX 2026-08-24) ──────────────────────────────────
+# run_decision_engine() used to be a pure function re-scored from scratch on
+# every call with NO memory of the previous signal. margin is a sum of
+# discrete per-indicator points, and preferred_side flips to CALL/PUT only
+# once margin crosses ±10 — so a single indicator ticking across ITS OWN
+# threshold on a routine tick (spot crossing EMA20 by a point, RSI crossing
+# 50, one OI print updating) could swing margin across that ±10 line and
+# flip CALL → NONE → PUT → NONE on successive 30s dashboard refreshes, even
+# though nothing about the actual market changed materially. That's what
+# was reported as "signal changes frequently, wrong signal".
+# Fix: a classic hysteresis (Schmitt-trigger) band, per symbol. ENTERING a
+# CALL/PUT signal still needs the full ±10 margin (unchanged, deliberately
+# conservative). But once a signal IS showing CALL/PUT, it's only given up
+# when margin weakens past a much softer ±HYSTERESIS_EXIT_MARGIN — so a
+# signal that's "still mostly right, just less strongly so" keeps being
+# shown instead of flickering to NONE and back on every refresh. A genuine
+# reversal (margin swinging past the softer band) still updates promptly.
+_signal_state: Dict[str, Dict] = {}
+HYSTERESIS_EXIT_MARGIN = 4
 
 # ── Score weights ─────────────────────────────────────────────────────────
 # india_vix and atr_risk are intentionally 0: VIX and ATR describe how MUCH
@@ -823,9 +844,11 @@ def run_decision_engine(market_data: Dict) -> Dict:
 
     # Market closed → no live edge to read; be explicit about it rather
     # than showing a stale intraday bias.
+    hard_gated = False
     if not spot_data.get("market_open", True):
         market_bias = "Sideways"
         preferred_side = "NONE"
+        hard_gated = True
 
     # Review #3/#4 hard gate: market_regime.py's NO_TRADE covers cases
     # run_decision_engine didn't otherwise know about — the first 30 min
@@ -847,6 +870,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         market_bias = "Sideways"
         preferred_side = "NONE"
         risk = "High"
+        hard_gated = True
 
     # ── Critical Option-Chain Data Gate ──────────────────────────────────
     # Option chain data இல்லாமல் CALL/PUT signal கொடுப்பது தவறான design.
@@ -876,6 +900,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         if blocking_reasons:
             preferred_side = "NONE"
             risk = "High"
+            hard_gated = True
             if market_bias not in ("Sideways",):
                 market_bias = "Sideways"
             for br in blocking_reasons:
@@ -884,6 +909,37 @@ def run_decision_engine(market_data: Dict) -> Dict:
                 "CALL/PUT signal blocked due to data gate: %s",
                 "; ".join(blocking_reasons),
             )
+
+    # ── Signal hysteresis — see module docstring above for why this exists.
+    # Hard safety gates (market closed / NO_TRADE regime / data unavailable)
+    # always win and are never overridden by a held-over signal. Outside
+    # those, a signal that would otherwise flip to NONE purely because
+    # margin dipped below the ±10 entry threshold (but not past the softer
+    # ±HYSTERESIS_EXIT_MARGIN) keeps showing the previous side instead.
+    symbol_key = market_data.get("symbol", "NIFTY")
+    prev_state = _signal_state.get(symbol_key)
+    if not hard_gated and preferred_side == "NONE" and prev_state and prev_state.get("side") in ("CALL", "PUT"):
+        prev_side = prev_state["side"]
+        if prev_side == "CALL" and margin > HYSTERESIS_EXIT_MARGIN:
+            preferred_side = "CALL"
+            reasons.append(
+                f"↔️ Holding previous CALL signal — margin {margin} weakened but hasn't "
+                f"crossed the exit band (±{HYSTERESIS_EXIT_MARGIN}); avoids flip-flopping on noise"
+            )
+        elif prev_side == "PUT" and margin < -HYSTERESIS_EXIT_MARGIN:
+            preferred_side = "PUT"
+            reasons.append(
+                f"↔️ Holding previous PUT signal — margin {margin} weakened but hasn't "
+                f"crossed the exit band (±{HYSTERESIS_EXIT_MARGIN}); avoids flip-flopping on noise"
+            )
+    # Persist this call's outcome for the next call's hysteresis check.
+    # Hard-gated calls reset state to NONE deliberately — resuming a
+    # pre-gate signal the instant a safety gate lifts would defeat the gate.
+    _signal_state[symbol_key] = {
+        "side": "NONE" if hard_gated else preferred_side,
+        "margin": margin,
+        "ts": time.time(),
+    }
 
     # ── Confidence (rule-based, not random) ──────────────────────────────
     # Maximum possible = the dampened theoretical max (see
