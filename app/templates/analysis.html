@@ -59,6 +59,17 @@
   </div>
 </div>
 
+<!-- ── SIGNAL LIFECYCLE / POSITION STATUS ───────────────── -->
+<div class="card" id="signal-lifecycle-card" style="margin-bottom:1rem;">
+  <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.5rem;">Signal & Position Status</div>
+  <div id="signal-lifecycle-body" style="display:flex;flex-wrap:wrap;gap:1rem;align-items:center;">
+    <div><span style="color:var(--text2);font-size:.72rem;">STATE</span><div id="signal-lifecycle-state" style="font-weight:800;font-size:1.05rem;">WAIT</div></div>
+    <div><span style="color:var(--text2);font-size:.72rem;">CONFIRMATION</span><div id="signal-confirmation-count">0 / 3</div></div>
+    <div><span style="color:var(--text2);font-size:.72rem;">ACTIVE SIDE</span><div id="signal-active-side">NONE</div></div>
+    <div style="flex:1;min-width:220px;"><span style="color:var(--text2);font-size:.72rem;">LIVE POSITION</span><div id="live-position-status">Checking...</div></div>
+  </div>
+</div>
+
 <!-- ── RECOMMENDED OPTION (review #5 — structured strike/entry/SL/target, not just a bare CALL/PUT label) ── -->
 <div class="card" id="rec-option-card" style="margin-bottom:1rem; display:none;">
   <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.5rem;">Recommended Option</div>
@@ -443,7 +454,7 @@ function loadAll(sym, force, expiry){
 
   $('#ai-reason').html('<span class="spinner"></span> Analyzing...');
   $.get('/api/analysis/ai/'+sym+qs)
-    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); })
+    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); $.get('/api/portfolio/positions').done(function(p){ renderLivePositions(p,d); }).fail(function(){ $('#live-position-status').text('Live position status unavailable.'); }); })
     .fail(function(x){ var m='Analysis failed'; try{m=JSON.parse(x.responseText).detail;}catch(e){} $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>'); })
     .always(function(){ done.ai=true; chk(); });
 
@@ -763,6 +774,7 @@ function renderAnalysis(d){
   }
 
   renderRecommendedOption(d.recommended_option);
+  renderSignalLifecycle(d);
 
   if (d.market_regime && d.market_regime !== 'unknown') {
     var regimeLabels = {
@@ -801,6 +813,46 @@ function renderAnalysis(d){
   renderScenarios(d.scenarios);
   renderTamilIndicators(d.tamil_indicators);
   renderDataQuality(d.data_quality);
+}
+
+function renderSignalLifecycle(d){
+  var state = (d.signal_lifecycle || 'WAIT').toString();
+  var active = (d.signal_active_side || 'NONE').toString();
+  var candidate = (d.signal_candidate || 'NONE').toString();
+  var count = Number(d.signal_confirmations || 0);
+  var required = 3;
+  var color = state.indexOf('CONFIRMED_') === 0 ? 'var(--green)' :
+              state.indexOf('HOLD_') === 0 ? 'var(--primary)' :
+              state.indexOf('WATCH_') === 0 ? 'var(--yellow)' : 'var(--text2)';
+  $('#signal-lifecycle-state').text(state.replaceAll('_',' ')).css('color', color);
+  $('#signal-confirmation-count').text(Math.min(count,required) + ' / ' + required +
+    (candidate !== 'NONE' ? ' (' + candidate + ')' : ''));
+  $('#signal-active-side').text(active);
+  if(active === 'CALL') $('#signal-active-side').css('color','var(--green)');
+  else if(active === 'PUT') $('#signal-active-side').css('color','var(--red)');
+  else $('#signal-active-side').css('color','var(--text2)');
+}
+
+function renderLivePositions(data, d){
+  var positions = (data && data.positions) || [];
+  if(!positions.length){
+    $('#live-position-status').html('<span style="color:var(--text2);">No open Angel One position detected.</span>');
+    return;
+  }
+  var active = (d && d.signal_active_side || 'NONE').toUpperCase();
+  var html = positions.map(function(p){
+    var ts = (p.symbol||'').toUpperCase();
+    var optionSide = ts.indexOf('CE') >= 0 ? 'CALL' : ts.indexOf('PE') >= 0 ? 'PUT' : 'OTHER';
+    var aligned = active !== 'NONE' && optionSide === active;
+    var action = aligned ? 'HOLD — signal still aligned' :
+      (active !== 'NONE' && optionSide !== 'OTHER' ? 'EXIT WARNING — confirmed direction differs' : 'HOLD — wait for confirmed direction');
+    var actionColor = aligned ? 'var(--green)' : (action.indexOf('EXIT')===0 ? 'var(--red)' : 'var(--yellow)');
+    return '<div style="padding:.4rem .6rem;border-radius:6px;background:rgba(255,255,255,.03);margin:.25rem 0;">'+
+      '<b>'+esc(p.symbol)+'</b> · Qty '+esc(p.quantity)+' · Entry ₹'+fmtN(p.avg_price,2)+' · LTP ₹'+fmtN(p.ltp,2)+
+      ' · P&L ₹'+fmtN(p.pnl,2)+'<br><span style="color:'+actionColor+';font-weight:700;">'+esc(action)+'</span>'+
+      '</div>';
+  }).join('');
+  $('#live-position-status').html(html);
 }
 
 function renderStatusBanners(d){
