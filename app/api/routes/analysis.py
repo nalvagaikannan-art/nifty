@@ -120,6 +120,11 @@ async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine,
     dec = market_data.get("decision", {})
     result["all_reasons"]        = dec.get("reasons", [])
     result["recommended_strike"] = dec.get("recommended_strike", "NONE")
+    result["signal_lifecycle"] = dec.get("signal_lifecycle", "WAIT")
+    result["signal_candidate"] = dec.get("signal_candidate", "NONE")
+    result["signal_confirmations"] = dec.get("signal_confirmations", 0)
+    result["signal_reversal_confirmations"] = dec.get("signal_reversal_confirmations", 0)
+    result["signal_active_side"] = dec.get("signal_active_side", "NONE")
     result["strategy"]           = dec.get("strategy", "")
     result["strategy_reason"]    = dec.get("strategy_reason", "")
     result["strategy_detail"]    = dec.get("strategy_detail")
@@ -233,6 +238,11 @@ async def rule_decision(symbol: str, analyzer: MarketAnalyzer = Depends(get_anal
             "bullish_probability":  dec.get("bullish_probability", 50),
             "bearish_probability":  dec.get("bearish_probability", 50),
             "preferred_side":       dec.get("preferred_side", "NONE"),
+            "signal_lifecycle":    dec.get("signal_lifecycle", "WAIT"),
+            "signal_candidate":    dec.get("signal_candidate", "NONE"),
+            "signal_confirmations": dec.get("signal_confirmations", 0),
+            "signal_reversal_confirmations": dec.get("signal_reversal_confirmations", 0),
+            "signal_active_side":  dec.get("signal_active_side", "NONE"),
             "recommended_strike":   dec.get("recommended_strike", "NONE"),
             "bull_score":           dec.get("bull_score", 0),
             "bear_score":           dec.get("bear_score", 0),
