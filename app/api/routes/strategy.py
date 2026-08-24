@@ -582,6 +582,16 @@ async def strike_recommendation(
     best       = whipsaw_result["strategy"]
     best_score = candidates.get(best, raw_score)
 
+    lifecycle_state = dec.get("signal_lifecycle", "WAIT")
+    lifecycle_active = dec.get("signal_active_side", "NONE")
+    if lifecycle_state.startswith("WATCH_") or lifecycle_state == "WAIT":
+        best = "WAIT"
+        best_score = candidates.get("WAIT", 0)
+    elif lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+        # Existing confirmed direction is a HOLD state, not a fresh entry.
+        best = "BUY CE" if lifecycle_active == "CALL" else "BUY PE"
+        best_score = candidates.get(best, best_score)
+
     # ── Phase 2E: IV filter on best strategy ──────────────────────────────
     iv_info    = _iv_filter(atm_iv, best)
     if iv_info["penalty"] != 0:
@@ -631,7 +641,12 @@ async def strike_recommendation(
             return "WAIT FOR ENTRY NEAR STRIKE"
         return "WAIT"
 
-    action_label = _action_label(best, regime)
+    if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+        action_label = f"HOLD {lifecycle_active} — existing confirmed direction remains active"
+    elif lifecycle_state.startswith("WATCH_"):
+        action_label = "WAIT FOR CONFIRMATION"
+    else:
+        action_label = _action_label(best, regime)
 
     # ── V2: Strike picks (moved up so Trade Levels can reuse the SAME
     # recommended strike below, instead of a second, independent ATM-only
@@ -859,6 +874,12 @@ async def strike_recommendation(
         "wait_reasons":    [],
         "signal_history":  get_history(symbol),
         "signal_reversal": sig.get("reversal", False),
+        "signal_lifecycle": dec.get("signal_lifecycle", "WAIT"),
+        "signal_candidate": dec.get("signal_candidate", "NONE"),
+        "signal_confirmations": dec.get("signal_confirmations", 0),
+        "signal_reversal_confirmations": dec.get("signal_reversal_confirmations", 0),
+        "signal_active_side": dec.get("signal_active_side", "NONE"),
+        "signal_lifecycle_reason": dec.get("signal_lifecycle_reason", ""),
         "reversal_type":   sig.get("reversal_type", ""),
         "ai_reason":       ai_reason,
         "disclaimer":      "Not investment advice. Trade at your own risk.",
