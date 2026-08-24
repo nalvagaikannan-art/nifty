@@ -32,6 +32,56 @@ _IST = ZoneInfo("Asia/Kolkata")
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+# V3: conservative fresh-entry gates. These do not change existing HOLD state.
+ENTRY_MIN_SIGNAL_STRENGTH = 55
+ENTRY_MIN_CONFLUENCE = 5
+ENTRY_MIN_AGREEMENT = 3
+EXPIRY_DAY_MIN_SIGNAL_STRENGTH = 65
+EXPIRY_DAY_MIN_CONFLUENCE = 6
+EXPIRY_DAY_MIN_AGREEMENT = 4
+EXPIRY_DAY_MIN_ADX = 20
+
+
+def _v3_entry_gate(dec: dict, confluence: dict, expiry_info: dict,
+                   market_data: dict, lifecycle_state: str,
+                   lifecycle_active: str) -> dict:
+    """Gate only fresh option entries; an existing confirmed side remains HOLD."""
+    if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+        return {"allowed": True, "reason": "Existing confirmed direction — HOLD is not a fresh entry."}
+    if lifecycle_state not in ("CONFIRMED_CALL", "CONFIRMED_PUT"):
+        return {"allowed": False, "reason": "Signal is not CONFIRMED yet."}
+
+    side = "CALL" if lifecycle_state.endswith("CALL") else "PUT"
+    direction = str(confluence.get("direction", "NEUTRAL")).upper()
+    strength = safe_float(dec.get("signal_strength", dec.get("confidence", 0)))
+    cscore = safe_float(confluence.get("confluence_score", 0))
+    agreement = int(confluence.get("agreement_count", 0) or 0)
+    adx = safe_float((market_data.get("technicals") or {}).get("adx", 0))
+
+    expected = "BULLISH" if side == "CALL" else "BEARISH"
+    if direction not in (side, expected):
+        return {"allowed": False, "reason": f"Confluence direction {direction} does not confirm {side}."}
+
+    days_left = safe_float(expiry_info.get("days_left", 99))
+    if days_left <= 1:
+        if strength < EXPIRY_DAY_MIN_SIGNAL_STRENGTH:
+            return {"allowed": False, "reason": f"Expiry-day signal strength {strength:.0f} < {EXPIRY_DAY_MIN_SIGNAL_STRENGTH}."}
+        if cscore < EXPIRY_DAY_MIN_CONFLUENCE:
+            return {"allowed": False, "reason": f"Expiry-day confluence {cscore:.1f} < {EXPIRY_DAY_MIN_CONFLUENCE}."}
+        if agreement < EXPIRY_DAY_MIN_AGREEMENT:
+            return {"allowed": False, "reason": f"Expiry-day agreement {agreement} < {EXPIRY_DAY_MIN_AGREEMENT}."}
+        if adx < EXPIRY_DAY_MIN_ADX:
+            return {"allowed": False, "reason": f"Expiry-day ADX {adx:.1f} < {EXPIRY_DAY_MIN_ADX}."}
+    else:
+        if strength < ENTRY_MIN_SIGNAL_STRENGTH:
+            return {"allowed": False, "reason": f"Signal strength {strength:.0f} < {ENTRY_MIN_SIGNAL_STRENGTH}."}
+        if cscore < ENTRY_MIN_CONFLUENCE:
+            return {"allowed": False, "reason": f"Confluence {cscore:.1f} < {ENTRY_MIN_CONFLUENCE}."}
+        if agreement < ENTRY_MIN_AGREEMENT:
+            return {"allowed": False, "reason": f"Independent agreement {agreement} < {ENTRY_MIN_AGREEMENT}."}
+
+    return {"allowed": True, "reason": "Lifecycle + direction + confluence + strength confirmed."}
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE 2 FILTERS
@@ -626,6 +676,28 @@ async def strike_recommendation(
     # ── V2: Signal strength (rename from confidence) ──────────────────────
     signal_strength = dec.get("signal_strength", dec.get("confidence", 0))
 
+    # ── V3: independent entry-quality gate ────────────────────────────────
+    v3_gate = _v3_entry_gate(
+        dec, confluence, expiry_info, market_data,
+        lifecycle_state, lifecycle_active,
+    )
+    if best in ("BUY CE", "BUY PE") and not v3_gate["allowed"] and not lifecycle_state.startswith("HOLD_"):
+        best = "WAIT"
+        best_score = candidates.get("WAIT", 0)
+
+    # Market signal strength and trade-entry confidence are separate.
+    if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+        trade_confidence = int(min(95, max(0, safe_float(signal_strength))))
+    elif v3_gate["allowed"]:
+        trade_confidence = int(min(95, max(
+            0,
+            0.55 * safe_float(signal_strength)
+            + 4.0 * safe_float(confluence.get("confluence_score", 0))
+            + 3.0 * int(confluence.get("agreement_count", 0) or 0),
+        )))
+    else:
+        trade_confidence = 0
+
     # ── V2: Action label based on regime + best ───────────────────────────
     def _action_label(best_strat: str, reg: dict) -> str:
         no_trade = reg.get("no_trade", False)
@@ -645,6 +717,8 @@ async def strike_recommendation(
         action_label = f"HOLD {lifecycle_active} — existing confirmed direction remains active"
     elif lifecycle_state.startswith("WATCH_"):
         action_label = "WAIT FOR CONFIRMATION"
+    elif best == "WAIT" and lifecycle_state.startswith("CONFIRMED_") and not v3_gate["allowed"]:
+        action_label = "WAIT — " + v3_gate["reason"]
     else:
         action_label = _action_label(best, regime)
 
@@ -779,6 +853,8 @@ async def strike_recommendation(
             "disclaimer":    "Not investment advice. Trade at your own risk.",
             # ── V2 fields ────────────────────────────────────────────────
             "confluence":        confluence,
+            "trade_confidence":  trade_confidence,
+            "entry_gate":        v3_gate,
             "market_regime":     regime,
             "action":            action_label,
             "v2_trade_levels":   None,
@@ -834,6 +910,8 @@ async def strike_recommendation(
         warnings.append("⚠️ Some strikes have low liquidity")
     if whipsaw_result.get("whipsaw_blocked"):
         warnings.append(f"Anti-whipsaw: {whipsaw_result.get('note','')}")
+    if best == "WAIT" and lifecycle_state.startswith("CONFIRMED_") and not v3_gate["allowed"]:
+        warnings.append("⚠️ Entry gate: " + v3_gate["reason"])
 
     # Record signal history
     sig = record_signal(
@@ -885,6 +963,8 @@ async def strike_recommendation(
         "disclaimer":      "Not investment advice. Trade at your own risk.",
         # ── V2 fields ─────────────────────────────────────────────────────
         "confluence":        confluence,
+        "trade_confidence":  trade_confidence,
+        "entry_gate":        v3_gate,
         "market_regime":     regime,
         "action":            action_label,
         "v2_trade_levels":   v2_trade_levels,
