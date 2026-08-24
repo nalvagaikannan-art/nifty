@@ -1,4 +1,5 @@
 import time
+import asyncio
 import json
 import inspect
 import random
@@ -10,6 +11,11 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 _cache: Dict[str, tuple] = {}  # key: (timestamp, value)  — in-memory fallback
+
+# Single-flight registry: concurrent callers for the same cache key await the
+# same in-flight fetch instead of hammering NSE/Angel One/AI providers.
+_inflight_lock = asyncio.Lock()
+_inflight: Dict[str, asyncio.Task] = {}
 
 # ── Optional Redis backend ───────────────────────────────────────────────
 # Only activates when REDIS_URL is configured AND the `redis` package is
@@ -62,46 +68,96 @@ def _sweep_expired(ttl: int):
 
 
 def async_cache(ttl: int = None):
+    """
+    Async TTL cache with single-flight request deduplication.
+
+    When several callers miss the same key at the same time, only the first
+    caller executes the expensive function. Other callers await that task.
+    This is especially important for market overview requests because both
+    AI analysis and strategy endpoints can request the same snapshot together.
+    """
     def decorator(func):
         sig_params = list(inspect.signature(func).parameters)
         has_self = sig_params and sig_params[0] in ("self", "cls")
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            # Exclude `self`/`cls` from the cache key: its default repr includes
-            # a memory address, so a bound method's key would differ every time
-            # a new instance is created (e.g. one per HTTP request via FastAPI
-            # `Depends`), making the cache never hit even for identical calls.
             key_args = args[1:] if has_self else args
             key = f"{func.__qualname__}:{key_args}:{kwargs}"
             effective_ttl = ttl or settings.cache_ttl
 
+            async def _load_or_fetch():
+                # Re-check Redis after becoming the single-flight owner. Another
+                # worker may have populated the shared cache while we waited.
+                if _redis_client is not None:
+                    try:
+                        cached = await _redis_client.get(key)
+                        if cached is not None:
+                            return json.loads(cached)
+                    except Exception as e:
+                        logger.warning(
+                            f"Redis GET failed for {key}, falling through to live fetch: {e}"
+                        )
+
+                    result = await func(*args, **kwargs)
+                    try:
+                        await _redis_client.set(
+                            key, json.dumps(result, default=_json_default), ex=effective_ttl
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Redis SET failed for {key} (result still returned): {e}"
+                        )
+                    return result
+
+                # In-memory fallback.
+                now = time.time()
+                cached_entry = _cache.get(key)
+                if cached_entry is not None:
+                    ts, value = cached_entry
+                    if now - ts < effective_ttl:
+                        return value
+                    _cache.pop(key, None)
+
+                result = await func(*args, **kwargs)
+                _cache[key] = (time.time(), result)
+
+                if random.random() < 0.05:
+                    _sweep_expired(effective_ttl)
+                return result
+
+            # Fast cache check before creating a task.
             if _redis_client is not None:
                 try:
                     cached = await _redis_client.get(key)
                     if cached is not None:
                         return json.loads(cached)
                 except Exception as e:
-                    logger.warning(f"Redis GET failed for {key}, falling through to live fetch: {e}")
+                    logger.warning(
+                        f"Redis GET failed for {key}, falling through to single-flight fetch: {e}"
+                    )
+            else:
+                now = time.time()
+                cached_entry = _cache.get(key)
+                if cached_entry is not None:
+                    ts, value = cached_entry
+                    if now - ts < effective_ttl:
+                        return value
+                    _cache.pop(key, None)
 
-                result = await func(*args, **kwargs)
-                try:
-                    await _redis_client.set(key, json.dumps(result, default=_json_default), ex=effective_ttl)
-                except Exception as e:
-                    logger.warning(f"Redis SET failed for {key} (result still returned): {e}")
-                return result
+            async with _inflight_lock:
+                task = _inflight.get(key)
+                if task is None:
+                    task = asyncio.create_task(_load_or_fetch())
+                    _inflight[key] = task
 
-            # In-memory fallback (single-process only — see module docstring).
-            now = time.time()
-            if key in _cache:
-                ts, value = _cache[key]
-                if now - ts < effective_ttl:
-                    return value
-            result = await func(*args, **kwargs)
-            _cache[key] = (now, result)
-            # Sweep occasionally rather than on every write (cheap amortized cost).
-            if random.random() < 0.05:
-                _sweep_expired(effective_ttl)
-            return result
+            try:
+                return await task
+            finally:
+                if task.done():
+                    async with _inflight_lock:
+                        if _inflight.get(key) is task:
+                            _inflight.pop(key, None)
+
         return wrapper
     return decorator
