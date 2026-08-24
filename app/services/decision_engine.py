@@ -33,6 +33,126 @@ logger = logging.getLogger(__name__)
 _signal_state: Dict[str, Dict] = {}
 HYSTERESIS_EXIT_MARGIN = 4
 
+# Signal lifecycle / confirmation settings.
+# A raw directional score is NOT an entry by itself. The same direction must
+# be seen on consecutive analysis cycles before it becomes CONFIRMED.
+SIGNAL_CONFIRMATIONS_REQUIRED = 3
+SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED = 2
+
+def _apply_signal_lifecycle(
+    symbol_key: str,
+    raw_side: str,
+    margin: float,
+    hard_gated: bool,
+) -> Tuple[str, Dict]:
+    """Turn noisy raw CALL/PUT/NONE readings into WATCH/CONFIRMED/HOLD states.
+
+    This is intentionally in-memory, matching the existing per-process
+    hysteresis state. It does not place orders or change broker positions.
+    """
+    now = time.time()
+    prev = _signal_state.get(symbol_key, {})
+    prev_active = prev.get("active_side", "NONE")
+    prev_candidate = prev.get("candidate_side", "NONE")
+    confirmations = int(prev.get("confirmations", 0) or 0)
+    reversal_confirmations = int(prev.get("reversal_confirmations", 0) or 0)
+
+    if hard_gated or raw_side not in ("CALL", "PUT"):
+        if prev_active in ("CALL", "PUT") and not hard_gated:
+            # Existing active signal stays HOLD while the evidence is merely
+            # weakening; a hard safety gate is the only immediate exit here.
+            return prev_active, {
+                "state": f"HOLD_{prev_active}",
+                "candidate_side": "NONE",
+                "confirmations": confirmations,
+                "reversal_confirmations": 0,
+                "active_side": prev_active,
+                "changed": False,
+                "reason": "Active signal held while confirmation is temporarily weak.",
+                "ts": now,
+            }
+        return "NONE", {
+            "state": "WAIT",
+            "candidate_side": "NONE",
+            "confirmations": 0,
+            "reversal_confirmations": 0,
+            "active_side": "NONE",
+            "changed": prev_active != "NONE",
+            "reason": "No confirmed directional signal.",
+            "ts": now,
+        }
+
+    # No active position/signal yet: build a fresh confirmation sequence.
+    if prev_active not in ("CALL", "PUT"):
+        if raw_side == prev_candidate:
+            confirmations += 1
+        else:
+            prev_candidate = raw_side
+            confirmations = 1
+        if confirmations >= SIGNAL_CONFIRMATIONS_REQUIRED:
+            return raw_side, {
+                "state": f"CONFIRMED_{raw_side}",
+                "candidate_side": raw_side,
+                "confirmations": confirmations,
+                "reversal_confirmations": 0,
+                "active_side": raw_side,
+                "changed": True,
+                "reason": f"{raw_side} confirmed after {confirmations} consecutive readings.",
+                "ts": now,
+            }
+        return "NONE", {
+            "state": f"WATCH_{raw_side}",
+            "candidate_side": raw_side,
+            "confirmations": confirmations,
+            "reversal_confirmations": 0,
+            "active_side": "NONE",
+            "changed": False,
+            "reason": f"Waiting for {SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} more confirmation cycle(s).",
+            "ts": now,
+        }
+
+    # Active direction: keep holding same side. A reversal needs two
+    # consecutive opposite readings before changing the active direction.
+    if raw_side == prev_active:
+        return prev_active, {
+            "state": f"HOLD_{prev_active}",
+            "candidate_side": raw_side,
+            "confirmations": max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED),
+            "reversal_confirmations": 0,
+            "active_side": prev_active,
+            "changed": False,
+            "reason": f"{prev_active} trend remains confirmed.",
+            "ts": now,
+        }
+
+    if prev_candidate == raw_side:
+        reversal_confirmations += 1
+    else:
+        reversal_confirmations = 1
+
+    if reversal_confirmations >= SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED:
+        return raw_side, {
+            "state": f"CONFIRMED_{raw_side}",
+            "candidate_side": raw_side,
+            "confirmations": SIGNAL_CONFIRMATIONS_REQUIRED,
+            "reversal_confirmations": reversal_confirmations,
+            "active_side": raw_side,
+            "changed": True,
+            "reason": f"Reversal to {raw_side} confirmed after {reversal_confirmations} consecutive readings.",
+            "ts": now,
+        }
+
+    return prev_active, {
+        "state": f"HOLD_{prev_active}_REVERSAL_WATCH_{raw_side}",
+        "candidate_side": raw_side,
+        "confirmations": max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED),
+        "reversal_confirmations": reversal_confirmations,
+        "active_side": prev_active,
+        "changed": False,
+        "reason": f"Possible {raw_side} reversal detected; holding {prev_active} until confirmation.",
+        "ts": now,
+    }
+
 # ── Score weights ─────────────────────────────────────────────────────────
 # india_vix and atr_risk are intentionally 0: VIX and ATR describe how MUCH
 # the market might move, not which WAY — using them as bull/bear points
@@ -932,12 +1052,30 @@ def run_decision_engine(market_data: Dict) -> Dict:
                 f"↔️ Holding previous PUT signal — margin {margin} weakened but hasn't "
                 f"crossed the exit band (±{HYSTERESIS_EXIT_MARGIN}); avoids flip-flopping on noise"
             )
-    # Persist this call's outcome for the next call's hysteresis check.
-    # Hard-gated calls reset state to NONE deliberately — resuming a
-    # pre-gate signal the instant a safety gate lifts would defeat the gate.
+    # Convert the hysteresis result into a stable signal lifecycle. Raw
+    # CALL/PUT readings need consecutive confirmation; active signals are
+    # held through temporary noise and reversals need confirmation too.
+    raw_lifecycle_side = preferred_side
+    lifecycle_side, lifecycle = _apply_signal_lifecycle(
+        symbol_key, raw_lifecycle_side, margin, hard_gated
+    )
+    if lifecycle_side != preferred_side:
+        if lifecycle_side in ("CALL", "PUT"):
+            preferred_side = lifecycle_side
+            reasons.append(f"🟢 Signal lifecycle: {lifecycle['state']} — {lifecycle['reason']}")
+        elif not hard_gated:
+            preferred_side = "NONE"
+    elif lifecycle_side in ("CALL", "PUT") and lifecycle["state"].startswith("HOLD_"):
+        reasons.append(f"🟡 Signal lifecycle: {lifecycle['state']} — {lifecycle['reason']}")
+
     _signal_state[symbol_key] = {
         "side": "NONE" if hard_gated else preferred_side,
         "margin": margin,
+        "candidate_side": lifecycle.get("candidate_side", "NONE"),
+        "confirmations": lifecycle.get("confirmations", 0),
+        "reversal_confirmations": lifecycle.get("reversal_confirmations", 0),
+        "active_side": lifecycle.get("active_side", "NONE"),
+        "lifecycle": lifecycle.get("state", "WAIT"),
         "ts": time.time(),
     }
 
