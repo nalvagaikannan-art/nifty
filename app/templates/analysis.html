@@ -739,7 +739,12 @@ function renderStrikes(d){
 }
 
 function renderAnalysis(d){
-  var dec=((d.suggestion||d.rule_decision||'WAIT')+'').toUpperCase();
+  var lifecycleState = (d.signal_lifecycle || 'WAIT').toString().toUpperCase();
+  var lifecycleActive = (d.signal_active_side || 'NONE').toString().toUpperCase();
+  var lifecycleCandidate = (d.signal_candidate || 'NONE').toString().toUpperCase();
+  var dec = lifecycleState.indexOf('HOLD_') === 0 || lifecycleState.indexOf('CONFIRMED_') === 0 ? lifecycleActive :
+    lifecycleState.indexOf('WATCH_') === 0 ? ('WATCH ' + lifecycleCandidate) : 'WAIT';
+  if(dec === 'NONE') dec = 'WAIT';
   var badge=$('#sig-badge').text(dec).attr('class','ai-badge');
   if(dec.includes('CALL')) badge.addClass('bull');
   else if(dec.includes('PUT')) badge.addClass('bear');
@@ -844,9 +849,12 @@ function renderLivePositions(data, d){
     var ts = (p.symbol||'').toUpperCase();
     var optionSide = ts.indexOf('CE') >= 0 ? 'CALL' : ts.indexOf('PE') >= 0 ? 'PUT' : 'OTHER';
     var aligned = active !== 'NONE' && optionSide === active;
-    var action = aligned ? 'HOLD — signal still aligned' :
-      (active !== 'NONE' && optionSide !== 'OTHER' ? 'EXIT WARNING — confirmed direction differs' : 'HOLD — wait for confirmed direction');
-    var actionColor = aligned ? 'var(--green)' : (action.indexOf('EXIT')===0 ? 'var(--red)' : 'var(--yellow)');
+    var brokerSuggestion = (p.ai_suggestion || '').toString();
+    var brokerExit = brokerSuggestion.indexOf('EXIT') === 0;
+    var action = brokerExit ? brokerSuggestion :
+      (aligned ? 'HOLD — signal still aligned' :
+      (active !== 'NONE' && optionSide !== 'OTHER' ? 'EXIT WARNING — confirmed direction differs' : 'HOLD — wait for confirmed direction'));
+    var actionColor = brokerExit ? 'var(--red)' : (aligned ? 'var(--green)' : (action.indexOf('EXIT')===0 ? 'var(--red)' : 'var(--yellow)'));
     return '<div style="padding:.4rem .6rem;border-radius:6px;background:rgba(255,255,255,.03);margin:.25rem 0;">'+
       '<b>'+esc(p.symbol)+'</b> · Qty '+esc(p.quantity)+' · Entry ₹'+fmtN(p.avg_price,2)+' · LTP ₹'+fmtN(p.ltp,2)+
       ' · P&L ₹'+fmtN(p.pnl,2)+'<br><span style="color:'+actionColor+';font-weight:700;">'+esc(action)+'</span>'+
