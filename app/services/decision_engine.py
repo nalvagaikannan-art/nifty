@@ -38,6 +38,7 @@ HYSTERESIS_EXIT_MARGIN = 4
 # be seen on consecutive analysis cycles before it becomes CONFIRMED.
 SIGNAL_CONFIRMATIONS_REQUIRED = 3
 SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED = 2
+SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS = 45
 
 def _apply_signal_lifecycle(
     symbol_key: str,
@@ -56,6 +57,9 @@ def _apply_signal_lifecycle(
     prev_candidate = prev.get("candidate_side", "NONE")
     confirmations = int(prev.get("confirmations", 0) or 0)
     reversal_confirmations = int(prev.get("reversal_confirmations", 0) or 0)
+    last_confirmation_ts = float(prev.get("last_confirmation_ts", 0) or 0)
+    can_count_confirmation = (last_confirmation_ts <= 0 or
+        (now - last_confirmation_ts) >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS)
 
     if hard_gated or raw_side not in ("CALL", "PUT"):
         if prev_active in ("CALL", "PUT") and not hard_gated:
@@ -69,6 +73,7 @@ def _apply_signal_lifecycle(
                 "active_side": prev_active,
                 "changed": False,
                 "reason": "Active signal held while confirmation is temporarily weak.",
+                "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
             }
         return "NONE", {
@@ -79,16 +84,20 @@ def _apply_signal_lifecycle(
             "active_side": "NONE",
             "changed": prev_active != "NONE",
             "reason": "No confirmed directional signal.",
-            "ts": now,
+            "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
         }
 
     # No active position/signal yet: build a fresh confirmation sequence.
     if prev_active not in ("CALL", "PUT"):
         if raw_side == prev_candidate:
-            confirmations += 1
+            if can_count_confirmation:
+                confirmations += 1
+                last_confirmation_ts = now
         else:
             prev_candidate = raw_side
             confirmations = 1
+            last_confirmation_ts = now
         if confirmations >= SIGNAL_CONFIRMATIONS_REQUIRED:
             return raw_side, {
                 "state": f"CONFIRMED_{raw_side}",
@@ -98,6 +107,7 @@ def _apply_signal_lifecycle(
                 "active_side": raw_side,
                 "changed": True,
                 "reason": f"{raw_side} confirmed after {confirmations} consecutive readings.",
+                "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
             }
         return "NONE", {
@@ -108,7 +118,8 @@ def _apply_signal_lifecycle(
             "active_side": "NONE",
             "changed": False,
             "reason": f"Waiting for {SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} more confirmation cycle(s).",
-            "ts": now,
+            "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
         }
 
     # Active direction: keep holding same side. A reversal needs two
@@ -122,13 +133,17 @@ def _apply_signal_lifecycle(
             "active_side": prev_active,
             "changed": False,
             "reason": f"{prev_active} trend remains confirmed.",
-            "ts": now,
+            "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
         }
 
     if prev_candidate == raw_side:
-        reversal_confirmations += 1
+        if can_count_confirmation:
+            reversal_confirmations += 1
+            last_confirmation_ts = now
     else:
         reversal_confirmations = 1
+        last_confirmation_ts = now
 
     if reversal_confirmations >= SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED:
         return raw_side, {
@@ -139,7 +154,8 @@ def _apply_signal_lifecycle(
             "active_side": raw_side,
             "changed": True,
             "reason": f"Reversal to {raw_side} confirmed after {reversal_confirmations} consecutive readings.",
-            "ts": now,
+            "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
         }
 
     return prev_active, {
@@ -150,7 +166,8 @@ def _apply_signal_lifecycle(
         "active_side": prev_active,
         "changed": False,
         "reason": f"Possible {raw_side} reversal detected; holding {prev_active} until confirmation.",
-        "ts": now,
+        "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
     }
 
 # ── Score weights ─────────────────────────────────────────────────────────
@@ -1059,14 +1076,14 @@ def run_decision_engine(market_data: Dict) -> Dict:
     lifecycle_side, lifecycle = _apply_signal_lifecycle(
         symbol_key, raw_lifecycle_side, margin, hard_gated
     )
-    if lifecycle_side != preferred_side:
-        if lifecycle_side in ("CALL", "PUT"):
-            preferred_side = lifecycle_side
-            reasons.append(f"🟢 Signal lifecycle: {lifecycle['state']} — {lifecycle['reason']}")
-        elif not hard_gated:
-            preferred_side = "NONE"
-    elif lifecycle_side in ("CALL", "PUT") and lifecycle["state"].startswith("HOLD_"):
-        reasons.append(f"🟡 Signal lifecycle: {lifecycle['state']} — {lifecycle['reason']}")
+    if lifecycle_side in ("CALL", "PUT") and lifecycle["state"].startswith(("CONFIRMED_", "HOLD_")):
+        preferred_side = lifecycle_side
+    elif lifecycle["state"].startswith("WATCH_"):
+        # Keep the raw side for backwards compatibility/debugging, but the
+        # lifecycle state is the actionable gate: WATCH is not confirmed.
+        pass
+    elif hard_gated:
+        preferred_side = "NONE"
 
     _signal_state[symbol_key] = {
         "side": "NONE" if hard_gated else preferred_side,
@@ -1076,6 +1093,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "reversal_confirmations": lifecycle.get("reversal_confirmations", 0),
         "active_side": lifecycle.get("active_side", "NONE"),
         "lifecycle": lifecycle.get("state", "WAIT"),
+        "last_confirmation_ts": lifecycle.get("last_confirmation_ts", 0),
         "ts": time.time(),
     }
 
@@ -1206,6 +1224,12 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "market_regime_no_trade": regime_info.get("no_trade", False),
         "market_regime_no_trade_reason": regime_info.get("no_trade_reason", ""),
         "margin":                margin,
+        "signal_lifecycle":      lifecycle.get("state", "WAIT"),
+        "signal_candidate":      lifecycle.get("candidate_side", "NONE"),
+        "signal_confirmations":  lifecycle.get("confirmations", 0),
+        "signal_reversal_confirmations": lifecycle.get("reversal_confirmations", 0),
+        "signal_active_side":    lifecycle.get("active_side", "NONE"),
+        "signal_lifecycle_reason": lifecycle.get("reason", ""),
         "reasons":               reasons,
         "strategy":              strategy,
         "strategy_reason":       strategy_reason,
