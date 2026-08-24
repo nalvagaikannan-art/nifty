@@ -39,6 +39,10 @@ HYSTERESIS_EXIT_MARGIN = 4
 SIGNAL_CONFIRMATIONS_REQUIRED = 3
 SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED = 2
 SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS = 45
+# A direction must have a meaningful score margin, not merely cross the
+# old ±10 preferred-side threshold, before it can become an entry confirmation.
+SIGNAL_CONFIRMATION_MIN_MARGIN = 12
+SIGNAL_REVERSAL_MIN_MARGIN = 12
 
 def _apply_signal_lifecycle(
     symbol_key: str,
@@ -89,7 +93,20 @@ def _apply_signal_lifecycle(
         }
 
     # No active position/signal yet: build a fresh confirmation sequence.
+    # A weak ±10 reading is WATCH only; confirmation needs a wider margin.
     if prev_active not in ("CALL", "PUT"):
+        if abs(margin) < SIGNAL_CONFIRMATION_MIN_MARGIN:
+            return "NONE", {
+                "state": f"WATCH_{raw_side}",
+                "candidate_side": raw_side,
+                "confirmations": 0,
+                "reversal_confirmations": 0,
+                "active_side": "NONE",
+                "changed": False,
+                "reason": f"{raw_side} direction is not strong enough yet (margin {margin:.1f} < {SIGNAL_CONFIRMATION_MIN_MARGIN}).",
+                "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
+            }
         if raw_side == prev_candidate:
             if can_count_confirmation:
                 confirmations += 1
@@ -123,7 +140,7 @@ def _apply_signal_lifecycle(
         }
 
     # Active direction: keep holding same side. A reversal needs two
-    # consecutive opposite readings before changing the active direction.
+    # consecutive opposite readings AND a meaningful opposite margin.
     if raw_side == prev_active:
         return prev_active, {
             "state": f"HOLD_{prev_active}",
@@ -135,6 +152,25 @@ def _apply_signal_lifecycle(
             "reason": f"{prev_active} trend remains confirmed.",
             "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
+        }
+
+    # Weak opposite readings are only noise; do not even start reversal
+    # confirmation until the opposite margin is materially negative/positive.
+    opposite_margin_ok = (
+        (raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN) or
+        (raw_side == "PUT" and margin <= -SIGNAL_REVERSAL_MIN_MARGIN)
+    )
+    if not opposite_margin_ok:
+        return prev_active, {
+            "state": f"HOLD_{prev_active}",
+            "candidate_side": raw_side,
+            "confirmations": max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED),
+            "reversal_confirmations": 0,
+            "active_side": prev_active,
+            "changed": False,
+            "reason": f"Opposite {raw_side} reading is too weak for reversal (margin {margin:.1f}).",
+            "last_confirmation_ts": last_confirmation_ts,
+            "ts": now,
         }
 
     if prev_candidate == raw_side:
