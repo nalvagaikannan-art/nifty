@@ -18,6 +18,7 @@ FIXES (2026-08-20):
 import asyncio
 import json
 import logging
+import random
 import re
 import time
 from datetime import datetime
@@ -895,7 +896,7 @@ class AngelOneSession:
             # latency to the caller.
             if "exceeding access rate" in str(e).lower() or "access denied" in str(e).lower():
                 logger.warning(f"Angel One rate limit hit for {label or token}, retrying once after backoff")
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(3.0 + random.uniform(0.0, 0.75))
                 await self._throttle()
                 try:
                     resp = self._obj.getCandleData(params)
