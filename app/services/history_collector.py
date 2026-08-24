@@ -33,7 +33,19 @@ from app.exceptions import AIProviderError, MarketDataError
 logger = logging.getLogger(__name__)
 
 
-async def _collect_once(analyzer: MarketAnalyzer, symbol: str) -> None:
+
+# Prevent duplicate history collection for the same symbol if more than one
+# collector task is accidentally started.
+_collection_locks = {}
+
+async def _get_collection_lock(symbol: str) -> asyncio.Lock:
+    lock = _collection_locks.get(symbol)
+    if lock is None:
+        lock = asyncio.Lock()
+        _collection_locks[symbol] = lock
+    return lock
+
+async def _collect_once_unlocked(analyzer: MarketAnalyzer, symbol: str) -> None:
     # Imported lazily to avoid a circular import (analysis.py imports this
     # module's sibling history_service, and this module needs analysis.py's
     # shared result-builder — importing it at module load time would create
@@ -65,6 +77,15 @@ async def _collect_once(analyzer: MarketAnalyzer, symbol: str) -> None:
         await build_ai_analysis(symbol, analyzer, ai)  # saves AnalysisResult internally
     except Exception:
         logger.exception("History collector: AI analysis save failed for %s", symbol)
+
+
+async def _collect_once(analyzer: MarketAnalyzer, symbol: str) -> None:
+    lock = await _get_collection_lock(symbol)
+    if lock.locked():
+        logger.info("History collector: skipping overlapping run for %s", symbol)
+        return
+    async with lock:
+        await _collect_once_unlocked(analyzer, symbol)
 
 
 async def run_periodic_collection(analyzer: MarketAnalyzer) -> None:
