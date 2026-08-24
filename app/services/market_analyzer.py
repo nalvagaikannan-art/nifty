@@ -55,7 +55,7 @@ class MarketAnalyzer:
         self.tech   = TechnicalIndicators()
         self.option = OptionAnalyzer()
 
-    @async_cache(ttl=settings.analysis_cache_ttl)
+    # async_cache also provides single-flight deduplication: concurrent callers\n    # for the same symbol/expiry share one expensive market-data fetch.\n    @async_cache(ttl=settings.analysis_cache_ttl)
     async def get_full_market_overview(self, symbol: str, expiry: str = None) -> Dict:
         """
         Concurrent fetch → process → decision engine → return.
