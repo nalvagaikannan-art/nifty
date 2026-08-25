@@ -21,6 +21,7 @@ from app.services.paper_trading import get_open_trades, get_daily_pnl
 from app.exceptions import MarketDataError, AIProviderError
 from app.api.deps import get_analyzer, get_ai_engine
 from app.utils.helpers import safe_float, expiry_filter, days_to_expiry as _days_to_expiry
+from app.utils.ai_result_cache import get_ai_analysis
 from app.services.options_greeks import black_scholes_greeks, mid_price, spread_pct
 from app.config import settings
 from datetime import datetime
@@ -894,9 +895,19 @@ async def strike_recommendation(
     strategy_detail = generate_option_strategy(market_data, opt_df)
 
     # ── AI reasoning ──────────────────────────────────────────────────────
+    # BUG FIX: was calling ai.analyze_market() directly here — a SECOND,
+    # independent LLM round trip on top of the one /api/analysis/ai/{symbol}
+    # already makes for the same symbol (the dashboard fires both routes
+    # together on every refresh). That extra LLM call, stacked on this
+    # route's own confluence/regime/risk/Greeks work, was the main reason
+    # this endpoint occasionally ran long enough to time out mid-response
+    # (seen client-side as "Strategy data fetch failed: Unexpected end of
+    # JSON input" — a truncated/empty body, not a clean error). Now shared
+    # via app/utils/ai_result_cache.py: whichever route asks first pays for
+    # the call, the other reuses it.
     ai_reason = ""
     try:
-        ai_result = await ai.analyze_market(market_data)
+        ai_result = await get_ai_analysis(ai, symbol, expiry, market_data)
         ai_reason = ai_result.get("reason", "")
     except AIProviderError:
         ai_reason = "AI unavailable — rule engine decision shown."
