@@ -270,15 +270,23 @@ class MarketAnalyzer:
         try:
             # Sequential fetch: avoids Angel One AB1018 rate-limit when
             # 5min, 15min and 1hr are requested together.
+            # PERF FIX: the sleep only needs to happen BETWEEN calls to
+            # space out the rate limit — sleeping after the LAST call too
+            # (the old code did this unconditionally every iteration) added
+            # a flat 2.2s of dead time to every single Analysis-page load
+            # for no benefit, since nothing else in this function calls the
+            # broker afterwards.
+            interval_list = list(intervals.values())
             results = []
-            for interval in intervals.values():
+            for i, interval in enumerate(interval_list):
                 try:
                     results.append(
                         await self.fetcher.get_intraday_ohlc(symbol, interval=interval, bars=100)
                     )
                 except Exception as ex:
                     results.append(ex)
-                await asyncio.sleep(2.2)
+                if i < len(interval_list) - 1:
+                    await asyncio.sleep(2.2)
         except Exception as e:
             logger.warning(f"Multi-timeframe fetch failed for {symbol}: {e}")
             results = [Exception(str(e))] * len(intervals)
