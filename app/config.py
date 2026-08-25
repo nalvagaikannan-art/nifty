@@ -60,7 +60,26 @@ class Settings(BaseSettings):
     # twice back-to-back, which is the main cause of the page hanging on
     # "Loading...". Short TTL so both calls in one page load reuse the same
     # snapshot, while the page still feels "live" between refreshes.
-    analysis_cache_ttl: int = Field(15, alias="ANALYSIS_CACHE_TTL")
+    #
+    # PERF FIX (2026-08-25): 15s was too short given how expensive a live
+    # fetch actually is — every Angel One SDK call in the pipeline (option
+    # chain, quotes, 5min/15min/1hr candles, futures) goes through ONE
+    # process-wide throttle (_MIN_CALL_INTERVAL in angel_one.py) that spaces
+    # ALL calls 2.2s apart regardless of symbol, so a single full overview
+    # can take 15-40+s even with zero errors, and Angel One's own rate
+    # limiter still rejects some of those calls, adding 3s+ backoff-retries
+    # on top. That same throttle is also shared with the background history
+    # collector (run_periodic_collection, every
+    # HISTORY_COLLECTOR_INTERVAL_MINUTES for NIFTY/BANKNIFTY/FINNIFTY) — so
+    # a live page request can land right behind the collector's own sweep
+    # and queue up behind it. With a 15s TTL and the dashboard auto-refresh
+    # firing every 30s, almost every refresh missed the cache and triggered
+    # a brand new live fetch, competing with the collector for the same
+    # throttled connection. Raised to 45s so most 30s auto-refreshes hit the
+    # cache instead — cutting live-fetch volume roughly in half without
+    # making the data meaningfully stale (the finest granularity used
+    # anywhere in this app is 5-minute candles).
+    analysis_cache_ttl: int = Field(45, alias="ANALYSIS_CACHE_TTL")
 
     # Background history collector — WITHOUT this, MarketData/AnalysisResult
     # rows only get written when a human happens to have a page open (the
