@@ -5,10 +5,45 @@ from app.services.history_service import save_analysis_result
 from app.exceptions import AIProviderError, MarketDataError
 from app.api.deps import get_analyzer, get_ai_engine
 from app.utils.helpers import safe_float
+from app.config import settings
 import logging
+import time
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# PERF FIX: build_ai_analysis previously called the LLM (Gemini/OpenAI/
+# Deepseek — a real network round trip, typically several seconds) on
+# EVERY hit of /api/analysis/ai/{symbol}, even when the underlying market
+# snapshot was unchanged (get_full_market_overview is already cached for
+# analysis_cache_ttl seconds and shared with /api/strategy/recommend, but
+# the AI call sat outside that cache entirely). This was the single
+# biggest gap between the dashboard (no LLM call at all) and the Analysis
+# page. Keyed on market_data["timestamp"], which only changes when a fresh
+# fetch actually happened — so refreshing the Analysis page (or the
+# strategy tab re-triggering the same symbol) within the cache window
+# reuses the AI explanation instead of re-calling the model.
+_ai_call_cache: dict = {}
+_AI_CALL_CACHE_MAX = 200
+
+
+def _ai_cache_get(key: str):
+    entry = _ai_call_cache.get(key)
+    if not entry:
+        return None
+    ts, value = entry
+    if time.time() - ts > settings.analysis_cache_ttl:
+        _ai_call_cache.pop(key, None)
+        return None
+    return value
+
+
+def _ai_cache_set(key: str, value: dict):
+    _ai_call_cache[key] = (time.time(), value)
+    if len(_ai_call_cache) > _AI_CALL_CACHE_MAX:
+        oldest = sorted(_ai_call_cache.items(), key=lambda kv: kv[1][0])[: len(_ai_call_cache) - _AI_CALL_CACHE_MAX]
+        for k, _ in oldest:
+            _ai_call_cache.pop(k, None)
 
 
 def _pick_recommended_option(market_data: dict, dec: dict) -> dict:
@@ -87,8 +122,14 @@ async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine,
     except MarketDataError as e:
         raise HTTPException(502, detail=f"Market data unavailable: {e}")
 
+    ai_cache_key = f"{symbol}:{expiry or ''}:{market_data.get('timestamp', '')}"
+    cached_ai_result = _ai_cache_get(ai_cache_key)
     try:
-        result = await ai.analyze_market(market_data)
+        if cached_ai_result is not None:
+            result = cached_ai_result
+        else:
+            result = await ai.analyze_market(market_data)
+            _ai_cache_set(ai_cache_key, result)
     except AIProviderError as e:
         # AI fail ஆனாலும் rule-engine result return செய் — analysis only,
         # no buy/sell instruction anywhere in this fallback either.
