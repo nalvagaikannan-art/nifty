@@ -1004,6 +1004,32 @@ var ltLastAI = null;   // BUG FIX: /api/analysis/ai response, kept around so
                         // response instead of /api/strategy/recommend's.
 var ltAutoInterval = null;
 
+// BUG FIX: a transient failure (e.g. the request happening to land during
+// the extra latency /api/strategy/recommend can have — see the AI-call
+// dedup fix above) used to leave the whole panel blank ("--") until the
+// user manually hit Refresh again, and a non-2xx or truncated response
+// used to blow up inside .then(r=>r.json()) with a confusing
+// "Unexpected end of JSON input" instead of a clear message. This wraps
+// fetch with: (1) an ok-status check before parsing, (2) one automatic
+// retry after a short delay on any failure, so a one-off slow/failed
+// request quietly recovers instead of requiring a manual click.
+function ltFetchJsonRetry(url, retriesLeft){
+  if(retriesLeft === undefined) retriesLeft = 1;
+  return fetch(url).then(function(r){
+    if(!r.ok){ throw new Error('HTTP ' + r.status); }
+    return r.text().then(function(t){
+      if(!t){ throw new Error('Empty response'); }
+      return JSON.parse(t);
+    });
+  }).catch(function(e){
+    if(retriesLeft > 0){
+      return new Promise(function(resolve){ setTimeout(resolve, 1500); })
+        .then(function(){ return ltFetchJsonRetry(url, retriesLeft - 1); });
+    }
+    throw e;
+  });
+}
+
 // ── Clock ──
 function ltClock(){
   var now = new Date();
@@ -1063,8 +1089,7 @@ function ltRefresh(){
   ltUpdateStatus();
 
   // Fetch strategy (primary — has strikes, levels, regime, confluence)
-  fetch('/api/strategy/recommend/' + ltSym)
-    .then(function(r){ return r.json(); })
+  ltFetchJsonRetry('/api/strategy/recommend/' + ltSym)
     .then(function(d){
       ltLastData = d;
       ltRenderSignal(d);
@@ -1091,8 +1116,7 @@ function ltRefresh(){
   // BUG FIX: previously only .reason and reasons were kept and the rest of
   // this payload was discarded, which is why Advanced Indicators, the
   // 5min/15min/1hr boxes, and ATM IV were permanently blank on this page.
-  fetch('/api/analysis/ai/' + ltSym)
-    .then(function(r){ return r.json(); })
+  ltFetchJsonRetry('/api/analysis/ai/' + ltSym)
     .then(function(d){
       ltLastAI = d;
       ltRenderTamil(d);
