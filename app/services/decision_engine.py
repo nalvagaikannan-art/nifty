@@ -5,9 +5,10 @@ Rule-Based Decision Engine
 AI இந்த score-ஐ verify செய்து reasoning மட்டும் சொல்லும்.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import logging
 import time
+from datetime import datetime, timezone
 
 from app.services.market_regime import classify_market_regime
 
@@ -205,6 +206,147 @@ def _apply_signal_lifecycle(
         "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
     }
+
+
+def apply_persistent_signal_lifecycle(
+    decision: Dict,
+    persisted_state: Optional[Dict],
+    now: float,
+) -> Tuple[Dict, Dict]:
+    """Apply the restart-safe lifecycle stored by the strategy router.
+
+    ``run_decision_engine`` remains synchronous because it is also used by the
+    market analyzer.  The database I/O therefore lives in the async router;
+    this pure helper performs only the deterministic state transition.
+    """
+    state = dict(persisted_state or {})
+    raw_side = str(decision.get("preferred_side", "NONE")).upper()
+    margin = float(decision.get("margin", 0) or 0)
+    market_open = bool(decision.get("market_open", True))
+    hard_gated = bool(decision.get("market_regime_no_trade", False)) or not market_open
+
+    active = state.get("active_side", "NONE")
+    candidate = state.get("candidate_side", "NONE")
+    confirmations = int(state.get("confirmations", 0) or 0)
+    reversal_confirmations = int(state.get("reversal_confirmations", 0) or 0)
+    last_eval = state.get("last_evaluation_at")
+    last_confirm = state.get("last_confirmation_at")
+
+    def epoch(value):
+        if value is None:
+            return 0.0
+        if hasattr(value, "timestamp"):
+            if getattr(value, "tzinfo", None) is None:
+                value = value.replace(tzinfo=timezone.utc)
+            return float(value.timestamp())
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    can_count = (epoch(last_eval) <= 0 or now - epoch(last_eval) >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS)
+
+    if hard_gated:
+        active = "NONE"
+        candidate = "NONE"
+        confirmations = 0
+        reversal_confirmations = 0
+        lifecycle = "WAIT"
+        reason = "Hard safety gate is active; no directional signal is allowed."
+    elif raw_side not in ("CALL", "PUT"):
+        if active in ("CALL", "PUT"):
+            lifecycle = f"HOLD_{active}"
+            reason = f"Holding confirmed {active}; current directional evidence is temporarily weak."
+        else:
+            active = "NONE"
+            candidate = "NONE"
+            confirmations = 0
+            reversal_confirmations = 0
+            lifecycle = "WAIT"
+            reason = "No confirmed directional signal."
+    elif active not in ("CALL", "PUT"):
+        if abs(margin) < SIGNAL_CONFIRMATION_MIN_MARGIN:
+            candidate = raw_side
+            confirmations = 0
+            reversal_confirmations = 0
+            active = "NONE"
+            lifecycle = f"WATCH_{raw_side}"
+            reason = f"{raw_side} is below confirmation margin {SIGNAL_CONFIRMATION_MIN_MARGIN}."
+        else:
+            if candidate == raw_side:
+                if can_count:
+                    confirmations += 1
+            else:
+                candidate = raw_side
+                confirmations = 1
+            reversal_confirmations = 0
+            if confirmations >= SIGNAL_CONFIRMATIONS_REQUIRED:
+                active = raw_side
+                lifecycle = f"CONFIRMED_{raw_side}"
+                last_confirm = datetime_from_epoch(now)
+                reason = f"{raw_side} confirmed after {confirmations} spaced readings."
+            else:
+                active = "NONE"
+                lifecycle = f"WATCH_{raw_side}"
+                reason = f"Waiting for {SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} more confirmation cycle(s)."
+    elif raw_side == active:
+        candidate = raw_side
+        confirmations = max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED)
+        reversal_confirmations = 0
+        lifecycle = f"HOLD_{active}"
+        reason = f"{active} remains confirmed."
+    else:
+        opposite_ok = ((raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN) or
+                        (raw_side == "PUT" and margin <= -SIGNAL_REVERSAL_MIN_MARGIN))
+        if not opposite_ok:
+            candidate = raw_side
+            reversal_confirmations = 0
+            lifecycle = f"HOLD_{active}"
+            reason = f"Opposite {raw_side} reading is too weak for reversal."
+        else:
+            if candidate == raw_side:
+                if can_count:
+                    reversal_confirmations += 1
+            else:
+                candidate = raw_side
+                reversal_confirmations = 1
+            if reversal_confirmations >= SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED:
+                active = raw_side
+                confirmations = SIGNAL_CONFIRMATIONS_REQUIRED
+                lifecycle = f"CONFIRMED_{raw_side}"
+                last_confirm = datetime_from_epoch(now)
+                reason = f"Reversal to {raw_side} confirmed after {reversal_confirmations} spaced readings."
+            else:
+                lifecycle = f"HOLD_{active}_REVERSAL_WATCH_{raw_side}"
+                reason = f"Possible {raw_side} reversal; holding {active} until confirmation."
+
+    state.update({
+        "active_side": active,
+        "candidate_side": candidate,
+        "confirmations": confirmations,
+        "reversal_confirmations": reversal_confirmations,
+        "lifecycle": lifecycle,
+        "last_confirmation_at": last_confirm,
+        "last_evaluation_at": datetime_from_epoch(now),
+        "margin": margin,
+    })
+
+    out = dict(decision)
+    out["signal_lifecycle"] = lifecycle
+    out["signal_candidate"] = candidate
+    out["signal_confirmations"] = confirmations
+    out["signal_reversal_confirmations"] = reversal_confirmations
+    out["signal_active_side"] = active
+    out["signal_lifecycle_reason"] = reason
+    if lifecycle.startswith(("CONFIRMED_", "HOLD_")) and active in ("CALL", "PUT"):
+        out["preferred_side"] = active
+    elif lifecycle == "WAIT":
+        out["preferred_side"] = "NONE"
+    return out, state
+
+
+def datetime_from_epoch(value: float):
+    return datetime.fromtimestamp(value, tz=timezone.utc).replace(tzinfo=None)
 
 # ── Score weights ─────────────────────────────────────────────────────────
 # india_vix and atr_risk are intentionally 0: VIX and ATR describe how MUCH
