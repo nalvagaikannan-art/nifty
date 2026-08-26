@@ -54,7 +54,9 @@ async def _collect_once_unlocked(analyzer: MarketAnalyzer, symbol: str) -> None:
     from app.api.routes.analysis import build_ai_analysis
 
     try:
-        market_data = await analyzer.get_full_market_overview(symbol)
+        # Use the same explicit keyword form as HTTP routes so the canonical
+        # cache key is identical even on older cache implementations.
+        market_data = await analyzer.get_full_market_overview(symbol, expiry=None)
     except MarketDataError as e:
         logger.warning("History collector: market data unavailable for %s: %s", symbol, e)
         return
@@ -100,6 +102,12 @@ async def run_periodic_collection(analyzer: MarketAnalyzer) -> None:
         "History collector started: symbols=%s every %s minute(s)",
         symbols, interval_minutes,
     )
+
+    # Do not compete with Render startup, Angel login, instrument-master
+    # warmup and the first browser load. A cold collector run can otherwise
+    # start the same expensive market-data pipeline at exactly the same time
+    # as the first dashboard request.
+    await asyncio.sleep(30)
 
     while True:
         for symbol in symbols:
