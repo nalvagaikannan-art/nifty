@@ -70,9 +70,18 @@ async def lifespan(app: FastAPI):
     
     from app.services.angel_one import angel_session
     if angel_session.is_configured:
-        app.state.angel_warmup_task = asyncio.create_task(
-            angel_session.warmup_instruments()
-        )
+        # FIX (2026-08-26): warmup_instruments() downloads 36MB instrument
+        # master. Running it immediately at startup (same moment as
+        # history_collector first tick + DB init + NSE session) caused a
+        # memory/CPU spike that tripped Render's health-check timeout,
+        # causing the process to restart ~2 min after every deploy.
+        # Delay by 15s so the server is fully up and health-check passes
+        # before the large download begins.
+        async def _delayed_warmup():
+            await asyncio.sleep(15)
+            await angel_session.warmup_instruments()
+
+        app.state.angel_warmup_task = asyncio.create_task(_delayed_warmup())
     else:
         app.state.angel_warmup_task = None
     yield
