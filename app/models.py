@@ -30,3 +30,39 @@ class AnalysisResult(Base):
     analysis_type = Column(String)  # 'ai', 'technical', 'risk'
     result = Column(JSON)
     timestamp = Column(DateTime, server_default=func.now())
+
+class SignalState(Base):
+    __tablename__ = "signal_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, unique=True, index=True, nullable=False)
+    active_side = Column(String, nullable=False, default="NONE")
+    candidate_side = Column(String, nullable=False, default="NONE")
+    confirmations = Column(Integer, nullable=False, default=0)
+    reversal_confirmations = Column(Integer, nullable=False, default=0)
+    lifecycle = Column(String, nullable=False, default="WAIT")
+    last_confirmation_at = Column(DateTime, nullable=True)
+    last_evaluation_at = Column(DateTime, nullable=True)
+    strategy = Column(String, nullable=False, default="WAIT")
+    strategy_score = Column(Float, nullable=False, default=0)
+    margin = Column(Float, nullable=False, default=0)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SignalHistory(Base):
+    __tablename__ = "signal_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    strategy = Column(String, nullable=False)
+    score = Column(Float, nullable=False, default=0)
+    market_state = Column(String, nullable=False, default="UNKNOWN")
+    confidence = Column(Float, nullable=False, default=0)
+    spot = Column(Float, nullable=False, default=0)
+    pcr = Column(Float, nullable=False, default=0)
+    vix = Column(Float, nullable=False, default=0)
+    reversal = Column(Integer, nullable=False, default=0)
+    reversal_type = Column(String, nullable=False, default="")
+    reasons = Column(JSON, nullable=True)
+    timestamp = Column(DateTime, server_default=func.now(), index=True)
+
