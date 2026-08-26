@@ -12,8 +12,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.strategy_engine import generate_option_strategy, generate_price_levels
-from app.services.strategy_history import record_signal, get_history
+from app.services.strategy_history import (
+    record_signal, get_history, load_signal_state, save_signal_state,
+    record_signal_persistent, get_history_persistent,
+)
 from app.services.confluence_engine import run_confluence_engine
+from app.services.decision_engine import apply_persistent_signal_lifecycle
 from app.services.market_regime import classify_market_regime
 from app.services.trade_levels import calculate_trade_levels
 from app.services.risk_engine import assess_risk
@@ -24,7 +28,7 @@ from app.utils.helpers import safe_float, expiry_filter, days_to_expiry as _days
 from app.utils.ai_result_cache import get_ai_analysis
 from app.services.options_greeks import black_scholes_greeks, mid_price, spread_pct
 from app.config import settings
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import logging, math
 
@@ -193,39 +197,21 @@ def _time_filter() -> dict:
 # ── 2E. Anti-Whipsaw (Score Hysteresis) ──────────────────────────────────
 _prev_best: dict = {}  # {symbol: {"strategy": str, "score": int, "ts": float}}
 
-def _anti_whipsaw(symbol: str, new_best: str, new_score: int) -> dict:
-    """
-    Signal 15 seconds-க்கு ஒரு முறை மாறக்கூடாது.
-    Score margin < 15 ஆக இருந்தால் previous strategy தக்கவைக்கும்.
-    Strong breakout (score > 75) மட்டும் immediate reversal அனுமதிக்கும்.
-    """
-    import time
-    prev = _prev_best.get(symbol, {})
+def _anti_whipsaw(symbol: str, new_best: str, new_score: int, persisted_state: dict = None) -> dict:
+    """Restart-safe strategy hysteresis using persisted state."""
+    prev = persisted_state or _prev_best.get(symbol, {})
     prev_strategy = prev.get("strategy", "")
-    prev_score    = prev.get("score", 0)
-    prev_ts       = prev.get("ts", 0)
-    now           = time.time()
-
-    # First signal
+    prev_score = safe_float(prev.get("strategy_score", prev.get("score", 0)))
     if not prev_strategy:
-        _prev_best[symbol] = {"strategy": new_best, "score": new_score, "ts": now}
         return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
-
-    # Strong signal → allow immediate change
+    if new_best == prev_strategy:
+        return {"strategy": new_best, "changed": False, "whipsaw_blocked": False}
     if new_score >= 75:
-        _prev_best[symbol] = {"strategy": new_best, "score": new_score, "ts": now}
-        return {"strategy": new_best, "changed": new_best != prev_strategy,
-                "whipsaw_blocked": False}
-
-    # Score margin check — if margin < 15, keep previous
-    if prev_strategy != new_best and new_score - prev_score < 15:
-        return {"strategy": prev_strategy, "changed": False,
-                "whipsaw_blocked": True,
-                "note": f"Score margin ({new_score - prev_score}) < 15 — keeping {prev_strategy}"}
-
-    _prev_best[symbol] = {"strategy": new_best, "score": new_score, "ts": now}
-    return {"strategy": new_best, "changed": new_best != prev_strategy,
-            "whipsaw_blocked": False}
+        return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
+    if new_score - prev_score < 15:
+        return {"strategy": prev_strategy, "changed": False, "whipsaw_blocked": True,
+                "note": f"Score margin ({new_score - prev_score:.0f}) < 15 — keeping {prev_strategy}"}
+    return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
 
 
 # ── 2F. Market State Classifier ──────────────────────────────────────────
@@ -599,6 +585,15 @@ async def strike_recommendation(
         raise HTTPException(502, detail=f"Market data unavailable: {e}")
 
     dec        = market_data.get("decision", {})
+
+    # Restore the authoritative signal lifecycle from the database before
+    # strategy selection. This survives Render process restarts.
+    persisted_state = await load_signal_state(symbol.upper())
+    dec, persistent_state = apply_persistent_signal_lifecycle(
+        dec, persisted_state, datetime.now(timezone.utc).timestamp()
+    )
+    market_data["decision"] = dec
+
     spot       = market_data.get("spot", {}).get("price", 0)
     max_pain   = market_data.get("max_pain", 0)
     chain      = market_data.get("option_chain", {})
@@ -629,7 +624,7 @@ async def strike_recommendation(
         raw_score = candidates.get(raw_best, raw_score)
 
     # ── Phase 2D: Anti-whipsaw ────────────────────────────────────────────
-    whipsaw_result = _anti_whipsaw(symbol, raw_best, raw_score)
+    whipsaw_result = _anti_whipsaw(symbol, raw_best, raw_score, persistent_state)
     best       = whipsaw_result["strategy"]
     best_score = candidates.get(best, raw_score)
 
@@ -807,12 +802,16 @@ async def strike_recommendation(
                 warnings.append(info["warning"])
 
         # Record signal history
-        sig = record_signal(
+        sig = await record_signal_persistent(
             symbol=symbol, strategy="WAIT", score=candidates["WAIT"],
             market_state=market_state, confidence=dec.get("confidence", 0),
             spot=spot, pcr=market_data.get("pcr", 0), vix=vix,
             reasons=wait_reasons,
         )
+        persistent_state.update({"symbol": symbol.upper(), "strategy": "WAIT",
+                                 "strategy_score": candidates.get("WAIT", 0)})
+        await save_signal_state(persistent_state)
+        history = await get_history_persistent(symbol)
 
         return {
             "symbol":        symbol,
@@ -839,7 +838,7 @@ async def strike_recommendation(
             "time_session":  time_info.get("session", ""),
             "expiry_info":   expiry_info,
             "iv_info":       iv_info,
-            "signal_history": get_history(symbol),
+            "signal_history": history,
             "signal_reversal": sig.get("reversal", False),
         "signal_lifecycle": dec.get("signal_lifecycle", "WAIT"),
         "signal_candidate": dec.get("signal_candidate", "NONE"),
@@ -925,11 +924,15 @@ async def strike_recommendation(
         warnings.append("⚠️ Entry gate: " + v3_gate["reason"])
 
     # Record signal history
-    sig = record_signal(
+    sig = await record_signal_persistent(
         symbol=symbol, strategy=best, score=best_score,
         market_state=market_state, confidence=dec.get("confidence", 0),
         spot=spot, pcr=market_data.get("pcr", 0), vix=vix,
     )
+    persistent_state.update({"symbol": symbol.upper(), "strategy": best,
+                             "strategy_score": best_score})
+    await save_signal_state(persistent_state)
+    history = await get_history_persistent(symbol)
 
     return {
         "symbol":          symbol,
@@ -961,7 +964,7 @@ async def strike_recommendation(
         "iv_info":         iv_info,
         "warnings":        warnings,
         "wait_reasons":    [],
-        "signal_history":  get_history(symbol),
+        "signal_history":  history,
         "signal_reversal": sig.get("reversal", False),
         "signal_lifecycle": dec.get("signal_lifecycle", "WAIT"),
         "signal_candidate": dec.get("signal_candidate", "NONE"),
@@ -987,9 +990,6 @@ async def strike_recommendation(
 
 @router.get("/history/{symbol}")
 async def signal_history(symbol: str):
-    """Last 20 strategy signals for a symbol."""
-    return {
-        "symbol":  symbol,
-        "history": get_history(symbol.upper()),
-        "count":   len(get_history(symbol.upper())),
-    }
+    """Last 20 persisted strategy signals for a symbol."""
+    history = await get_history_persistent(symbol.upper())
+    return {"symbol": symbol.upper(), "history": history, "count": len(history)}
