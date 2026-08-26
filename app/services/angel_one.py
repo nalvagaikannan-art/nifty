@@ -399,9 +399,39 @@ class AngelOneSession:
             if not isinstance(loaded, list) or not loaded:
                 raise AngelOneError("Instrument master download returned no rows")
 
+            # FIX (OOM restarts): the raw file has 150k+ rows across every
+            # NSE/BSE/NFO/MCX/CDS instrument — only ~150-300 of those (the
+            # NIFTY/BANKNIFTY/FINNIFTY index options+futures) are ever read
+            # (see get_option_chain / _resolve_futures_token below). Keeping
+            # all 150k+ dicts in memory was costing several hundred MB per
+            # process on top of FastAPI/uvicorn/httpx — on Render's free
+            # 512MB plan that's enough to get OOM-killed a couple of minutes
+            # after every restart (no traceback in app logs, since the OS
+            # kills the process directly — that's why this looked like a
+            # silent crash-loop). Filtering to just the rows this app
+            # actually queries cuts that memory footprint by ~99% while
+            # keeping every existing lookup (get_option_chain,
+            # _resolve_futures_token) working unchanged, since both only
+            # ever filter on these same fields.
+            _wanted_names = set(self.NFO_SYMBOL_MAP.values())
+            loaded = [
+                r for r in loaded
+                if isinstance(r, dict)
+                and r.get("exch_seg") == "NFO"
+                and r.get("name") in _wanted_names
+                and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+                and r.get("expiry")
+            ]
+            if not loaded:
+                raise AngelOneError(
+                    "Instrument master download returned no matching NIFTY/"
+                    "BANKNIFTY/FINNIFTY rows after filtering"
+                )
+
             self._instruments = loaded
             self._instruments_ts = time.time()
-            logger.info(f"Angel One instrument master cached — {len(loaded)} rows")
+            logger.info(f"Angel One instrument master cached — {len(loaded)} rows (filtered to NIFTY/BANKNIFTY/FINNIFTY)")
+
 
 
 
