@@ -1169,16 +1169,27 @@ var ltAutoInterval = null;
 // retry after a short delay on any failure, so a one-off slow/failed
 // request quietly recovers instead of requiring a manual click.
 function ltFetchJsonRetry(url, retriesLeft){
+  // Never hammer the API after a 429. The previous generic retry retried a
+  // rate-limited request after only 1.5s, which could extend the 429 window
+  // and turn a temporary limit into a request storm.
   if(retriesLeft === undefined) retriesLeft = 1;
   return fetch(url).then(function(r){
-    if(!r.ok){ throw new Error('HTTP ' + r.status); }
+    if(!r.ok){
+      var err = new Error('HTTP ' + r.status);
+      err.status = r.status;
+      err.retryAfter = parseInt(r.headers.get('Retry-After') || '0', 10) || 0;
+      throw err;
+    }
     return r.text().then(function(t){
-      if(!t){ throw new Error('Empty response'); }
+      if(!t){ var e = new Error('Empty response'); e.status = r.status; throw e; }
       return JSON.parse(t);
     });
   }).catch(function(e){
+    // 429 is an explicit server-side throttle. Do not retry automatically.
+    if(e && e.status === 429){ throw e; }
     if(retriesLeft > 0){
-      return new Promise(function(resolve){ setTimeout(resolve, 1500); })
+      var delay = (e && (e.status === 502 || e.status === 503)) ? 4000 : 2000;
+      return new Promise(function(resolve){ setTimeout(resolve, delay); })
         .then(function(){ return ltFetchJsonRetry(url, retriesLeft - 1); });
     }
     throw e;
