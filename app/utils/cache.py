@@ -82,8 +82,23 @@ def async_cache(ttl: int = None):
 
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            key_args = args[1:] if has_self else args
-            key = f"{func.__qualname__}:{key_args}:{kwargs}"
+            # Canonicalize positional/keyword arguments before building the key.
+            # Without this, `get_full_market_overview("NIFTY")` and
+            # `get_full_market_overview("NIFTY", expiry=None)` became TWO cache
+            # entries, so the dashboard, analysis page and history collector
+            # could all launch the same expensive market-data pipeline at once.
+            try:
+                bound = inspect.signature(func).bind(*args, **kwargs)
+                bound.apply_defaults()
+                key_parts = []
+                for name, value in bound.arguments.items():
+                    if has_self and name in ("self", "cls"):
+                        continue
+                    key_parts.append((name, repr(value)))
+                key = f"{func.__qualname__}:{tuple(key_parts)}"
+            except (TypeError, ValueError):
+                key_args = args[1:] if has_self else args
+                key = f"{func.__qualname__}:{key_args}:{kwargs}"
             effective_ttl = ttl or settings.cache_ttl
 
             async def _load_or_fetch():
