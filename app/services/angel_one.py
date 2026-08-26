@@ -166,7 +166,12 @@ class AngelOneSession:
             try:
                 self._obj = SmartConnect(api_key=settings.angel_api_key)
                 totp = self._get_totp()
-                data = self._obj.generateSession(
+                # FIX (event-loop block): generateSession() is a blocking
+                # `requests` call under the hood — run it in a thread so it
+                # doesn't freeze the whole process (and the health check
+                # with it) for the duration of the HTTP round-trip.
+                data = await asyncio.to_thread(
+                    self._obj.generateSession,
                     settings.angel_client_id,
                     settings.angel_password,
                     totp
@@ -181,7 +186,7 @@ class AngelOneSession:
             tokens = data.get("data", {})
             self._auth_token = tokens.get("jwtToken") or tokens.get("accessToken")
             self._refresh_token = tokens.get("refreshToken")
-            self._feed_token = self._obj.getfeedToken()
+            self._feed_token = await asyncio.to_thread(self._obj.getfeedToken)
             self._logged_in = True
             self._login_ts = time.time()
 
@@ -201,7 +206,10 @@ class AngelOneSession:
             if not self._logged_in or not self._obj:
                 return {"status": "not_logged_in"}
             try:
-                resp = self._obj.terminateSession(settings.angel_client_id)
+                # FIX (event-loop block): run in a thread, same as login.
+                resp = await asyncio.to_thread(
+                    self._obj.terminateSession, settings.angel_client_id
+                )
                 logger.info("Angel One logout successful")
             except Exception as e:
                 logger.warning(f"Angel One logout error (ignored): {e}")
@@ -253,8 +261,10 @@ class AngelOneSession:
 
         await self._throttle()
         try:
-            data = self._obj.ltpData(
-                info["exchange"], symbol.upper(), info["token"]
+            # FIX (event-loop block): ltpData() is a blocking `requests`
+            # call — offload to a thread so it doesn't stall the loop.
+            data = await asyncio.to_thread(
+                self._obj.ltpData, info["exchange"], symbol.upper(), info["token"]
             )
         except Exception as e:
             raise AngelOneError(f"LTP fetch failed for {symbol}: {e}")
@@ -295,7 +305,10 @@ class AngelOneSession:
         await self.ensure_session()
         await self._throttle()
         try:
-            data = self._obj.ltpData("NSE", "India VIX", self.INDIA_VIX_TOKEN)
+            # FIX (event-loop block): offload blocking SDK call to a thread.
+            data = await asyncio.to_thread(
+                self._obj.ltpData, "NSE", "India VIX", self.INDIA_VIX_TOKEN
+            )
         except Exception as e:
             raise AngelOneError(f"India VIX LTP fetch failed: {e}")
         if not data or data.get("status") is False:
@@ -638,7 +651,11 @@ class AngelOneSession:
                     # got "Invalid Token" from the raw REST endpoint. Letting
                     # the SDK manage its own auth avoids that mismatch.
                     try:
-                        body = self._obj.getMarketData(mode="FULL", exchangeTokens={"NFO": batch})
+                        # FIX (event-loop block): offload blocking SDK call.
+                        body = await asyncio.to_thread(
+                            self._obj.getMarketData,
+                            mode="FULL", exchangeTokens={"NFO": batch}
+                        )
                     except Exception as e:
                         raise AngelOneError(f"SDK getMarketData failed: {e}")
                 else:
@@ -866,7 +883,11 @@ class AngelOneSession:
         use_sdk = hasattr(self._obj, "getMarketData")
         if use_sdk:
             try:
-                body = self._obj.getMarketData(mode="LTP", exchangeTokens={"NFO": [token]})
+                # FIX (event-loop block): offload blocking SDK call.
+                body = await asyncio.to_thread(
+                    self._obj.getMarketData,
+                    mode="LTP", exchangeTokens={"NFO": [token]}
+                )
                 if isinstance(body, dict) and body.get("status") is not False:
                     data_block = body.get("data", {})
                     fetched = (data_block.get("fetched", [])
@@ -888,7 +909,10 @@ class AngelOneSession:
         if not info.get("tradingsymbol"):
             return None
         try:
-            data = self._obj.ltpData(info["exchange"], info["tradingsymbol"], token)
+            # FIX (event-loop block): offload blocking SDK call.
+            data = await asyncio.to_thread(
+                self._obj.ltpData, info["exchange"], info["tradingsymbol"], token
+            )
         except Exception as e:
             logger.debug(f"Futures ltpData failed for {symbol}: {e}")
             return None
@@ -933,7 +957,10 @@ class AngelOneSession:
             "todate": to_date,
         }
         try:
-            resp = self._obj.getCandleData(params)
+            # FIX (event-loop block): getCandleData() is a blocking
+            # `requests` call — offload to a thread so retries/backoff
+            # below don't freeze the whole process (incl. health checks).
+            resp = await asyncio.to_thread(self._obj.getCandleData, params)
         except Exception as e:
             # "Access denied because of exceeding access rate" can still slip
             # through even with the throttle above (e.g. another request beat
@@ -945,7 +972,7 @@ class AngelOneSession:
                 await asyncio.sleep(3.0 + random.uniform(0.0, 0.75))
                 await self._throttle()
                 try:
-                    resp = self._obj.getCandleData(params)
+                    resp = await asyncio.to_thread(self._obj.getCandleData, params)
                 except Exception as e2:
                     raise AngelOneError(f"Candle data fetch failed: {e2}")
             else:
@@ -983,7 +1010,8 @@ class AngelOneSession:
         await self.ensure_session()
         await self._throttle()
         try:
-            resp = self._obj.position()
+            # FIX (event-loop block): offload blocking SDK call.
+            resp = await asyncio.to_thread(self._obj.position)
         except Exception as e:
             raise AngelOneError(f"Positions fetch failed: {e}")
 
