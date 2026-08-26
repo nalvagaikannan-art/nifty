@@ -604,7 +604,7 @@ class AngelOneSession:
         selected_strikes = set(all_strikes[lo:hi])
 
         selected_rows = [r for r in rows if _strike(r) in selected_strikes]
-        tokens = [r["token"] for r in selected_rows if r.get("token")]
+        tokens = [str(r["token"]) for r in selected_rows if r.get("token")]  # FIX: str() normalize
         if not tokens:
             raise AngelOneError(f"No tokens resolved for {sym} {chosen_expiry}")
 
@@ -691,7 +691,10 @@ class AngelOneSession:
                     if not isinstance(item, dict):
                         logger.warning(f"Skipping non-dict quote item: {type(item).__name__} = {str(item)[:100]}")
                         continue
-                    token = item.get("symbolToken") or item.get("symboltoken")
+                    # FIX (2026-08-26): getMarketData returns "symbolToken" (camelCase)
+                    # but we stored instrument-master "token" as strings. Normalize
+                    # BOTH sides to str so "12345" == "12345" always matches.
+                    token = str(item.get("symbolToken") or item.get("symboltoken") or "")
                     if token:
                         quotes[token] = item
 
@@ -699,7 +702,7 @@ class AngelOneSession:
 
         strike_map: Dict[float, Dict] = {}
         for r in selected_rows:
-            token = r.get("token")
+            token = str(r.get("token") or "")   # FIX: str() to match quotes dict keys
             q = quotes.get(token)
             if not q:
                 continue
@@ -837,19 +840,62 @@ class AngelOneSession:
         isn't configured or the futures token/quote can't be resolved, so
         callers can fall back to an explicit "unavailable" status rather
         than a fabricated number.
+
+        FIX (2026-08-26): AB4046 "Symbol token not found in scrip master
+        cache" — this happened because ltpData() was called with the
+        instrument-master token string directly, but Angel One's scrip-
+        master cache is keyed on a DIFFERENT token format than what the
+        instrument-master file uses for the same contract (especially
+        around expiry rollover). Fix: use getMarketData (same path that
+        works for option-chain quotes) instead of ltpData, since
+        getMarketData uses the NFO token from _instruments and that
+        IS the correct key for the batch-quote endpoint. Falls back
+        to ltpData only when getMarketData is unavailable.
         """
         if not self.is_configured:
             return None
         info = await self._resolve_futures_token(symbol)
-        if not info or not info.get("tradingsymbol"):
+        if not info or not info.get("token"):
             return None
+
+        token = str(info["token"])
         await self._throttle()
+
+        # Prefer getMarketData (batch-quote path) — same token namespace
+        # as option chain, avoids AB4046 scrip-master mismatch with ltpData
+        use_sdk = hasattr(self._obj, "getMarketData")
+        if use_sdk:
+            try:
+                body = self._obj.getMarketData(mode="LTP", exchangeTokens={"NFO": [token]})
+                if isinstance(body, dict) and body.get("status") is not False:
+                    data_block = body.get("data", {})
+                    fetched = (data_block.get("fetched", [])
+                               if isinstance(data_block, dict) else
+                               data_block if isinstance(data_block, list) else [])
+                    for item in fetched:
+                        if isinstance(item, dict):
+                            ltp = safe_float(item.get("ltp", 0))
+                            if ltp > 0:
+                                return {
+                                    "ltp": ltp,
+                                    "expiry": info.get("expiry", ""),
+                                    "tradingsymbol": info.get("tradingsymbol", ""),
+                                }
+            except Exception as e:
+                logger.debug(f"getMarketData futures LTP failed for {symbol}, trying ltpData: {e}")
+
+        # Fallback: ltpData (may hit AB4046 on some contracts — logged at debug)
+        if not info.get("tradingsymbol"):
+            return None
         try:
-            data = self._obj.ltpData(info["exchange"], info["tradingsymbol"], info["token"])
+            data = self._obj.ltpData(info["exchange"], info["tradingsymbol"], token)
         except Exception as e:
-            logger.warning(f"Futures LTP fetch failed for {symbol}: {e}")
+            logger.debug(f"Futures ltpData failed for {symbol}: {e}")
             return None
         if not data or data.get("status") is False:
+            err = (data or {}).get("errorcode", "")
+            if err:
+                logger.debug(f"Futures LTP errorcode {err} for {symbol} — token={token}")
             return None
         ltp_data = data.get("data", {})
         ltp = safe_float(ltp_data.get("ltp", 0))
