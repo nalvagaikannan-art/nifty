@@ -55,7 +55,15 @@ services:
                           # Only needed as an explicit domain list for a non-Render host or a
                           # separately-hosted frontend calling this API cross-origin.
       - key: API_RATE_LIMIT_PER_MINUTE
-        value: "60"
+        # FIX (2026-08-26): dashboard/analysis/terminal/live pages each poll
+        # /api/* independently, and multiple tabs (or a tab + retry burst)
+        # from the same browser share one IP — 60/min was tripping during
+        # normal multi-page use, surfacing as "HTTP 429" in the UI even
+        # though nothing was actually abusive. Raised to give real headroom;
+        # still well short of what would be needed for actual abuse given
+        # Angel One's own upstream throttling already caps how much data
+        # this app can pull per minute regardless of this limit.
+        value: "180"
       # Background history collector (Accuracy page needs this running
       # continuously, not just while a browser tab is open) — see
       # app/services/history_collector.py. Set to "0" to disable.
