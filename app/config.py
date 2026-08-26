@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     )
 
     # Rate limiting
-    api_rate_limit_per_minute: int = Field(60, alias="API_RATE_LIMIT_PER_MINUTE")
+    api_rate_limit_per_minute: int = Field(120, alias="API_RATE_LIMIT_PER_MINUTE")
 
     # Health / monitoring (CODE_REVIEW.md #19/#20) — optional webhook that
     # gets a JSON POST when a data source's block-rate crosses threshold
