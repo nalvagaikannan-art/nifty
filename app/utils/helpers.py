@@ -104,7 +104,7 @@ def expiry_filter(expiry_str: str) -> dict:
         for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
             try:
                 exp_date = datetime.strptime(expiry_str.strip().title(), fmt).date()
-                today    = datetime.now().date()
+                today    = datetime.now(IST).date()   # IST fix — Render server UTC-ல் run ஆகும்
                 days_left = (exp_date - today).days
                 if days_left == 0:
                     return {"is_expiry": True, "days_left": 0,
@@ -132,7 +132,7 @@ def days_to_expiry(expiry_str: str) -> Optional[int]:
     for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
         try:
             exp_date = datetime.strptime(expiry_str.strip().title(), fmt).date()
-            return (exp_date - datetime.now().date()).days
+            return (exp_date - datetime.now(IST).date()).days  # IST fix
         except ValueError:
             continue
     return None
