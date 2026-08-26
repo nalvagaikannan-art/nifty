@@ -414,14 +414,20 @@ class AngelOneSession:
             # _resolve_futures_token) working unchanged, since both only
             # ever filter on these same fields.
             _wanted_names = set(self.NFO_SYMBOL_MAP.values())
-            loaded = [
-                r for r in loaded
-                if isinstance(r, dict)
-                and r.get("exch_seg") == "NFO"
-                and r.get("name") in _wanted_names
-                and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
-                and r.get("expiry")
-            ]
+
+            def _filter(rows):
+                return [
+                    r for r in rows
+                    if isinstance(r, dict)
+                    and r.get("exch_seg") == "NFO"
+                    and r.get("name") in _wanted_names
+                    and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+                    and r.get("expiry")
+                ]
+            # FIX (health-check timeouts): also offload the 151k-row filter
+            # pass to the same thread as the json.loads() above — cheap
+            # individually, but no reason to bring it back onto the loop.
+            loaded = await asyncio.to_thread(_filter, loaded)
             if not loaded:
                 raise AngelOneError(
                     "Instrument master download returned no matching NIFTY/"
@@ -500,7 +506,17 @@ class AngelOneSession:
                 f"Angel One instrument master downloaded via {(total_size // CHUNK) + 1} "
                 f"Range chunks — {len(buf)} bytes"
             )
-            return json.loads(buf)
+            # FIX (health-check timeouts): json.loads() on a ~35MB payload is
+            # pure-Python CPU work — it was running directly on the event
+            # loop thread, so for however long parsing took (worse under
+            # Render's throttled free-tier CPU), the loop couldn't answer
+            # ANY other request, including the "/" health check. Render logs
+            # this as "HTTP health check failed (timed out after 5 seconds)"
+            # — confirmed against Render's Events tab, which shows failures
+            # at the exact UTC-vs-IST-adjusted timestamps this was hit.
+            # Offloading to a thread lets the loop keep serving the health
+            # check (and other requests) while the parse runs.
+            return await asyncio.to_thread(json.loads, buf)
 
     async def _download_instrument_master_whole(self):
         """
@@ -518,7 +534,7 @@ class AngelOneSession:
                         resp.raise_for_status()
                         async for chunk in resp.aiter_bytes():
                             chunks.extend(chunk)
-                loaded = json.loads(chunks)
+                loaded = await asyncio.to_thread(json.loads, chunks)
                 break
             except Exception as e:
                 last_err = e
