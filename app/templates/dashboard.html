@@ -37,6 +37,102 @@
   --lt-radius-sm: 8px;
 }
 
+/* ══════════════════════════════════════
+   POSITION MONITOR — Active Trade Panel
+   ══════════════════════════════════════ */
+#lt-pos-monitor {
+  margin: 8px 12px 0;
+  display: none; /* JS-ல் open trade இருந்தால் show */
+}
+.lt-pos-card {
+  background: #fff;
+  border: 2px solid var(--lt-border);
+  border-radius: var(--lt-radius);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  position: relative;
+  transition: border-color .2s;
+}
+.lt-pos-card.pos-profit  { border-color: var(--lt-green-bd); background: var(--lt-green-bg); }
+.lt-pos-card.pos-loss    { border-color: var(--lt-red-bd);   background: var(--lt-red-bg); }
+.lt-pos-card.pos-sl-warn { border-color: var(--lt-red); border-width: 2px;
+                            animation: ltposblink 1s infinite; }
+.lt-pos-card.pos-tgt-hit { border-color: var(--lt-green); border-width: 2px;
+                            animation: ltposblink 1s infinite; }
+@keyframes ltposblink {
+  0%,100%{ opacity:1; } 50%{ opacity:.7; }
+}
+.lt-pos-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.lt-pos-title {
+  font-size: 14px; font-weight: 800; color: var(--lt-text);
+  display: flex; align-items: center; gap: 6px;
+}
+.lt-pos-badge {
+  font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 20px;
+  background: var(--lt-green-bg); color: var(--lt-green); border: 1px solid var(--lt-green-bd);
+}
+.lt-pos-badge.loss { background: var(--lt-red-bg); color: var(--lt-red); border-color: var(--lt-red-bd); }
+.lt-pos-close-btn {
+  font-size: 11px; padding: 4px 10px; border-radius: 6px; border: none; cursor: pointer;
+  background: var(--lt-red-bg); color: var(--lt-red); font-weight: 700;
+}
+.lt-pos-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
+  margin-bottom: 8px;
+}
+.lt-pos-cell { text-align: center; }
+.lt-pos-cell-label { font-size: 10px; color: var(--lt-text3); font-weight: 600; text-transform: uppercase; }
+.lt-pos-cell-val   { font-size: 14px; font-weight: 800; color: var(--lt-text); margin-top: 1px; }
+.lt-pos-cell-val.green { color: var(--lt-green); }
+.lt-pos-cell-val.red   { color: var(--lt-red); }
+.lt-pos-alert {
+  font-size: 12px; font-weight: 700; padding: 6px 10px; border-radius: 8px;
+  margin-top: 4px; display: none;
+}
+.lt-pos-alert.sl  { background: var(--lt-red-bg); color: var(--lt-red); border: 1px solid var(--lt-red-bd); display: block; }
+.lt-pos-alert.t1  { background: var(--lt-green-bg); color: var(--lt-green); border: 1px solid var(--lt-green-bd); display: block; }
+.lt-pos-alert.t2  { background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; display: block; }
+.lt-pos-alert.wait { background: var(--lt-yellow-bg); color: var(--lt-yellow); border: 1px solid var(--lt-yellow-bd); display: block; }
+.lt-pos-progress {
+  height: 5px; border-radius: 3px; background: var(--lt-border);
+  margin-top: 8px; overflow: hidden;
+}
+.lt-pos-progress-fill {
+  height: 100%; border-radius: 3px; transition: width .5s;
+  background: var(--lt-green);
+}
+.lt-pos-monitor-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.lt-pos-monitor-title {
+  font-size: 12px; font-weight: 700; color: var(--lt-text3); text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.lt-pos-add-btn {
+  font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--lt-border2);
+  background: #fff; cursor: pointer; color: var(--lt-blue); font-weight: 700;
+}
+/* Quick-add form */
+#lt-pos-add-form {
+  background: var(--lt-gray-bg); border: 1px solid var(--lt-border);
+  border-radius: var(--lt-radius-sm); padding: 10px 12px; margin-bottom: 8px; display: none;
+}
+.lt-pos-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 6px; }
+.lt-pos-form-row.three { grid-template-columns: 1fr 1fr 1fr; }
+.lt-pos-form-label { font-size: 10px; font-weight: 700; color: var(--lt-text3); margin-bottom: 2px; }
+.lt-pos-form-input {
+  width: 100%; padding: 5px 8px; border: 1px solid var(--lt-border2);
+  border-radius: 6px; font-size: 13px; background: #fff;
+}
+.lt-pos-form-save {
+  width: 100%; padding: 7px; border: none; border-radius: 8px;
+  background: var(--lt-green); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer;
+}
+
 /* ── Root override — light on this page ── */
 #lt-root {
   background: var(--lt-bg);
@@ -761,6 +857,59 @@
     <!-- ── WARNINGS ── -->
     <div id="lt-warnings"></div>
 
+    <!-- ══ POSITION MONITOR ══ -->
+    <div id="lt-pos-monitor">
+      <div class="lt-pos-monitor-header">
+        <span class="lt-pos-monitor-title">📊 என் Active Trades</span>
+        <button class="lt-pos-add-btn" onclick="ltPosToggleAdd()">+ புதிய Trade</button>
+      </div>
+
+      <!-- Quick-add form (hidden by default) -->
+      <div id="lt-pos-add-form">
+        <div class="lt-pos-form-row">
+          <div>
+            <div class="lt-pos-form-label">Strike</div>
+            <input class="lt-pos-form-input" id="pf-strike" type="number" placeholder="25000">
+          </div>
+          <div>
+            <div class="lt-pos-form-label">CE / PE</div>
+            <select class="lt-pos-form-input" id="pf-type">
+              <option value="CE">CE (Call)</option>
+              <option value="PE">PE (Put)</option>
+            </select>
+          </div>
+        </div>
+        <div class="lt-pos-form-row three">
+          <div>
+            <div class="lt-pos-form-label">Entry ₹</div>
+            <input class="lt-pos-form-input" id="pf-entry" type="number" placeholder="120">
+          </div>
+          <div>
+            <div class="lt-pos-form-label">Stop Loss ₹</div>
+            <input class="lt-pos-form-input" id="pf-sl" type="number" placeholder="80">
+          </div>
+          <div>
+            <div class="lt-pos-form-label">Target ₹</div>
+            <input class="lt-pos-form-input" id="pf-t1" type="number" placeholder="180">
+          </div>
+        </div>
+        <div class="lt-pos-form-row">
+          <div>
+            <div class="lt-pos-form-label">Lots</div>
+            <input class="lt-pos-form-input" id="pf-lots" type="number" value="1" min="1" max="10">
+          </div>
+          <div>
+            <div class="lt-pos-form-label">Target 2 ₹ (optional)</div>
+            <input class="lt-pos-form-input" id="pf-t2" type="number" placeholder="220">
+          </div>
+        </div>
+        <button class="lt-pos-form-save" onclick="ltPosSave()">✓ Trade சேமி & Monitor</button>
+      </div>
+
+      <!-- Active trade cards rendered here by JS -->
+      <div id="lt-pos-cards"></div>
+    </div>
+
     <!-- DESKTOP GRID START -->
     <div class="lt-desktop-grid">
 
@@ -884,6 +1033,12 @@
             <div class="lt-level-val tgt" id="lt-t2">--</div>
           </div>
         </div>
+        <!-- Quick track button -->
+        <button id="lt-track-btn" style="display:none;width:100%;margin-top:8px;padding:7px;
+          border:none;border-radius:8px;background:var(--lt-green);color:#fff;
+          font-weight:700;font-size:12px;cursor:pointer;">
+          📌 இந்த Trade Track பண்ணு
+        </button>
       </div>
 
       <!-- NO TRADE triggers -->
@@ -1100,6 +1255,7 @@ function ltRefresh(){
       ltRenderTimeframes(d);
       ltRenderWarnings(d);
       ltRenderDataHealth(d);
+      ltPosRender(d);   // Position monitor — latest strikes LTP update
       document.getElementById('lt-updated').textContent = 'Updated: ' + ltNow();
     })
     .catch(function(e){
@@ -1207,6 +1363,40 @@ function ltRenderSignal(d){
     document.getElementById('lt-sl').textContent  = (firstStrike && firstStrike.sl)  ? '₹' + fmtN(firstStrike.sl, 1)  : (tl && tl.option_sl) ? '₹' + fmtN(tl.option_sl, 1) : '--';
     document.getElementById('lt-t1').textContent  = (firstStrike && firstStrike.t1)  ? '₹' + fmtN(firstStrike.t1, 1)  : (tl && tl.option_t1) ? '₹' + fmtN(tl.option_t1, 1) : '--';
     document.getElementById('lt-t2').textContent  = (firstStrike && firstStrike.t2)  ? '₹' + fmtN(firstStrike.t2, 1)  : (tl && tl.option_t2) ? '₹' + fmtN(tl.option_t2, 1) : '--';
+
+    // Quick-track button: signal suggestion → position monitor
+    var trackBtn = document.getElementById('lt-track-btn');
+    if(trackBtn && firstStrike && firstStrike.entry_price && firstStrike.sl && firstStrike.t1){
+      trackBtn.style.display = 'block';
+      trackBtn.onclick = function(){
+        var already = ltPosTrades.find(function(p){
+          return p.strike === firstStrike.strike && p.type === firstStrike.type;
+        });
+        if(already){ alert('இந்த strike ஏற்கனவே monitor-ல் இருக்கு'); return; }
+        var lotMap = {NIFTY:50, BANKNIFTY:15, FINNIFTY:40};
+        var qty = 1 * (lotMap[ltSym]||50);
+        var t = {
+          id: Date.now().toString(36),
+          symbol: ltSym,
+          strike: firstStrike.strike,
+          type: firstStrike.type,
+          entry: firstStrike.entry_price,
+          sl: firstStrike.sl,
+          t1: firstStrike.t1,
+          t2: firstStrike.t2 || 0,
+          lots: 1, qty: qty,
+          openedAt: new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
+          ltp: firstStrike.ltp || firstStrike.entry_price
+        };
+        ltPosTrades.push(t);
+        localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+        ltPosRender(d);
+        trackBtn.textContent = '✓ Tracking!';
+        setTimeout(function(){ trackBtn.textContent = '📌 இந்த Trade Track பண்ணு'; }, 2000);
+      };
+    } else if(trackBtn){
+      trackBtn.style.display = 'none';
+    }
   } else if(isTradeSignal){
     // Backend picked BUY/SELL CE/PE but sent no trade_levels/strikes yet
     // (e.g. mid-refresh, option chain still loading) — don't silently show
@@ -1545,8 +1735,202 @@ function ltShowWarn(type, msg){
   box.innerHTML += '<div class="lt-warn '+type+'">'+ltEsc(msg)+'</div>';
 }
 
-// ── Auto refresh every 30s ──
-ltAutoInterval = setInterval(function(){ ltRefresh(); }, 30000);
+// ══════════════════════════════════════════════════════════
+// POSITION MONITOR
+// LocalStorage-ல் save ஆகும் — paper-trade API optional
+// ══════════════════════════════════════════════════════════
+
+var ltPosTrades = [];          // [{id, symbol, strike, type, entry, sl, t1, t2, lots, qty, openedAt}]
+var ltPosAddOpen = false;
+var LT_POS_KEY = 'niftyai_pos_v1';
+
+function ltPosLoad(){
+  try {
+    ltPosTrades = JSON.parse(localStorage.getItem(LT_POS_KEY) || '[]');
+  } catch(e){ ltPosTrades = []; }
+}
+
+function ltPosSave(){
+  var strike = parseFloat(document.getElementById('pf-strike').value);
+  var type   = document.getElementById('pf-type').value;
+  var entry  = parseFloat(document.getElementById('pf-entry').value);
+  var sl     = parseFloat(document.getElementById('pf-sl').value);
+  var t1     = parseFloat(document.getElementById('pf-t1').value);
+  var t2     = parseFloat(document.getElementById('pf-t2').value) || 0;
+  var lots   = parseInt(document.getElementById('pf-lots').value) || 1;
+
+  if(!strike || !entry || !sl || !t1){
+    alert('Strike, Entry, SL, Target ஆகியவை தேவை'); return;
+  }
+  if(sl >= entry){ alert('SL < Entry இருக்கணும்'); return; }
+  if(t1 <= entry){ alert('Target > Entry இருக்கணும்'); return; }
+
+  var lotMap = {NIFTY:50, BANKNIFTY:15, FINNIFTY:40};
+  var qty = lots * (lotMap[ltSym] || 50);
+
+  var trade = {
+    id: Date.now().toString(36),
+    symbol: ltSym,
+    strike: strike,
+    type: type,
+    entry: entry,
+    sl: sl,
+    t1: t1,
+    t2: t2 || 0,
+    lots: lots,
+    qty: qty,
+    openedAt: new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'}),
+    ltp: entry   // initial LTP = entry
+  };
+  ltPosTrades.push(trade);
+  localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+
+  // Paper trade API-க்கும் அனுப்பு (optional — fail-ஆனாலும் local monitor தொடரும்)
+  fetch('/api/paper-trade/open', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      symbol: ltSym, strike: strike, option_type: type,
+      entry_price: entry, stop_loss: sl, target_1: t1, target_2: t2||t1,
+      lots: lots, quantity: qty,
+      side: 'BUY'
+    })
+  }).catch(function(){});  // silent — local monitor is independent
+
+  // form reset
+  document.getElementById('pf-strike').value = '';
+  document.getElementById('pf-entry').value  = '';
+  document.getElementById('pf-sl').value     = '';
+  document.getElementById('pf-t1').value     = '';
+  document.getElementById('pf-t2').value     = '';
+  document.getElementById('pf-lots').value   = '1';
+  document.getElementById('lt-pos-add-form').style.display = 'none';
+  ltPosAddOpen = false;
+
+  ltPosRender(null);  // first render with no LTP yet
+}
+
+function ltPosToggleAdd(){
+  ltPosAddOpen = !ltPosAddOpen;
+  document.getElementById('lt-pos-add-form').style.display = ltPosAddOpen ? 'block' : 'none';
+  // auto-fill strike from current suggestion
+  if(ltPosAddOpen && ltLastData){
+    var strikes = ltLastData.strikes || [];
+    if(strikes.length){
+      document.getElementById('pf-strike').value = strikes[0].strike || '';
+      document.getElementById('pf-type').value   = strikes[0].type  || 'CE';
+      if(strikes[0].entry_price) document.getElementById('pf-entry').value = strikes[0].entry_price;
+      if(strikes[0].sl)          document.getElementById('pf-sl').value    = strikes[0].sl;
+      if(strikes[0].t1)          document.getElementById('pf-t1').value    = strikes[0].t1;
+      if(strikes[0].t2)          document.getElementById('pf-t2').value    = strikes[0].t2;
+    }
+  }
+}
+
+function ltPosRemove(id){
+  ltPosTrades = ltPosTrades.filter(function(t){ return t.id !== id; });
+  localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+  ltPosRender(null);
+}
+
+// currentSpot: latest NIFTY spot price (to derive approx option LTP movement direction)
+// currentStrikes: d.strikes array from last API response (has real LTP per strike)
+function ltPosRender(apiData){
+  var mon = document.getElementById('lt-pos-monitor');
+  var cards = document.getElementById('lt-pos-cards');
+  if(!ltPosTrades.length){ mon.style.display='none'; return; }
+  mon.style.display = 'block';
+
+  // Update LTP from latest API response strikes
+  if(apiData){
+    var strikesArr = (apiData.strikes || (ltLastData && ltLastData.strikes) || []);
+    ltPosTrades.forEach(function(t){
+      var matched = strikesArr.find(function(s){
+        return s.strike === t.strike && s.type === t.type;
+      });
+      if(matched && matched.ltp) t.ltp = matched.ltp;
+    });
+    localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+  }
+
+  var html = '';
+  ltPosTrades.forEach(function(t){
+    var ltp    = t.ltp || t.entry;
+    var pnl    = (ltp - t.entry) * t.qty;
+    var pnlPct = ((ltp - t.entry) / t.entry * 100);
+    var isProfit = pnl >= 0;
+
+    // Progress to target (0% = entry, 100% = T1)
+    var toT1 = t.t1 - t.entry;
+    var dist  = Math.max(0, Math.min(ltp - t.entry, toT1));
+    var prog  = toT1 > 0 ? Math.round(dist / toT1 * 100) : 0;
+    var progColor = prog >= 80 ? 'var(--lt-green)' : prog >= 40 ? '#F59E0B' : 'var(--lt-red)';
+
+    // Alert status
+    var alertCls  = '';
+    var alertMsg  = '';
+    var cardExtra = '';
+    var slPct = ((ltp - t.sl) / (t.entry - t.sl) * 100);  // 0% = at SL, 100% = at entry
+
+    if(ltp <= t.sl){
+      alertCls  = 'sl';
+      alertMsg  = '🔴 STOP LOSS அடைந்துவிட்டது! ₹' + fmtN(t.sl,1) + ' — உடனே Exit பண்ணவும்!';
+      cardExtra = 'pos-sl-warn';
+    } else if(t.t2 && ltp >= t.t2){
+      alertCls  = 't2';
+      alertMsg  = '🎯 TARGET 2 அடைந்தது! ₹' + fmtN(t.t2,1) + ' — முழு Profit Book பண்ணலாம்!';
+      cardExtra = 'pos-tgt-hit';
+    } else if(ltp >= t.t1){
+      alertCls  = 't1';
+      alertMsg  = '✅ TARGET 1 அடைந்தது! ₹' + fmtN(t.t1,1) + ' — பாதி Profit Book / SL ஐ Entry-க்கு Shift பண்ணவும்';
+      cardExtra = 'pos-tgt-hit';
+    } else if(slPct < 25){
+      alertCls  = 'sl';
+      alertMsg  = '⚠️ SL அருகில் இருக்கு! ₹' + fmtN(ltp,1) + ' → SL: ₹' + fmtN(t.sl,1) + ' — கவனமாக இருங்கள்';
+      cardExtra = '';
+    } else if(prog >= 60){
+      alertCls  = 'wait';
+      alertMsg  = '📈 T1-க்கு ' + prog + '% வந்துவிட்டோம் — Trail SL பண்ணலாம்';
+    }
+
+    html += '<div class="lt-pos-card ' + (cardExtra||'') + ' ' + (isProfit?'pos-profit':'pos-loss') + '">';
+    html += '<div class="lt-pos-header">';
+    html += '<div class="lt-pos-title">';
+    html += '<span>' + ltEsc(t.symbol) + ' ' + fmtN(t.strike,0) + ' ' + ltEsc(t.type) + '</span>';
+    html += '<span class="lt-pos-badge' + (isProfit?'':' loss') + '">'
+          + (pnl>=0?'+':'') + '₹' + fmtN(Math.round(pnl),0) + ' ('
+          + (pnlPct>=0?'+':'') + fmtN(pnlPct,1) + '%)</span>';
+    html += '</div>';
+    html += '<button class="lt-pos-close-btn" onclick="ltPosRemove(\'' + t.id + '\')">✕ Close</button>';
+    html += '</div>';
+
+    html += '<div class="lt-pos-grid">';
+    html += '<div class="lt-pos-cell"><div class="lt-pos-cell-label">Entry</div><div class="lt-pos-cell-val">₹' + fmtN(t.entry,1) + '</div></div>';
+    html += '<div class="lt-pos-cell"><div class="lt-pos-cell-label">CMP</div><div class="lt-pos-cell-val ' + (isProfit?'green':'red') + '">₹' + fmtN(ltp,1) + '</div></div>';
+    html += '<div class="lt-pos-cell"><div class="lt-pos-cell-label">SL</div><div class="lt-pos-cell-val red">₹' + fmtN(t.sl,1) + '</div></div>';
+    html += '<div class="lt-pos-cell"><div class="lt-pos-cell-label">Target</div><div class="lt-pos-cell-val green">₹' + fmtN(t.t1,1) + (t.t2?' / ₹'+fmtN(t.t2,1):'') + '</div></div>';
+    html += '</div>';
+
+    // Progress bar
+    html += '<div class="lt-pos-progress"><div class="lt-pos-progress-fill" style="width:' + Math.max(0,prog) + '%;background:' + progColor + ';"></div></div>';
+
+    // Alert
+    html += '<div class="lt-pos-alert ' + alertCls + '">' + ltEsc(alertMsg) + '</div>';
+
+    html += '<div style="font-size:10px;color:var(--lt-text3);margin-top:4px;">'
+          + ltEsc(t.lots) + ' lot · ' + ltEsc(t.qty) + ' qty · Entry: ' + ltEsc(t.openedAt) + '</div>';
+    html += '</div>';
+  });
+
+  cards.innerHTML = html;
+}
+
+// ── Position monitor initial load ──
+ltPosLoad();
+ltPosRender(null);
+
+// ── Auto refresh every 60s (throttle load குறைக்க — 30s-ல் Angel One queue stack ஆகும்) ──
+ltAutoInterval = setInterval(function(){ ltRefresh(); }, 60000);
 
 // ── Initial load ──
 ltRefresh();
