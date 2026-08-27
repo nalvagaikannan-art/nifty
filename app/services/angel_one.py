@@ -106,19 +106,34 @@ class AngelOneSession:
         # see _MIN_CALL_INTERVAL comment above for why this exists.
         self._rate_lock = asyncio.Lock()
         self._last_call_ts: float = 0.0
+        # BUG FIX (restored — was dropped without explanation and is not
+        # covered by any comment elsewhere in this file, unlike every other
+        # intentional behavior change here): when one concurrent call hits
+        # Angel One's "exceeding access rate" error, every OTHER in-flight
+        # call sharing this session needs to know about it too, or they will
+        # walk straight into the same rate limit a few hundred ms later
+        # (asyncio.gather() fan-out is exactly the case _throttle()'s own
+        # docstring says this class exists to protect). Without this shared
+        # cooldown, only the one call that failed backs off — the rest just
+        # see _last_call_ts and think they're clear.
+        self._rate_limit_cooldown_until: float = 0.0
 
     async def _throttle(self) -> None:
         """
         Block until at least _MIN_CALL_INTERVAL seconds have passed since the
-        last Angel One API call. Call this immediately before every blocking
-        SmartAPI SDK call (ltpData, getCandleData, getMarketData, position,
-        placeOrder, etc). Using one lock across all methods means concurrent
-        calls from asyncio.gather() queue up and space themselves out instead
-        of all firing at once.
+        last Angel One API call, AND until any active rate-limit cooldown
+        (set by a sibling call that just got rate-limited) has cleared. Call
+        this immediately before every blocking SmartAPI SDK call (ltpData,
+        getCandleData, getMarketData, position, placeOrder, etc). Using one
+        lock across all methods means concurrent calls from asyncio.gather()
+        queue up and space themselves out instead of all firing at once.
         """
         async with self._rate_lock:
             now = time.time()
-            wait = _MIN_CALL_INTERVAL - (now - self._last_call_ts)
+            wait = max(
+                _MIN_CALL_INTERVAL - (now - self._last_call_ts),
+                self._rate_limit_cooldown_until - now,
+            )
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_call_ts = time.time()
@@ -1015,7 +1030,10 @@ class AngelOneSession:
             # latency to the caller.
             if "exceeding access rate" in str(e).lower() or "access denied" in str(e).lower():
                 logger.warning(f"Angel One rate limit hit for {label or token}, retrying once after backoff")
-                await asyncio.sleep(3.0 + random.uniform(0.0, 0.75))
+                # Broadcast the cooldown to every other concurrent caller
+                # (see _rate_limit_cooldown_until above) before sleeping.
+                self._rate_limit_cooldown_until = time.time() + 8.0
+                await asyncio.sleep(8.0 + random.uniform(0.0, 1.0))
                 await self._throttle()
                 try:
                     resp = await asyncio.to_thread(self._obj.getCandleData, params)
