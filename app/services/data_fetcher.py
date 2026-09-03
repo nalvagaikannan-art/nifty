@@ -489,8 +489,8 @@ class DataFetcher:
 
         interval = interval.upper()
         span_days = {
-            "ONE_MINUTE": 2, "THREE_MINUTE": 3, "FIVE_MINUTE": 5,
-            "FIFTEEN_MINUTE": 10, "THIRTY_MINUTE": 15, "ONE_HOUR": 20,
+            "ONE_MINUTE": 2, "THREE_MINUTE": 3, "FIVE_MINUTE": 30,
+            "FIFTEEN_MINUTE": 30, "THIRTY_MINUTE": 30, "ONE_HOUR": 60,
             "ONE_DAY": 90,
         }.get(interval, 5)
 
@@ -534,6 +534,7 @@ class DataFetcher:
             return {"available": False, "reason": "no candles returned"}
 
         candles = candles[-bars:]
+        opens   = [safe_float(c.get("open"))  for c in candles]
         highs   = [safe_float(c.get("high"))  for c in candles]
         lows    = [safe_float(c.get("low"))   for c in candles]
         closes  = [safe_float(c.get("close")) for c in candles]
@@ -545,17 +546,40 @@ class DataFetcher:
                 fut_candles = await angel_session.get_futures_candle_data(
                     symbol, interval=interval, from_date=from_str, to_date=to_str
                 )
-                fut_candles = fut_candles[-bars:]
-                fut_volumes = [safe_int(c.get("volume", 0)) for c in fut_candles]
-                if fut_volumes and any(fut_volumes) and len(fut_volumes) == len(closes):
-                    volumes = fut_volumes
+
+                # Index and futures candle counts can differ slightly.
+                # Match futures volume by timestamp instead of requiring
+                # identical candle counts.
+                fut_volume_by_ts = {
+                    c.get("timestamp") or c.get("date"): safe_int(c.get("volume", 0))
+                    for c in fut_candles
+                    if (c.get("timestamp") or c.get("date"))
+                }
+
+                aligned_volumes = [
+                    fut_volume_by_ts.get(ts, 0)
+                    for ts in timestamps
+                ]
+
+                if any(aligned_volumes):
+                    volumes = aligned_volumes
+                    logger.debug(
+                        f"Using futures volume proxy for {symbol} {interval}: "
+                        f"matched={sum(1 for v in aligned_volumes if v)} "
+                        f"of {len(aligned_volumes)} candles"
+                    )
+
             except Exception as e:
-                logger.debug(f"Futures volume proxy unavailable for {symbol} {interval}: {e}")
+                logger.debug(
+                    f"Futures volume proxy unavailable for "
+                    f"{symbol} {interval}: {e}"
+                )
 
         return {
             "available": True,
             "interval": interval,
-            "highs": highs, "lows": lows, "closes": closes, "volumes": volumes,
+            "opens": opens, "highs": highs, "lows": lows,
+            "closes": closes, "volumes": volumes,
             "timestamps": timestamps,
             "bar_count": len(closes),
             "data_source": "angel_one_intraday",
@@ -577,7 +601,7 @@ class DataFetcher:
         interval = interval.upper()
         kite_interval = self._ZERODHA_INTERVAL_MAP.get(interval, "5minute")
         span_days = {
-            "ONE_MINUTE": 2, "FIVE_MINUTE": 5, "FIFTEEN_MINUTE": 10,
+            "ONE_MINUTE": 2, "FIVE_MINUTE": 25, "FIFTEEN_MINUTE": 25,
             "THIRTY_MINUTE": 15, "ONE_HOUR": 20, "ONE_DAY": 90,
         }.get(interval, 5)
 

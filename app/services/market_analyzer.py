@@ -4,6 +4,7 @@ MarketAnalyzer — Full pipeline:
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -87,19 +88,33 @@ class MarketAnalyzer:
         # — previously a single failed task cancelled every other task in
         # the gather, so option-chain failing meant the dashboard showed
         # nothing at all even though spot price was available.
+        import time
+
+        async def _timed(label, coro):
+            t0 = time.perf_counter()
+            try:
+                return await coro
+            finally:
+                logger.info(
+                    "market overview component timing: symbol=%s component=%s elapsed=%.3fs",
+                    symbol,
+                    label,
+                    time.perf_counter() - t0,
+                )
+
         (
             spot, chain, vix, breadth, hist, global_snap, fii_dii,
             multi_tf, futures_data,
         ) = await asyncio.gather(
-            self.fetcher.get_spot(symbol),
-            self._safe_option_chain(symbol, expiry),
-            self._safe_volatility(),
-            self._safe_breadth(),
-            self._safe_historical(symbol),
-            self._safe_global_market(),
-            self._safe_fii_dii(),
-            self._safe_multi_timeframe(symbol),
-            self._safe_futures_premium(symbol),
+            _timed("spot", self.fetcher.get_spot(symbol)),
+            _timed("option_chain", self._safe_option_chain(symbol, expiry)),
+            _timed("volatility", self._safe_volatility()),
+            _timed("breadth", self._safe_breadth()),
+            _timed("historical", self._safe_historical(symbol)),
+            _timed("global_market", self._safe_global_market()),
+            _timed("fii_dii", self._safe_fii_dii()),
+            _timed("multi_timeframe", self._safe_multi_timeframe(symbol)),
+            _timed("futures_premium", self._safe_futures_premium(symbol)),
         )
 
         # ── 2. Option chain analysis ──────────────────────────────────────
@@ -256,68 +271,243 @@ class MarketAnalyzer:
 
     async def _safe_multi_timeframe(self, symbol: str) -> Dict:
         """
-        Real 5-minute / 15-minute / 1-hour OHLC candles + indicators per
-        timeframe (see technical_indicators.compute_from_ohlc), instead of
-        applying one set of daily-close-derived numbers to all three labels
-        and letting the AI guess "5min=UP/15min=DOWN/1hr=UP" from data it
-        never actually saw at that resolution.
+        Fetch one real 5-minute OHLCV stream from the broker and derive
+        15-minute and 1-hour candles locally.
 
-        Each timeframe is independently marked available/unavailable — if
-        Angel One isn't configured, every frame honestly reports
-        "unavailable" instead of a fabricated trend guess.
+        Derived candles are timestamp/session aligned to the NSE 09:15
+        trading-session anchor. Incomplete or non-contiguous source
+        buckets are skipped so overnight/session gaps cannot create
+        false 15-minute or 1-hour candles.
         """
-        intervals = {"5min": "FIVE_MINUTE", "15min": "FIFTEEN_MINUTE", "1hr": "ONE_HOUR"}
-        try:
-            # Sequential fetch: avoids Angel One AB1018 rate-limit when
-            # 5min, 15min and 1hr are requested together.
-            # PERF FIX: the sleep only needs to happen BETWEEN calls to
-            # space out the rate limit — sleeping after the LAST call too
-            # (the old code did this unconditionally every iteration) added
-            # a flat 2.2s of dead time to every single Analysis-page load
-            # for no benefit, since nothing else in this function calls the
-            # broker afterwards.
-            interval_list = list(intervals.values())
-            results = []
-            for i, interval in enumerate(interval_list):
-                try:
-                    results.append(
-                        await self.fetcher.get_intraday_ohlc(symbol, interval=interval, bars=100)
-                    )
-                except Exception as ex:
-                    results.append(ex)
-                if i < len(interval_list) - 1:
-                    await asyncio.sleep(2.2)
-        except Exception as e:
-            logger.warning(f"Multi-timeframe fetch failed for {symbol}: {e}")
-            results = [Exception(str(e))] * len(intervals)
+        unavailable = {
+            "5min": {"data_source": "unavailable", "trend": "unavailable"},
+            "15min": {"data_source": "unavailable", "trend": "unavailable"},
+            "1hr": {"data_source": "unavailable", "trend": "unavailable"},
+        }
 
-        out: Dict = {}
-        for (label, _interval), res in zip(intervals.items(), results):
-            if isinstance(res, Exception) or not res or not res.get("available"):
-                out[label] = {"data_source": "unavailable", "trend": "unavailable"}
-                continue
-            ind = self.tech.compute_from_ohlc(
-                res["highs"], res["lows"], res["closes"], res.get("volumes")
+        try:
+            res5 = await self.fetcher.get_intraday_ohlc(
+                symbol, interval="FIVE_MINUTE", bars=1200
             )
-            closes = res["closes"]
-            if len(closes) >= 2 and ind.get("ema20", 0) > 0:
-                last = closes[-1]
-                trend = "up" if last > ind["ema20"] and ind.get("adx", 0) >= 15 and ind.get("di_plus", 0) > ind.get("di_minus", 0) \
-                    else "down" if last < ind["ema20"] and ind.get("adx", 0) >= 15 and ind.get("di_minus", 0) > ind.get("di_plus", 0) \
-                    else "sideways"
-            else:
-                trend = "sideways"
-            # BUG FIX: was hardcoded "angel_one_intraday" even when Zerodha
-            # provided the candles (get_intraday_ohlc tries Angel One first,
-            # Zerodha second — the actual source is in res["data_source"]).
-            out[label] = {
-                "data_source": res.get("data_source", "angel_one_intraday"),
-                "trend": trend,
-                "indicators": ind,
-                "bar_count": res.get("bar_count", 0),
-                "last_close": closes[-1] if closes else 0,
+
+            if not res5 or not res5.get("available"):
+                return unavailable
+
+            highs = res5.get("highs", [])
+            lows = res5.get("lows", [])
+            closes = res5.get("closes", [])
+            volumes = res5.get("volumes", [])
+            timestamps = res5.get("timestamps", [])
+
+            n = min(len(highs), len(lows), len(closes), len(timestamps))
+            if n <= 0:
+                return unavailable
+
+            volumes_ok = len(volumes) >= n
+            rows = []
+
+            for i in range(n):
+                ts_raw = timestamps[i]
+                try:
+                    if not ts_raw:
+                        continue
+
+                    ts_text = str(ts_raw).strip()
+                    if ts_text.endswith("Z"):
+                        ts_text = ts_text[:-1] + "+00:00"
+
+                    ts = datetime.fromisoformat(ts_text)
+                except (TypeError, ValueError):
+                    continue
+
+                rows.append(
+                    (
+                        ts,
+                        highs[i],
+                        lows[i],
+                        closes[i],
+                        volumes[i] if volumes_ok else 0,
+                    )
+                )
+
+            if not rows:
+                return unavailable
+
+            # Sort chronologically and remove duplicate timestamps.
+            rows.sort(key=lambda x: x[0])
+
+            deduped = []
+            seen = set()
+            for row in rows:
+                ts = row[0]
+                if ts in seen:
+                    continue
+                seen.add(ts)
+                deduped.append(row)
+
+            rows = deduped
+
+            def build_session_bars(step: int):
+                """
+                Aggregate 5-minute candles into complete NSE-session
+                buckets.
+
+                step=3  -> 15-minute candles
+                step=12 -> 1-hour candles
+
+                Buckets are anchored at 09:15 rather than at arbitrary
+                positions in the returned broker array.
+                """
+                if len(rows) < step:
+                    return None
+
+                grouped = {}
+
+                for row in rows:
+                    ts = row[0]
+                    session_start = ts.replace(
+                        hour=9, minute=15, second=0, microsecond=0
+                    )
+
+                    # Ignore pre-market/out-of-session candles.
+                    if ts < session_start:
+                        continue
+
+                    # NSE regular session ends at 15:30. A candle starting
+                    # at 15:30 or later is outside the regular session.
+                    session_end = session_start.replace(
+                        hour=15, minute=30
+                    )
+                    if ts >= session_end:
+                        continue
+
+                    elapsed_minutes = int(
+                        (ts - session_start).total_seconds() // 60
+                    )
+
+                    # Ignore anything that does not land on a 5-minute
+                    # candle boundary relative to the NSE 09:15 anchor.
+                    if elapsed_minutes < 0 or elapsed_minutes % 5 != 0:
+                        continue
+
+                    bucket_index = elapsed_minutes // 5
+                    bucket = bucket_index // step
+                    key = (ts.date(), bucket)
+
+                    grouped.setdefault(key, []).append(row)
+
+                out_h, out_l, out_c, out_v, out_t = [], [], [], [], []
+
+                for key in sorted(grouped):
+                    bucket_rows = grouped[key]
+
+                    # A valid derived candle must contain exactly the
+                    # expected number of consecutive 5-minute candles.
+                    if len(bucket_rows) != step:
+                        continue
+
+                    consecutive = True
+                    for a, b in zip(bucket_rows, bucket_rows[1:]):
+                        if b[0] - a[0] != timedelta(minutes=5):
+                            consecutive = False
+                            break
+
+                    if not consecutive:
+                        continue
+
+                    out_h.append(max(r[1] for r in bucket_rows))
+                    out_l.append(min(r[2] for r in bucket_rows))
+                    out_c.append(bucket_rows[-1][3])
+                    out_v.append(sum(r[4] for r in bucket_rows))
+                    out_t.append(bucket_rows[-1][0].isoformat())
+
+                if not out_c:
+                    return None
+
+                return {
+                    "highs": out_h,
+                    "lows": out_l,
+                    "closes": out_c,
+                    "volumes": out_v,
+                    "timestamps": out_t,
+                }
+
+            # Keep the existing 5-minute frontend/API contract.
+            recent_rows = rows[-100:]
+
+            frames = {
+                "5min": {
+                    "highs": [r[1] for r in recent_rows],
+                    "lows": [r[2] for r in recent_rows],
+                    "closes": [r[3] for r in recent_rows],
+                    "volumes": [r[4] for r in recent_rows],
+                    "timestamps": [r[0].isoformat() for r in recent_rows],
+                },
+                "15min": build_session_bars(3),
+                "1hr": build_session_bars(12),
             }
-        return out
+
+            out = {}
+
+            for label, data in frames.items():
+                if not data:
+                    out[label] = {
+                        "data_source": "unavailable",
+                        "trend": "unavailable",
+                    }
+                    continue
+
+                ind = self.tech.compute_from_ohlc(
+                    data["highs"],
+                    data["lows"],
+                    data["closes"],
+                    data.get("volumes"),
+                )
+
+                frame_closes = data["closes"]
+
+                if len(frame_closes) >= 2 and ind.get("ema20", 0) > 0:
+                    last = frame_closes[-1]
+
+                    if (
+                        last > ind["ema20"]
+                        and ind.get("adx", 0) >= 15
+                        and ind.get("di_plus", 0) > ind.get("di_minus", 0)
+                    ):
+                        trend = "up"
+                    elif (
+                        last < ind["ema20"]
+                        and ind.get("adx", 0) >= 15
+                        and ind.get("di_minus", 0) > ind.get("di_plus", 0)
+                    ):
+                        trend = "down"
+                    else:
+                        trend = "sideways"
+                else:
+                    trend = "sideways"
+
+                out[label] = {
+                    "data_source": res5.get(
+                        "data_source", "angel_one_intraday"
+                    ),
+                    "trend": trend,
+                    "indicators": ind,
+                    "bar_count": len(frame_closes),
+                    "last_close": frame_closes[-1] if frame_closes else 0,
+                    "highs": data.get("highs", []),
+                    "lows": data.get("lows", []),
+                    "closes": data.get("closes", []),
+                    "volumes": data.get("volumes", []),
+                    "timestamps": data.get("timestamps", []),
+                }
+
+            return out
+
+        except Exception as e:
+            logger.warning(
+                f"Multi-timeframe fetch failed for {symbol}: {e}"
+            )
+            return unavailable
 
     async def _safe_futures_premium(self, symbol: str) -> Dict:
         try:

@@ -79,7 +79,7 @@ class AngelOneAuthError(AngelOneError):
 # Angel One throttles at least one of them. A minimum gap between calls,
 # shared across the whole process via one lock, fixes this without needing
 # to change how dashboard.py fetches symbols.
-_MIN_CALL_INTERVAL = 3.0  # seconds between any two Angel One SmartAPI calls
+_MIN_CALL_INTERVAL = 1.2  # seconds between any two Angel One SmartAPI calls
 
 
 class AngelOneSession:
@@ -354,7 +354,7 @@ class AngelOneSession:
 
     # Instrument master is published once per trading day — cache well
     # under that so a whole trading session reuses one download.
-    _INSTRUMENT_MASTER_TTL = 12 * 3600  # 12 hours
+    _INSTRUMENT_MASTER_TTL = 24 * 3600  # hard upper bound; actual refresh is calendar-day based
 
     async def _ensure_instruments(self) -> None:
         """
@@ -378,9 +378,17 @@ class AngelOneSession:
         was working before.
         """
         now = time.time()
+        today = datetime.now().date()
+
+        # Instrument master must refresh when the calendar day changes.
+        # A fixed 12h TTL can cross midnight and leave us using yesterday's
+        # NFO expiry/token mapping after Angel One rolls the contracts.
+        cache_day = getattr(self, "_instruments_cache_day", None)
+
         if (
             isinstance(self._instruments, list)
             and self._instruments
+            and cache_day == today
             and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
         ):
             return
@@ -389,9 +397,13 @@ class AngelOneSession:
             # Re-check after acquiring the lock — another concurrent
             # caller may have just finished the download.
             now = time.time()
+            today = datetime.now().date()
+            cache_day = getattr(self, "_instruments_cache_day", None)
+
             if (
                 isinstance(self._instruments, list)
                 and self._instruments
+                and cache_day == today
                 and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
             ):
                 return
@@ -451,7 +463,13 @@ class AngelOneSession:
 
             self._instruments = loaded
             self._instruments_ts = time.time()
-            logger.info(f"Angel One instrument master cached — {len(loaded)} rows (filtered to NIFTY/BANKNIFTY/FINNIFTY)")
+            self._instruments_cache_day = datetime.now().date()
+
+            logger.info(
+                f"Angel One instrument master cached — {len(loaded)} rows "
+                f"(filtered to NIFTY/BANKNIFTY/FINNIFTY), "
+                f"cache_day={self._instruments_cache_day}"
+            )
 
 
 
@@ -1065,19 +1083,31 @@ class AngelOneSession:
     async def get_positions(self) -> List[Dict]:
         """
         SmartAPI-லிருந்து live open positions fetch பண்ணும்.
-
-        ⚠️ NOT verified against a live account — field names (netqty,
-        avgnetprice, ltp போன்றவை) Angel's public docs-ல் இருந்து எடுத்தது,
-        get_option_chain() docstring-ல் இருக்கும் அதே caution இங்கேயும்
-        applicable. முதல் live run-ல் logs பார்த்து confirm பண்ணிக்கொள்ளவும்.
         """
+        import time
+        _t0 = time.perf_counter()
+
         await self.ensure_session()
+        _t_session = time.perf_counter()
+
         await self._throttle()
+        _t_throttle = time.perf_counter()
+
         try:
             # FIX (event-loop block): offload blocking SDK call.
             resp = await asyncio.to_thread(self._obj.position)
         except Exception as e:
             raise AngelOneError(f"Positions fetch failed: {e}")
+
+        _t_position = time.perf_counter()
+
+        logger.info(
+            "get_positions timing: session=%.3fs throttle=%.3fs angel_position=%.3fs total=%.3fs",
+            _t_session - _t0,
+            _t_throttle - _t_session,
+            _t_position - _t_throttle,
+            _t_position - _t0,
+        )
 
         if not resp or resp.get("status") is False:
             raise AngelOneError(
@@ -1088,17 +1118,19 @@ class AngelOneSession:
         for r in resp.get("data") or []:
             netqty = int(safe_float(r.get("netqty", 0)))
             if netqty == 0:
-                continue  # closed / flat position, skip
+                continue
+
             positions.append({
                 "tradingsymbol":    r.get("tradingsymbol", "--"),
                 "symboltoken":      r.get("symboltoken", ""),
                 "exchange":         r.get("exchange", "NFO"),
                 "producttype":      r.get("producttype", "INTRADAY"),
                 "netqty":           abs(netqty),
-                "averageprice":     safe_float(r.get("avgnetprice") or r.get("netprice", 0)),
+                "averageprice":     safe_float(r.get("avgnetprice", 0)) or safe_float(r.get("netprice", 0)),
                 "lasttradedprice":  safe_float(r.get("ltp", 0)),
                 "buysell":          "BUY" if netqty > 0 else "SELL",
             })
+
         return positions
 
     # NOTE: square_off_position() (which called self._obj.placeOrder() to

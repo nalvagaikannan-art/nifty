@@ -32,8 +32,9 @@ separate, complementary view (per *signal/action*, not per *indicator*).
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
+from bisect import bisect_left
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.database import AsyncSessionLocal
 from app.models import AnalysisResult, MarketData, OptionData
@@ -135,15 +136,64 @@ def _action_from_signal(result: Dict) -> Optional[str]:
     return "NO_TRADE"
 
 
-def _nearest_price(prices: List[Tuple[datetime, float]], target: datetime,
-                    max_gap_minutes: float) -> Optional[float]:
-    best_price, best_gap = None, None
-    for ts, price in prices:
-        gap = abs((ts - target).total_seconds()) / 60.0
-        if best_gap is None or gap < best_gap:
-            best_gap, best_price = gap, price
-    if best_price is None or best_gap > max_gap_minutes:
+def _nearest_price(
+    prices: List[Tuple[datetime, float]],
+    timestamps: List[datetime],
+    target: datetime,
+    max_gap_minutes: float,
+) -> Optional[float]:
+    """Return the price nearest to target using binary search on sorted timestamps."""
+    if not prices:
         return None
+
+    i = bisect_left(timestamps, target)
+
+    if i == 0:
+        best_ts, best_price = prices[0]
+    elif i == len(prices):
+        best_ts, best_price = prices[-1]
+    else:
+        left = prices[i - 1]
+        right = prices[i]
+
+        left_gap = abs((left[0] - target).total_seconds())
+        right_gap = abs((right[0] - target).total_seconds())
+
+        # Exact tie: preserve old linear-scan behavior by choosing left.
+        best_ts, best_price = (
+            left if left_gap <= right_gap else right
+        )
+
+    if abs((best_ts - target).total_seconds()) / 60.0 > max_gap_minutes:
+        return None
+
+    return best_price
+
+
+def _asof_price(
+    prices: List[Tuple[datetime, float]],
+    timestamps: List[datetime],
+    target: datetime,
+    max_gap_minutes: float,
+) -> Optional[float]:
+    """Return the latest price at or before target, never a future snapshot."""
+    if not prices:
+        return None
+
+    i = bisect_left(timestamps, target)
+
+    # Exact snapshot is valid and must be preferred.
+    if i < len(prices) and timestamps[i] == target:
+        return prices[i][1]
+
+    if i == 0:
+        return None
+
+    best_ts, best_price = prices[i - 1]
+
+    if (target - best_ts).total_seconds() / 60.0 > max_gap_minutes:
+        return None
+
     return best_price
 
 
@@ -193,12 +243,21 @@ async def compute_signal_accuracy(symbol: str, days: int = 15,
 
     async with AsyncSessionLocal() as session:
         analysis_rows = (await session.execute(
-            select(AnalysisResult)
-            .where(AnalysisResult.symbol == symbol)
-            .where(AnalysisResult.analysis_type == "ai")
-            .where(AnalysisResult.timestamp >= cutoff)
-            .order_by(AnalysisResult.timestamp.asc())
-        )).scalars().all()
+            text("""
+                SELECT
+                    timestamp,
+                    json_extract(result, '$.preferred_side') AS preferred_side,
+                    json_extract(result, '$.confidence') AS confidence,
+                    json_extract(result, '$.signal_strength') AS signal_strength,
+                    json_extract(result, '$.volatility_regime') AS volatility_regime
+                FROM analysis_results
+                WHERE symbol = :symbol
+                  AND analysis_type = 'ai'
+                  AND timestamp >= :cutoff
+                ORDER BY timestamp ASC
+            """),
+            {"symbol": symbol, "cutoff": cutoff},
+        )).fetchall()
 
         market_rows = (await session.execute(
             select(MarketData)
@@ -210,6 +269,7 @@ async def compute_signal_accuracy(symbol: str, days: int = 15,
     prices: List[Tuple[datetime, float]] = [
         (r.timestamp, r.price) for r in market_rows if r.price is not None
     ]
+    price_timestamps = [ts for ts, _ in prices]
 
     overall: Dict[int, Dict] = {h: _empty_bucket() for h in HORIZONS_MINUTES}
     by_action: Dict[str, Dict[int, Dict]] = {
@@ -224,10 +284,17 @@ async def compute_signal_accuracy(symbol: str, days: int = 15,
 
     if len(prices) >= 2:
         for row in analysis_rows:
-            result = row.result or {}
+            result = {
+                "preferred_side": row.preferred_side,
+                "confidence": row.confidence,
+                "signal_strength": row.signal_strength,
+                "volatility_regime": row.volatility_regime,
+            }
             action = _action_from_signal(result)
             ts = row.timestamp
-            price_then = _nearest_price(prices, ts, HORIZON_TOLERANCE_MIN)
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            price_then = _asof_price(prices, price_timestamps, ts, HORIZON_TOLERANCE_MIN)
             if price_then is None or price_then <= 0:
                 no_data += 1
                 continue
@@ -245,7 +312,7 @@ async def compute_signal_accuracy(symbol: str, days: int = 15,
                     if h == horizon_minutes:
                         pending += 1
                     continue  # too soon to know yet — not an error, just unresolved
-                price_later = _nearest_price(prices, target, HORIZON_TOLERANCE_MIN)
+                price_later = _asof_price(prices, price_timestamps, target, HORIZON_TOLERANCE_MIN)
                 if price_later is None:
                     continue  # gap in our own price history at that instant
                 change_pct = (price_later - price_then) / price_then * 100
@@ -377,6 +444,11 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
         key = (r.expiry, float(r.strike), r.option_type)
         by_contract.setdefault(key, []).append((r.timestamp, r.last_price))
 
+    contract_timestamps: Dict[Tuple[str, float, str], List[datetime]] = {
+        key: [ts for ts, _ in series]
+        for key, series in by_contract.items()
+    }
+
     overall: Dict[int, Dict] = {h: _empty_bucket() for h in HORIZONS_MINUTES}
     by_action: Dict[str, Dict[int, Dict]] = {
         "CALL_BUY": {h: _empty_bucket() for h in HORIZONS_MINUTES},
@@ -430,7 +502,21 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
             continue
 
         ts = row.timestamp
-        premium_then = _nearest_price(series, ts, HORIZON_TOLERANCE_MIN) or rec.get("entry_price")
+        entry_i = bisect_left(contract_timestamps[key], ts)
+
+        # Accuracy must never use a future option snapshot as the entry.
+        # Use the latest snapshot available at or before signal generation.
+        if entry_i == 0:
+            premium_then = None
+            entry_ts = ts
+        else:
+            entry_ts, premium_then = series[entry_i - 1]
+
+        entry_gap_minutes = (ts - entry_ts).total_seconds() / 60.0
+        if premium_then is None or entry_gap_minutes > HORIZON_TOLERANCE_MIN:
+            premium_then = rec.get("entry_price")
+            entry_ts = ts
+
         if not premium_then or premium_then <= 0:
             no_data += 1
             continue
@@ -440,15 +526,15 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
 
         signals_seen += 1
         main_grade = None
-        window_prices: List[float] = []  # every premium snapshot between ts and the headline horizon
-        headline_target = ts + timedelta(minutes=horizon_minutes)
+        window_prices: List[float] = []  # every premium snapshot between entry_ts and the headline horizon
+        headline_target = entry_ts + timedelta(minutes=horizon_minutes)
         for h in HORIZONS_MINUTES:
-            target = ts + timedelta(minutes=h)
+            target = entry_ts + timedelta(minutes=h)
             if target > now:
                 if h == horizon_minutes:
                     pending += 1
                 continue
-            premium_later = _nearest_price(series, target, HORIZON_TOLERANCE_MIN)
+            premium_later = _asof_price(series, contract_timestamps[key], target, HORIZON_TOLERANCE_MIN)
             if premium_later is None:
                 continue
             change_pct = (premium_later - premium_then) / premium_then * 100
@@ -463,11 +549,10 @@ async def compute_premium_accuracy(symbol: str, days: int = 15,
                 main_grade = grade
 
         # MFE/MAE: scan every stored snapshot for this contract between
-        # signal time and the headline horizon (not just the 5/10/15/30/60
-        # sample points above) so a spike that reverted before the next
-        # horizon checkpoint still shows up.
+        # the observed entry snapshot and the headline horizon. This keeps
+        # the excursion window aligned with the actual premium_then timestamp.
         for snap_ts, snap_price in series:
-            if ts <= snap_ts <= min(headline_target, now):
+            if entry_ts <= snap_ts <= min(headline_target, now):
                 window_prices.append(snap_price)
         if window_prices:
             best_pct = (max(window_prices) - premium_then) / premium_then * 100

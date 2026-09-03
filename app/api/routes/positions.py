@@ -1,35 +1,69 @@
 """
 Positions Router
-─────────────────
-GET  /api/portfolio/positions                  → live positions + P&L + AI suggestion
-POST /api/portfolio/positions/square-off/{sym}  → square off a position
-
-angel_one.py மற்றும் deps.py உங்கள் actual files-ல் இருந்து பார்த்து
-integrate பண்ணப்பட்டது:
-  - AngelOneSession.get_positions() / .square_off_position() (angel_one.py-ல் புதிதா சேர்க்கப்பட்டது)
-  - get_angel_session() dependency (deps.py-ல் புதிதா சேர்க்கப்பட்டது)
-
-⚠️ get_positions()/square_off_position()-ல் இருக்கும் field names
-(netqty, avgnetprice, ltp) Angel's public docs அடிப்படையில் — live account
-வைத்து verify பண்ணப்படல (angel_one.py-ல் get_option_chain() docstring-லும்
-இதே caution இருக்கு). முதல் live run-ல் logs பார்த்து confirm பண்ணிக்கொள்ளவும்.
+GET  /api/portfolio/positions                  -> live positions + P&L + AI suggestion
+POST /api/portfolio/positions/square-off/{sym}  -> square off a position
 """
 from fastapi import APIRouter, Depends, HTTPException
 import logging
+import re
+import time
+import asyncio
 
 from app.services.angel_one import AngelOneSession, AngelOneError
-from app.api.deps import get_angel_session
+from app.services.market_analyzer import MarketAnalyzer
+from app.api.deps import get_angel_session, get_analyzer
+from app.utils.helpers import days_to_expiry as _days_to_expiry
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# எத்தனை % loss/profit-ல் AI "EXIT" சொல்லும் (cost-basis % — simple rule, investment advice இல்லை)
 STOP_LOSS_PCT = -20.0
 TARGET_PCT    = 30.0
+EXPIRY_WARN_DAYS = 3
+
+_market_context_cache: dict = {}
+_MARKET_CONTEXT_TTL = 120
+
+
+async def _get_market_context(analyzer: MarketAnalyzer, root: str) -> dict:
+    now = time.time()
+    logger.info(f"MARKET_CTX_CALL root={root}")
+    cached = _market_context_cache.get(root)
+
+    if cached and (now - cached[0]) < _MARKET_CONTEXT_TTL:
+        logger.info(
+            f"MARKET_CTX_CACHE_HIT root={root} age={now - cached[0]:.1f}s"
+        )
+        return cached[1]
+
+    try:
+        md = await analyzer.get_full_market_overview(root)
+        expiry_str = md.get("option_chain", {}).get("expiry", "")
+        md["days_to_expiry"] = _days_to_expiry(expiry_str)
+    except Exception as e:
+        logger.warning(f"Market overview fetch failed for {root}: {e}")
+        md = {}
+
+    # IMPORTANT: start TTL after the expensive fetch completes.
+    _market_context_cache[root] = (time.time(), md)
+    return md
+
+
+_WARM_ROOTS = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+_WARM_INTERVAL_SECONDS = 45
+
+
+async def warm_market_context_cache(analyzer: MarketAnalyzer) -> None:
+    while True:
+        for root in _WARM_ROOTS:
+            try:
+                await _get_market_context(analyzer, root)
+            except Exception as e:
+                logger.warning(f"Cache warmer failed for {root}: {e}")
+        await asyncio.sleep(_WARM_INTERVAL_SECONDS)
 
 
 def _compute_pnl(pos: dict) -> dict:
-    """AngelOneSession.get_positions() ஒவ்வொரு row-க்கும் P&L, status கணக்கிடும்."""
     qty       = pos["netqty"]
     avg_price = pos["averageprice"]
     ltp       = pos["lasttradedprice"]
@@ -50,37 +84,91 @@ def _compute_pnl(pos: dict) -> dict:
     }
 
 
-def _ai_suggestion(p: dict) -> str:
-    """
-    Cost-basis % change வைத்து rule-based hold/exit suggestion.
-    (Rule engine மட்டும் — investment advice இல்லை; UI-ல் disclaimer இருக்கு.)
-    """
+def _root_symbol(tradingsymbol: str) -> str:
+    m = re.match(r"^[A-Z]+", tradingsymbol or "")
+    return m.group() if m else "NIFTY"
+
+
+def _ai_suggestion(p: dict, market: dict) -> dict:
+    reasons = []
     invested = p["avg_price"] * p["quantity"]
+    change_pct = round((p["pnl"] / invested) * 100, 2) if invested > 0 else 0.0
+    verdict = "HOLD"
+
     if invested <= 0:
-        return "HOLD"
-    change_pct = (p["pnl"] / invested) * 100
+        return {"verdict": verdict, "change_pct": 0.0, "reasons": ["Invested amount unknown"],
+                "days_to_expiry": None, "vix": 0, "pcr": 0, "market_bias": "N/A"}
 
     if change_pct <= STOP_LOSS_PCT:
-        return "EXIT — Stop-loss level அடைந்துவிட்டது"
-    if change_pct >= TARGET_PCT:
-        return "EXIT — Target அடைந்துவிட்டது, profit book செய்யலாம்"
-    return "HOLD"
+        verdict = "EXIT"
+        reasons.append(f"Stop-loss level ({STOP_LOSS_PCT}%) reached - current {change_pct}%")
+    elif change_pct >= TARGET_PCT:
+        verdict = "EXIT"
+        reasons.append(f"Target ({TARGET_PCT}%) reached, consider booking profit - current {change_pct}%")
+    else:
+        reasons.append(f"Cost-basis change {change_pct}% - within stop-loss/target range")
+
+    dte = market.get("days_to_expiry")
+    if dte is not None:
+        if dte <= 1:
+            if verdict == "HOLD":
+                verdict = "CAUTION"
+            reasons.append(f"Only {dte} day(s) to expiry - theta decay accelerates sharply")
+        elif dte <= EXPIRY_WARN_DAYS:
+            reasons.append(f"{dte} days to expiry - theta decay picking up")
+
+    dec = market.get("decision", {}) or {}
+    bias = dec.get("market_bias", "Sideways")
+    reasons.append(f"Market bias: {bias} (Confidence {dec.get('confidence', 0)}%)")
+
+    vix = market.get("vix", 0)
+    pcr = market.get("pcr", 0)
+    if vix:
+        reasons.append(f"India VIX: {vix} ({'LOW - calm market' if vix < 15 else 'HIGH - volatile, elevated risk'})")
+    if pcr:
+        reasons.append(f"PCR: {pcr} ({'Bearish bias' if pcr < 1 else 'Bullish bias'})")
+
+    return {
+        "verdict":     verdict,
+        "change_pct":  change_pct,
+        "reasons":     reasons,
+        "days_to_expiry": dte,
+        "vix":         vix,
+        "pcr":         pcr,
+        "market_bias": bias,
+    }
 
 
 @router.get("/positions")
-async def get_positions(angel: AngelOneSession = Depends(get_angel_session)):
+async def get_positions(
+    angel: AngelOneSession = Depends(get_angel_session),
+    analyzer: MarketAnalyzer = Depends(get_analyzer),
+):
     try:
         raw_positions = await angel.get_positions()
     except AngelOneError as e:
         logger.error(f"get_positions failed: {e}")
-        raise HTTPException(502, detail=f"Positions fetch பண்ண முடியவில்லை: {e}")
+        raise HTTPException(502, detail=f"Positions fetch failed: {e}")
 
     result = []
     total_pnl = 0.0
     for pos in raw_positions:
         enriched = _compute_pnl(pos)
-        enriched["ai_suggestion"] = _ai_suggestion(enriched)
-        enriched["stop_loss_hit"] = enriched["ai_suggestion"].startswith("EXIT — Stop-loss")
+        root = _root_symbol(pos.get("tradingsymbol", ""))
+        market = await _get_market_context(analyzer, root)
+
+        suggestion = _ai_suggestion(enriched, market)
+        enriched["ai_suggestion"]  = suggestion["verdict"]
+        enriched["ai_reasons"]     = suggestion["reasons"]
+        enriched["change_pct"]     = suggestion["change_pct"]
+        enriched["days_to_expiry"] = suggestion.get("days_to_expiry")
+        enriched["vix"]            = suggestion.get("vix")
+        enriched["pcr"]            = suggestion.get("pcr")
+        enriched["market_bias"]    = suggestion.get("market_bias")
+        enriched["stop_loss_hit"]  = suggestion["verdict"] == "EXIT" and suggestion["change_pct"] <= STOP_LOSS_PCT
+        cached_entry = _market_context_cache.get(root)
+        enriched["market_data_age_seconds"] = round(time.time() - cached_entry[0], 1) if cached_entry else None
+
         total_pnl += enriched["pnl"]
         result.append(enriched)
 
@@ -88,16 +176,21 @@ async def get_positions(angel: AngelOneSession = Depends(get_angel_session)):
         "positions": result,
         "total_pnl": round(total_pnl, 2),
         "count":     len(result),
-        "disclaimer": "AI suggestion ஒரு rule-based hint மட்டும் — investment advice இல்லை.",
+        "disclaimer": "AI suggestion is a rule-based hint only (P&L%, VIX, PCR, market bias, expiry proximity) - not investment advice. Final decision is yours.",
     }
 
 
 @router.post("/positions/square-off/{symbol}")
 async def square_off_position(symbol: str, angel: AngelOneSession = Depends(get_angel_session)):
-    try:
-        result = await angel.square_off_position(symbol)
-    except AngelOneError as e:
-        logger.error(f"Square off failed for {symbol}: {e}")
-        raise HTTPException(502, detail=f"Square off ஆகவில்லை: {e}")
-
-    return {"symbol": symbol, "result": result}
+    # This app is analysis/information only by design -- it never places,
+    # modifies, or squares off real orders with the broker (see
+    # angel_one.py's note above AngelOneSession.get_positions()). Exit this
+    # position directly in the Angel One app or website.
+    raise HTTPException(
+        403,
+        detail=(
+            f"Square off is disabled in this app for safety -- it never places "
+            f"real orders. Please exit {symbol} directly in the Angel One app "
+            f"or website."
+        ),
+    )
