@@ -15,7 +15,6 @@ from app.services.data_fetcher import DataFetcher
 import app.services.paper_trading  # noqa: F401 — registers PaperTrade + TradeJournal models
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.history_collector import run_periodic_collection
-from app.api.routes.positions import warm_market_context_cache
 from app.exceptions import MarketDataError, AIProviderError
 from app.middleware.rate_limit import RateLimitMiddleware
 import logging
@@ -55,11 +54,6 @@ async def lifespan(app: FastAPI):
     app.state.history_collector_task = asyncio.create_task(
         run_periodic_collection(app.state.market_analyzer)
     )
-    # Background market-context warmer.
-    # Keeps market context fresh without requiring a browser request.
-    app.state.market_context_warmer_task = asyncio.create_task(
-        warm_market_context_cache(app.state.market_analyzer)
-    )
     # FIX (2026-08-21): Angel One's option-chain/futures-premium calls both
     # need the ~15-30MB instrument master file (see angel_one._ensure_
     # instruments). Previously that file was only downloaded lazily, on
@@ -98,12 +92,6 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-    if app.state.market_context_warmer_task and not app.state.market_context_warmer_task.done():
-        app.state.market_context_warmer_task.cancel()
-        try:
-            await app.state.market_context_warmer_task
-        except asyncio.CancelledError:
-            pass
     if app.state.angel_warmup_task and not app.state.angel_warmup_task.done():
         app.state.angel_warmup_task.cancel()
         try:

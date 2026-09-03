@@ -8,6 +8,7 @@ import logging
 import re
 import time
 import asyncio
+from datetime import datetime
 
 from app.services.angel_one import AngelOneSession, AngelOneError
 from app.services.market_analyzer import MarketAnalyzer
@@ -89,6 +90,20 @@ def _root_symbol(tradingsymbol: str) -> str:
     return m.group() if m else "NIFTY"
 
 
+def _position_days_to_expiry(tradingsymbol: str):
+    """Extract DDMMMYY expiry from an option tradingsymbol and return DTE."""
+    m = re.search(r"([0-9]{2}[A-Z]{3}[0-9]{2})", tradingsymbol or "")
+    if not m:
+        return None
+
+    try:
+        expiry = datetime.strptime(m.group(1).title(), "%d%b%y")
+        expiry_str = expiry.strftime("%d%b%Y")
+        return _days_to_expiry(expiry_str)
+    except ValueError:
+        return None
+
+
 def _ai_suggestion(p: dict, market: dict) -> dict:
     reasons = []
     invested = p["avg_price"] * p["quantity"]
@@ -108,7 +123,11 @@ def _ai_suggestion(p: dict, market: dict) -> dict:
     else:
         reasons.append(f"Cost-basis change {change_pct}% - within stop-loss/target range")
 
-    dte = market.get("days_to_expiry")
+    # Prefer the actual expiry encoded in the held position symbol.
+    # Fall back to current market expiry only if the symbol cannot be parsed.
+    dte = _position_days_to_expiry(p.get("symbol", ""))
+    if dte is None:
+        dte = market.get("days_to_expiry")
     if dte is not None:
         if dte <= 1:
             if verdict == "HOLD":
@@ -126,7 +145,13 @@ def _ai_suggestion(p: dict, market: dict) -> dict:
     if vix:
         reasons.append(f"India VIX: {vix} ({'LOW - calm market' if vix < 15 else 'HIGH - volatile, elevated risk'})")
     if pcr:
-        reasons.append(f"PCR: {pcr} ({'Bearish bias' if pcr < 1 else 'Bullish bias'})")
+        if pcr < 0.8:
+            pcr_label = "Bearish"
+        elif pcr <= 1.2:
+            pcr_label = "Neutral"
+        else:
+            pcr_label = "Bullish"
+        reasons.append(f"PCR: {pcr} ({pcr_label})")
 
     return {
         "verdict":     verdict,
