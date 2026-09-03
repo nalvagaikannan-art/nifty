@@ -1408,6 +1408,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "signal_reversal_confirmations": lifecycle.get("reversal_confirmations", 0),
         "signal_active_side":    lifecycle.get("active_side", "NONE"),
         "signal_lifecycle_reason": lifecycle.get("reason", ""),
+        "hard_gated":            hard_gated,
         "reasons":               reasons,
         "strategy":              strategy,
         "strategy_reason":       strategy_reason,
