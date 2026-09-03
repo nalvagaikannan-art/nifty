@@ -5,7 +5,10 @@ market-closed conditions (spec §43: "bullish market, bearish market,
 sideways market ... conflicting timeframe"). No network needed — this
 exercises the pure scoring/aggregation logic in isolation.
 """
-from app.services.decision_engine import run_decision_engine
+from app.services.decision_engine import (
+    run_decision_engine,
+    apply_persistent_signal_lifecycle,
+)
 
 
 def _base(spot: float) -> dict:
@@ -162,3 +165,118 @@ def test_scenarios_and_invalidation_always_present():
     assert len(result["scenarios"]) >= 1
     for scenario in result["scenarios"]:
         assert "invalidation" in scenario
+
+def _lifecycle_decision(side: str, margin: float, market_open: bool = True) -> dict:
+    return {
+        "preferred_side": side,
+        "margin": margin,
+        "market_open": market_open,
+        "market_regime_no_trade": False,
+    }
+
+
+def test_persistent_lifecycle_requires_three_spaced_call_confirmations():
+    state = None
+
+    decision = _lifecycle_decision("CALL", 20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1000)
+    assert out["signal_lifecycle"] == "WATCH_CALL"
+    assert out["signal_candidate"] == "CALL"
+    assert out["signal_confirmations"] == 1
+    assert out["signal_active_side"] == "NONE"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "WATCH_CALL"
+    assert out["signal_confirmations"] == 2
+    assert out["signal_active_side"] == "NONE"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1092)
+    assert out["signal_lifecycle"] == "CONFIRMED_CALL"
+    assert out["signal_confirmations"] == 3
+    assert out["signal_active_side"] == "CALL"
+    assert out["preferred_side"] == "CALL"
+
+
+def test_persistent_lifecycle_requires_two_spaced_reversal_confirmations():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 0,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("PUT", -20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "HOLD_CALL_REVERSAL_WATCH_PUT"
+    assert out["signal_reversal_confirmations"] == 1
+    assert out["signal_active_side"] == "CALL"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1092)
+    assert out["signal_lifecycle"] == "CONFIRMED_PUT"
+    assert out["signal_reversal_confirmations"] == 2
+    assert out["signal_active_side"] == "PUT"
+    assert out["preferred_side"] == "PUT"
+
+
+def test_persistent_lifecycle_weak_opposite_signal_does_not_reverse():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 1,
+        "lifecycle": "HOLD_CALL_REVERSAL_WATCH_PUT",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("PUT", -10)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "HOLD_CALL"
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["signal_active_side"] == "CALL"
+    assert out["preferred_side"] == "CALL"
+
+
+def test_persistent_lifecycle_same_active_side_remains_hold():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 0,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("CALL", 20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "HOLD_CALL"
+    assert out["signal_confirmations"] == 3
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["signal_active_side"] == "CALL"
+    assert out["preferred_side"] == "CALL"
+
+
+def test_persistent_lifecycle_hard_gate_clears_directional_state():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 1,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("CALL", 20, market_open=False)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "WAIT"
+    assert out["signal_active_side"] == "NONE"
+    assert out["signal_candidate"] == "NONE"
+    assert out["signal_confirmations"] == 0
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["preferred_side"] == "NONE"
