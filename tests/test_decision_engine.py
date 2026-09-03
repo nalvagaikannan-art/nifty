@@ -5,6 +5,17 @@ market-closed conditions (spec §43: "bullish market, bearish market,
 sideways market ... conflicting timeframe"). No network needed — this
 exercises the pure scoring/aggregation logic in isolation.
 """
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def fixed_market_session(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._time_session",
+        lambda: "MID",
+    )
+
+
 from app.services.decision_engine import (
     run_decision_engine,
     apply_persistent_signal_lifecycle,

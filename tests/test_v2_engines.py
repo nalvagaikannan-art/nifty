@@ -11,6 +11,14 @@ from app.services.trade_levels import calculate_trade_levels
 from app.services.risk_engine import assess_risk
 
 
+@pytest.fixture(autouse=True)
+def fixed_market_session(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._time_session",
+        lambda: "MID",
+    )
+
+
 # ── Sample market data builders ───────────────────────────────────────────
 
 def make_market_data(
