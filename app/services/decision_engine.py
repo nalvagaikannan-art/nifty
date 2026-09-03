@@ -223,7 +223,11 @@ def apply_persistent_signal_lifecycle(
     raw_side = str(decision.get("preferred_side", "NONE")).upper()
     margin = float(decision.get("margin", 0) or 0)
     market_open = bool(decision.get("market_open", True))
-    hard_gated = bool(decision.get("market_regime_no_trade", False)) or not market_open
+    hard_gated = (
+        bool(decision.get("hard_gated", False))
+        or bool(decision.get("market_regime_no_trade", False))
+        or not market_open
+    )
 
     active = state.get("active_side", "NONE")
     candidate = state.get("candidate_side", "NONE")
@@ -1204,14 +1208,23 @@ def run_decision_engine(market_data: Dict) -> Dict:
     tech_available  = market_data.get("technical_data_source", "") != "placeholder"
     spot_valid      = spot > 0
 
-    if preferred_side in ("CALL", "PUT"):
+    # Invalid spot is an unconditional safety gate. A zero/invalid spot
+    # must never be allowed to produce a directional bias or be interpreted
+    # by downstream lifecycle/hysteresis logic as a usable market state.
+    if not spot_valid:
+        preferred_side = "NONE"
+        market_bias = "Sideways"
+        risk = "High"
+        hard_gated = True
+        reasons.append("🚫 Spot price invalid")
+        logger.warning("Decision hard-gated: invalid spot price=%s", spot)
+
+    elif preferred_side in ("CALL", "PUT"):
         blocking_reasons = []
         if not chain_available:
             blocking_reasons.append("Option chain data unavailable (PCR=0) — CALL/PUT signal blocked")
         if not tech_available:
             blocking_reasons.append("Technical data is placeholder — real OHLC unavailable")
-        if not spot_valid:
-            blocking_reasons.append("Spot price invalid")
         if blocking_reasons:
             preferred_side = "NONE"
             risk = "High"

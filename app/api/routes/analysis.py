@@ -136,6 +136,7 @@ async def build_ai_analysis(symbol: str, analyzer: MarketAnalyzer, ai: AIEngine,
     result["signal_reversal_confirmations"] = dec.get("signal_reversal_confirmations", 0)
     result["signal_active_side"] = dec.get("signal_active_side", "NONE")
     result["strategy"]           = dec.get("strategy", "")
+    result["hard_gated"]           = dec.get("hard_gated", False)
     result["strategy_reason"]    = dec.get("strategy_reason", "")
     result["strategy_detail"]    = dec.get("strategy_detail")
     result["price_levels"]       = dec.get("price_levels")
