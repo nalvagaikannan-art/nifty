@@ -1,4 +1,4 @@
-from app.api.routes.strategy import _score_candidates
+from app.api.routes.strategy import _score_candidates, _time_filter
 
 
 def _market_data(bull, bear, margin, preferred="NONE", confidence=40):
@@ -89,3 +89,93 @@ def test_hold_call_lifecycle_keeps_active_call_despite_bearish_fresh_score():
 
     assert best == "BUY CE"
     assert best_score == candidates["BUY CE"]
+
+
+def test_time_filter_opening_boundary(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 9, 15, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "OPENING"
+
+
+def test_time_filter_mid_boundary(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 9, 45, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "MID"
+
+
+def test_time_filter_1400_is_still_mid(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 14, 0, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "MID"
+
+
+def test_time_filter_1401_starts_closing(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 14, 1, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "CLOSING"
+
+
+def test_time_filter_market_close(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 15, 30, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "CLOSING"
+
+
+def test_time_filter_after_market_close(monkeypatch):
+    from datetime import datetime
+    import app.api.routes.strategy as strategy
+
+    class FakeDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 3, 15, 31, tzinfo=tz)
+
+    monkeypatch.setattr(strategy, "datetime", FakeDateTime)
+    result = _time_filter()
+
+    assert result["session"] == "CLOSED"
