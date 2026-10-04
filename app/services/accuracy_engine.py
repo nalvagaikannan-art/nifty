@@ -24,12 +24,15 @@ sample-க்கு காட்டப்படும்.
 """
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+import math
 import logging
 
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models import AnalysisResult, MarketData
+from app.services.accuracy_time import analysis_event_timestamp
+from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +92,7 @@ def _nearest_price(prices: List[Tuple[datetime, float]], target: datetime,
 
 
 async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
-    cutoff = datetime.utcnow() - timedelta(days=days)
+    cutoff = now_utc_naive() - timedelta(days=days)
 
     async with AsyncSessionLocal() as session:
         analysis_rows = (await session.execute(
@@ -114,6 +117,15 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
     totals: Dict[str, Dict[str, int]] = {
         ind_id: {"hits": 0, "total": 0} for ind_id, _, _ in INDICATOR_ORDER
     }
+
+    # Non-directional metrics intentionally use their own definitions.
+    # They must NOT be treated as missing just because their live reason is ⚪.
+    nondirectional = {
+        "max_pain": {"hits": 0, "total": 0},
+        "atr_risk": {"hits": 0, "total": 0},
+        "india_vix": {"hits": 0, "total": 0},
+    }
+
     overall_hits, overall_total = 0, 0
     snapshots_used = 0
 
@@ -121,48 +133,168 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
         for row in analysis_rows:
             result = row.result or {}
             reasons = result.get("all_reasons", [])
-            if len(reasons) != 20:
-                continue  # இந்த feature வர முன் save ஆன பழைய rows — skip
+            if len(reasons) < len(INDICATOR_ORDER):
+                continue
 
-            ts = row.timestamp
-            price_then = _nearest_price(prices, ts, max_gap_minutes=HORIZON_TOLERANCE_MIN)
+            indicator_reasons = reasons[:len(INDICATOR_ORDER)]
+
+            ts = analysis_event_timestamp(row)
+            if ts is None:
+                continue
+
+            price_then = _nearest_price(
+                prices, ts, max_gap_minutes=HORIZON_TOLERANCE_MIN
+            )
             price_later = _nearest_price(
-                prices, ts + timedelta(minutes=HORIZON_MINUTES),
+                prices,
+                ts + timedelta(minutes=HORIZON_MINUTES),
                 max_gap_minutes=HORIZON_TOLERANCE_MIN,
             )
+
             if price_then is None or price_later is None or price_then <= 0:
                 continue
 
             change_pct = (price_later - price_then) / price_then * 100
+
             if change_pct > NEUTRAL_BAND_PCT:
                 actual = "bull"
             elif change_pct < -NEUTRAL_BAND_PCT:
                 actual = "bear"
             else:
-                continue  # flat move — indicator-க்கு fair-ஆ credit/debit பண்ண முடியாது
+                actual = None
 
-            snapshots_used += 1
+            # Keep the original directional snapshot semantics:
+            # only non-flat moves are counted for directional accuracy.
+            if actual is not None:
+                snapshots_used += 1
 
-            # Overall market_bias accuracy
-            bias = (result.get("market_bias") or "").lower()
-            if bias in ("bullish", "bearish"):
-                predicted_overall = "bull" if bias == "bullish" else "bear"
-                overall_total += 1
-                if predicted_overall == actual:
-                    overall_hits += 1
+                bias = (result.get("market_bias") or "").lower()
+                if bias in ("bullish", "bearish"):
+                    predicted_overall = "bull" if bias == "bullish" else "bear"
+                    overall_total += 1
+                    if predicted_overall == actual:
+                        overall_hits += 1
 
+            # --------------------------------------------------------
+            # MAX PAIN
+            # Metric = did spot become closer to Max Pain after 60m?
+            # This is distance alignment, NOT directional accuracy.
+            # Flat moves are valid observations here.
+            # --------------------------------------------------------
+            try:
+                max_pain = float(result.get("max_pain") or 0)
+            except (TypeError, ValueError):
+                max_pain = 0.0
+
+            if max_pain > 0:
+                nondirectional["max_pain"]["total"] += 1
+                if abs(price_later - max_pain) < abs(price_then - max_pain):
+                    nondirectional["max_pain"]["hits"] += 1
+
+            # --------------------------------------------------------
+            # ATR
+            # Metric = did the absolute 60m spot move stay within
+            # one ATR measured at analysis time?
+            # --------------------------------------------------------
+            technicals = result.get("technicals") or {}
+            try:
+                atr = float(technicals.get("atr") or 0)
+            except (TypeError, ValueError):
+                atr = 0.0
+
+            if atr > 0:
+                nondirectional["atr_risk"]["total"] += 1
+                if abs(price_later - price_then) <= atr:
+                    nondirectional["atr_risk"]["hits"] += 1
+
+            # --------------------------------------------------------
+            # INDIA VIX
+            # Metric = did the absolute 60m move stay within the
+            # one-sigma VIX-implied one-hour expected move?
+            # VIX is annualized volatility, not direction.
+            # --------------------------------------------------------
+            try:
+                vix = float(result.get("vix") or 0)
+            except (TypeError, ValueError):
+                vix = 0.0
+
+            if vix > 0:
+                expected_move = (
+                    price_then
+                    * (vix / 100.0)
+                    / math.sqrt(252.0 * 6.25)
+                )
+                if expected_move > 0:
+                    nondirectional["india_vix"]["total"] += 1
+                    if abs(price_later - price_then) <= expected_move:
+                        nondirectional["india_vix"]["hits"] += 1
+
+            # Directional indicators only.
             for idx, (ind_id, _, _) in enumerate(INDICATOR_ORDER):
-                predicted = _parse_direction(reasons[idx])
+                if ind_id in nondirectional:
+                    continue
+
+                # Flat moves are skipped only for directional indicators.
+                if actual is None:
+                    continue
+
+                predicted = _parse_direction(indicator_reasons[idx])
                 if predicted == "neutral":
                     continue
+
                 totals[ind_id]["total"] += 1
                 if predicted == actual:
                     totals[ind_id]["hits"] += 1
 
     indicators: List[Dict] = []
+
+    metric_labels = {
+        "max_pain": "Moved closer to Max Pain",
+        "atr_risk": "60m move within 1× ATR",
+        "india_vix": "60m move within 1× VIX expected move",
+    }
+
+    metric_definitions = {
+        "max_pain": (
+            "Absolute distance from Max Pain was smaller at the "
+            "60-minute check."
+        ),
+        "atr_risk": (
+            "Absolute 60-minute spot move was less than or equal "
+            "to ATR at analysis time."
+        ),
+        "india_vix": (
+            "Absolute 60-minute spot move was less than or equal "
+            "to the one-sigma VIX-implied one-hour move."
+        ),
+    }
+
     for ind_id, icon, title in INDICATOR_ORDER:
-        hits, total = totals[ind_id]["hits"], totals[ind_id]["total"]
+
+        if ind_id in nondirectional:
+            hits = nondirectional[ind_id]["hits"]
+            total = nondirectional[ind_id]["total"]
+            rate = round(hits / total * 100, 1) if total > 0 else None
+
+            indicators.append({
+                "id": ind_id,
+                "icon": icon,
+                "title_ta": title,
+                "hits": hits,
+                "total": total,
+                "success_rate": rate,
+                "insufficient_data": total < MIN_SIGNALS_FOR_CONFIDENCE,
+                "metric_type": "non_directional",
+                "metric_label": metric_labels[ind_id],
+                "metric_definition": metric_definitions[ind_id],
+                "horizon_minutes": HORIZON_MINUTES,
+            })
+            continue
+
+        hits = totals[ind_id]["hits"]
+        total = totals[ind_id]["total"]
         rate = round(hits / total * 100, 1) if total > 0 else None
+
         indicators.append({
             "id": ind_id,
             "icon": icon,
@@ -171,12 +303,23 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
             "total": total,
             "success_rate": rate,
             "insufficient_data": total < MIN_SIGNALS_FOR_CONFIDENCE,
+            "metric_type": "directional",
         })
 
-    # அதிக success rate முதலில் வரும் மாதிரி sort — data இல்லாதவை கடைசில்
-    indicators.sort(key=lambda x: (x["success_rate"] is None, -(x["success_rate"] or 0)))
+    # Directional indicators first; non-directional metrics at the end.
+    indicators.sort(
+        key=lambda x: (
+            x["metric_type"] != "directional",
+            x["success_rate"] is None,
+            -(x["success_rate"] or 0),
+        )
+    )
 
-    overall_rate = round(overall_hits / overall_total * 100, 1) if overall_total > 0 else None
+    overall_rate = (
+        round(overall_hits / overall_total * 100, 1)
+        if overall_total > 0
+        else None
+    )
 
     return {
         "symbol": symbol,
@@ -191,3 +334,4 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
         },
         "indicators": indicators,
     }
+

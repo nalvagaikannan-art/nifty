@@ -8,6 +8,7 @@
         <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
         <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
         <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+        <button class="sym-tab" data-sym="SENSEX">SENSEX</button>
     </div>
 </div>
 
@@ -261,7 +262,20 @@ function loadLive(sym) {
 $(document).ready(function() {
     loadLive(curSym);
     loadLiveChart(curSym);
-    setInterval(function(){ loadLive(curSym); }, 30000);
+    function liveIsNseMarketHoursNow(){
+      var now = new Date();
+      var ist = new Date(now.getTime() + (330 * 60000));
+      var day = ist.getUTCDay(); // 0=Sun, 6=Sat
+      if(day === 0 || day === 6) return false;
+
+      var mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+      return mins >= (9 * 60 + 15) && mins < (15 * 60 + 30);
+    }
+
+    setInterval(function(){
+      if(!liveIsNseMarketHoursNow()) return;
+      loadLive(curSym);
+    }, 30000);
     // Candles are 5-min bars — refetching every 30s like the rest of the
     // page would just hammer the API for identical data; 60s is enough to
     // catch each new bar promptly without the extra load.

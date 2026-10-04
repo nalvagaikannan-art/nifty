@@ -29,7 +29,7 @@ import logging
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 
 # Each accuracy computation scans up to 60 days of MarketData/AnalysisResult
 # rows in-process. Left unbounded, a slow/heavy computation on Render's free

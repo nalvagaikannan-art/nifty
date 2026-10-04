@@ -5,6 +5,18 @@ from app.api.deps import get_fetcher
 
 router = APIRouter()
 
+
+def _strikes_for_range(range_value: str):
+    value = str(range_value or "10").strip().lower()
+    if value == "full":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 10
+    return max(1, min(n, 100))
+
+
 @router.get("/pcr/{symbol}")
 async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     chain = await fetcher.get_option_chain(symbol)
@@ -25,9 +37,15 @@ async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
 async def get_option_chain(
     symbol: str,
     expiry: str = None,
+    range: str = "10",
     fetcher: DataFetcher = Depends(get_fetcher),
 ):
-    chain = await fetcher.get_option_chain(symbol, expiry=expiry)
+    strikes_each_side = _strikes_for_range(range)
+    chain = await fetcher.get_option_chain(
+        symbol,
+        expiry=expiry,
+        strikes_each_side=strikes_each_side,
+    )
     analyzer = OptionAnalyzer()
     df = analyzer.process_option_chain(chain)
     underlying = chain.get("underlying_price", 0)
@@ -52,6 +70,7 @@ async def get_option_chain(
 async def get_option_chain_alias(
     symbol: str,
     expiry: str = None,
+    range: str = "10",
     fetcher: DataFetcher = Depends(get_fetcher),
 ):
     """Alias for /chain/{symbol}, flattened for the terminal/beginner
@@ -60,7 +79,7 @@ async def get_option_chain_alias(
     /chain/{symbol} stays the canonical, unchanged endpoint for existing
     consumers — no duplicate chain fetch here, just reshaping.
     """
-    data = await get_option_chain(symbol, expiry, fetcher)
+    data = await get_option_chain(symbol, expiry, range, fetcher)
     oi_sum = data.get("oi_summary", {})
     data["atm_call_oi"] = oi_sum.get("atm_call_oi")
     data["atm_put_oi"]  = oi_sum.get("atm_put_oi")

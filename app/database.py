@@ -10,7 +10,7 @@ DATABASE_URL = settings.database_url
 _is_sqlite = not DATABASE_URL or DATABASE_URL.startswith("sqlite")
 
 if not DATABASE_URL:
-    db_path = Path(settings.sqlite_db_path)
+    db_path = Path(settings.sqlite_db_path).resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
 elif not _is_sqlite:

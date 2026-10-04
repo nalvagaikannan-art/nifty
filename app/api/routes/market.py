@@ -6,7 +6,7 @@ from app.api.deps import get_fetcher
 
 router = APIRouter()
 
-VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 VALID_INTERVALS = {"ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE", "ONE_HOUR"}
 
 @router.get("/spot/{symbol}")

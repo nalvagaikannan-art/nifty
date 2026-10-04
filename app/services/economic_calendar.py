@@ -34,6 +34,7 @@ from typing import Dict, List, Optional
 import httpx
 
 from app.utils.helpers import NSE_HOLIDAYS
+from app.utils.helpers import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class EconomicCalendarService:
 
     def get_expiry_calendar(self, today: Optional[date] = None) -> Dict:
         """Deterministic weekly + monthly expiry, no network call."""
-        today = today or datetime.now().date()
+        today = today or now_ist().date()
         weekly = _next_weekly_expiry(today)
         this_month_expiry = _monthly_expiry(today.year, today.month)
         if this_month_expiry < today:

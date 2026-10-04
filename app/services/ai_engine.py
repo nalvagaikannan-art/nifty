@@ -79,6 +79,11 @@ class AIEngine:
                 parsed["rule_market_bias"]    = decision.get("market_bias")
                 parsed["bull_score"]          = decision.get("bull_score", 0)
                 parsed["bear_score"]          = decision.get("bear_score", 0)
+                parsed["margin"]               = decision.get(
+                    "margin",
+                    (decision.get("bull_score", 0) or 0)
+                    - (decision.get("bear_score", 0) or 0),
+                )
                 parsed["rule_confidence"]     = decision.get("confidence", 0)
                 parsed["ai_agrees"]           = ai_agrees
                 parsed["_provider"]           = provider

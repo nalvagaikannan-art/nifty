@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from app.services.market_analyzer import MarketAnalyzer
+from app.utils.cache import _cache
 
 
 def _mock_fetcher(spot_price: float = 24650.0, prices=None, market_open: bool = True):
@@ -60,14 +61,45 @@ def _mock_fetcher(spot_price: float = 24650.0, prices=None, market_open: bool = 
 
 @pytest.fixture(autouse=True)
 def _patch_db_and_global_calls():
-    """These three are the pipeline's only non-fetcher external calls —
-    stub them so nothing touches a real DB or the internet."""
-    with patch("app.services.market_analyzer.save_option_chain_snapshot", new=AsyncMock(return_value=None)), \
-         patch("app.services.market_analyzer.global_market_service.get_snapshot",
-               new=AsyncMock(return_value={"instruments": {}, "global_change_pct": None, "gift_nifty_change_pct": None})), \
-         patch("app.services.market_analyzer.history_service.get_oi_change_since",
-               new=AsyncMock(return_value={"available": False, "reason": "test stub"})):
+    """Keep analyzer unit tests isolated from real DB/cache/network state."""
+    _cache.clear()
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=True),
+        patch("app.utils.cache._redis_client", None),
+        patch(
+            "app.services.market_analyzer.save_option_chain_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.save_market_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.market_analyzer.global_market_service.get_snapshot",
+            new=AsyncMock(
+                return_value={
+                    "instruments": {},
+                    "global_change_pct": None,
+                    "gift_nifty_change_pct": None,
+                }
+            ),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_oi_change_since",
+            new=AsyncMock(
+                return_value={
+                    "available": False,
+                    "reason": "test stub",
+                }
+            ),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_intraday_ohlc_before",
+            new=AsyncMock(return_value=[]),
+        ),
+    ):
         yield
+    _cache.clear()
 
 
 @pytest.mark.asyncio
@@ -76,7 +108,8 @@ async def test_full_overview_runs_end_to_end_with_insufficient_history():
     path (spec §7: never fabricate indicators from data that isn't there)
     and still return a complete, well-shaped result rather than crashing."""
     analyzer = MarketAnalyzer(fetcher=_mock_fetcher(prices=[]))
-    result = await analyzer.get_full_market_overview("NIFTY")
+    with patch("app.services.market_analyzer.is_market_hours_ist", return_value=True):
+        result = await analyzer.get_full_market_overview("NIFTY")
 
     assert result["technical_data_source"] == "placeholder"
     assert result["trend"] == "sideways"
@@ -158,12 +191,12 @@ async def test_expiry_param_is_forwarded_to_option_chain_fetch():
     analyzer = MarketAnalyzer(fetcher=fetcher)
 
     await analyzer.get_full_market_overview("NIFTY", expiry="04-Sep-2025")
-    fetcher.get_option_chain.assert_called_with("NIFTY", expiry="04-Sep-2025")
+    fetcher.get_option_chain.assert_called_with("NIFTY", "04-Sep-2025")
 
     # Omitting expiry must keep the previous nearest-expiry default (None),
     # not silently reuse whatever the last call happened to pass.
     await analyzer.get_full_market_overview("BANKNIFTY")
-    fetcher.get_option_chain.assert_called_with("BANKNIFTY", expiry=None)
+    fetcher.get_option_chain.assert_called_with("BANKNIFTY", None)
 
 
 @pytest.mark.asyncio

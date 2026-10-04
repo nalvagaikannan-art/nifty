@@ -31,6 +31,149 @@ def _norm_pdf(x: float) -> float:
     return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
 
 
+def _black_scholes_price(
+    spot: float,
+    strike: float,
+    days_to_expiry: float,
+    iv_pct: float,
+    option_type: str,
+    r: float = RISK_FREE_RATE,
+) -> Optional[float]:
+    """European Black-Scholes option price for IV inversion."""
+    if (
+        spot <= 0
+        or strike <= 0
+        or days_to_expiry is None
+        or days_to_expiry <= 0
+        or iv_pct <= 0
+    ):
+        return None
+
+    option_type = option_type.upper()
+    if option_type not in ("CE", "PE"):
+        return None
+
+    sigma = iv_pct / 100.0
+    t = days_to_expiry / TRADING_DAYS_PER_YEAR
+
+    if sigma <= 0 or t <= 0:
+        return None
+
+    sqrt_t = math.sqrt(t)
+
+    try:
+        d1 = (
+            math.log(spot / strike)
+            + (r + 0.5 * sigma * sigma) * t
+        ) / (sigma * sqrt_t)
+        d2 = d1 - sigma * sqrt_t
+    except (ValueError, ZeroDivisionError):
+        return None
+
+    discount = math.exp(-r * t)
+
+    if option_type == "CE":
+        price = (
+            spot * _norm_cdf(d1)
+            - strike * discount * _norm_cdf(d2)
+        )
+    else:
+        price = (
+            strike * discount * _norm_cdf(-d2)
+            - spot * _norm_cdf(-d1)
+        )
+
+    return price if math.isfinite(price) else None
+
+
+def implied_volatility_from_price(
+    spot: float,
+    strike: float,
+    days_to_expiry: float,
+    option_price: float,
+    option_type: str,
+    r: float = RISK_FREE_RATE,
+    min_iv_pct: float = 0.1,
+    max_iv_pct: float = 500.0,
+    tolerance: float = 0.01,
+    max_iterations: int = 80,
+) -> Optional[float]:
+    """
+    Derive IV (%) from an observed option premium using dependency-free
+    Black-Scholes bisection.
+
+    This is deliberately a fallback for feeds that do not provide IV.
+    It never fabricates an IV for expiry-day/expired contracts.
+    """
+    if (
+        spot <= 0
+        or strike <= 0
+        or days_to_expiry is None
+        or days_to_expiry <= 0
+        or option_price <= 0
+    ):
+        return None
+
+    option_type = option_type.upper()
+    if option_type not in ("CE", "PE"):
+        return None
+
+    # Basic no-arbitrage lower bound.
+    t = days_to_expiry / TRADING_DAYS_PER_YEAR
+    discount = math.exp(-r * t)
+
+    if option_type == "CE":
+        intrinsic = max(0.0, spot - strike * discount)
+    else:
+        intrinsic = max(0.0, strike * discount - spot)
+
+    # Allow a tiny numerical tolerance around intrinsic value.
+    if option_price < intrinsic - 1e-6:
+        return None
+
+    low = float(min_iv_pct)
+    high = float(max_iv_pct)
+
+    low_price = _black_scholes_price(
+        spot, strike, days_to_expiry, low, option_type, r
+    )
+    high_price = _black_scholes_price(
+        spot, strike, days_to_expiry, high, option_type, r
+    )
+
+    if low_price is None or high_price is None:
+        return None
+
+    # Premium must be bracketed by the IV search range.
+    if option_price < low_price - tolerance:
+        return None
+
+    if option_price > high_price + tolerance:
+        return None
+
+    for _ in range(max_iterations):
+        mid = (low + high) / 2.0
+        mid_price_value = _black_scholes_price(
+            spot, strike, days_to_expiry, mid, option_type, r
+        )
+
+        if mid_price_value is None:
+            return None
+
+        diff = mid_price_value - option_price
+
+        if abs(diff) <= tolerance:
+            return round(mid, 4)
+
+        if diff > 0:
+            high = mid
+        else:
+            low = mid
+
+    result = (low + high) / 2.0
+    return round(result, 4) if math.isfinite(result) else None
+
+
 def black_scholes_greeks(
     spot: float,
     strike: float,

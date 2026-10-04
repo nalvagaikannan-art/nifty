@@ -13,8 +13,11 @@ from app.api.routes import paper_trade as paper_trade_routes
 from app.utils.logging import setup_logging
 from app.services.data_fetcher import DataFetcher
 import app.services.paper_trading  # noqa: F401 — registers PaperTrade + TradeJournal models
-from app.services.market_analyzer import MarketAnalyzer
-from app.services.history_collector import run_periodic_collection
+from app.services.market_analyzer import MarketAnalyzer, _snapshot_persistence_enabled
+from app.services.history_collector import (
+    run_periodic_collection,
+    run_periodic_live_market_snapshots,
+)
 from app.exceptions import MarketDataError, AIProviderError
 from app.middleware.rate_limit import RateLimitMiddleware
 import logging
@@ -54,6 +57,13 @@ async def lifespan(app: FastAPI):
     app.state.history_collector_task = asyncio.create_task(
         run_periodic_collection(app.state.market_analyzer)
     )
+
+    # Lightweight market-hours writer fed only by the existing Angel
+    # WebSocket LTP memory. This fills MarketData history even when no
+    # browser/API request is active and adds no broker REST calls.
+    app.state.live_market_snapshot_task = asyncio.create_task(
+        run_periodic_live_market_snapshots()
+    )
     # FIX (2026-08-21): Angel One's option-chain/futures-premium calls both
     # need the ~15-30MB instrument master file (see angel_one._ensure_
     # instruments). Previously that file was only downloaded lazily, on
@@ -69,7 +79,25 @@ async def lifespan(app: FastAPI):
     # startup is never blocked or failed by this.
     
     from app.services.angel_one import angel_session
+    from app.services.angel_live_feed import angel_live_feed
+
     if angel_session.is_configured:
+        # Start Angel One WebSocket LTP feed independently from REST polling.
+        # The feed maintains in-memory NIFTY/BANKNIFTY/FINNIFTY ticks.
+        try:
+            ws_started = await angel_live_feed.start()
+            logger.info(
+                "Angel live feed startup result: started=%s",
+                ws_started,
+            )
+        except Exception as e:
+            # WebSocket failure must never prevent the REST-based application
+            # from starting. REST remains the primary fallback.
+            logger.warning(
+                "Angel live feed startup failed; continuing with REST: %s",
+                e,
+            )
+
         # FIX (2026-08-26): warmup_instruments() downloads 36MB instrument
         # master. Running it immediately at startup (same moment as
         # history_collector first tick + DB init + NSE session) caused a
@@ -80,6 +108,28 @@ async def lifespan(app: FastAPI):
         async def _delayed_warmup():
             await asyncio.sleep(15)
             await angel_session.warmup_instruments()
+
+            # Prewarm the same foreground NIFTY overview cache used by
+            # Strategy/Analysis requests, so the first request avoids the
+            # cold Angel fetch latency.
+            try:
+                  token = _snapshot_persistence_enabled.set(False)
+                  try:
+                      logger.info("Startup prewarm: NIFTY market overview starting")
+                      await app.state.market_analyzer.get_full_market_overview(
+                          "NIFTY",
+                          expiry=None,
+                      )
+                      logger.info("Startup prewarm: NIFTY market overview completed")
+                  finally:
+                      _snapshot_persistence_enabled.reset(token)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "Startup prewarm: NIFTY market overview failed: %s",
+                    e,
+                )
 
         app.state.angel_warmup_task = asyncio.create_task(_delayed_warmup())
     else:
@@ -92,12 +142,24 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    app.state.live_market_snapshot_task.cancel()
+    try:
+        await app.state.live_market_snapshot_task
+    except asyncio.CancelledError:
+        pass
+
     if app.state.angel_warmup_task and not app.state.angel_warmup_task.done():
         app.state.angel_warmup_task.cancel()
         try:
             await app.state.angel_warmup_task
         except asyncio.CancelledError:
             pass
+    # Stop Angel WebSocket before closing the REST/data services.
+    try:
+        angel_live_feed.stop()
+    except Exception as e:
+        logger.warning("Angel live feed shutdown failed: %s", e)
+
     await app.state.data_fetcher.close()
     from app.services.global_market import global_market_service
     from app.services.economic_calendar import economic_calendar_service

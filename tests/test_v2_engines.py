@@ -218,7 +218,7 @@ class TestTradeLevels:
         data   = make_market_data()
         result = calculate_trade_levels(data, "bullish", spot=24000, option_ltp=150)
         assert result["direction"] == "bullish"
-        assert result["stop_loss_spot"] < 24000
+        assert result["stop_loss_spot"] < result["trigger"]
         assert result["target_1_spot"] > 24000
         assert result["target_2_spot"] > result["target_1_spot"]
         assert result["trigger"] > 0
@@ -271,6 +271,7 @@ class TestRiskEngine:
             entry_price=150,
             stop_loss_price=100,
             rr_ratio=2.0,
+            option_rr_ratio=2.0,
             market_regime="TREND_UP",
             vix=14,
             days_to_expiry=7,
@@ -327,7 +328,7 @@ class TestRiskEngine:
         assert result["allowed"] is False
 
     def test_low_rr_rejected(self):
-        result = assess_risk(**self._good_params(rr_ratio=1.0))
+        result = assess_risk(**self._good_params(rr_ratio=1.0, option_rr_ratio=1.0))
         assert result["allowed"] is False
 
     def test_signal_strength_does_not_increase_position(self):

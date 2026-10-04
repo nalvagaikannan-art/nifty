@@ -9,6 +9,7 @@ import logging
 from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
 from app.models import SignalState, SignalHistory
+from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ MAX_HISTORY = 20
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_utc_naive()
 
 
 def _to_signal_dict(row: SignalHistory) -> dict:
@@ -96,6 +97,38 @@ async def save_signal_state(state: dict) -> None:
             if row is None:
                 row = SignalState(symbol=symbol)
                 db.add(row)
+            else:
+                # ATOMIC_LIFECYCLE_FIX_20260923
+                # Do not allow a genuinely older in-flight request to
+                # overwrite a newer lifecycle evaluation.
+                incoming_eval = state.get("last_evaluation_at")
+                stored_eval = row.last_evaluation_at
+
+                if incoming_eval is not None and stored_eval is not None:
+                    try:
+                        inc = incoming_eval
+                        st = stored_eval
+
+                        if getattr(inc, "tzinfo", None) is not None:
+                            inc = inc.astimezone(timezone.utc).replace(tzinfo=None)
+
+                        if getattr(st, "tzinfo", None) is not None:
+                            st = st.astimezone(timezone.utc).replace(tzinfo=None)
+
+                        if inc < st:
+                            logger.warning(
+                                "Ignoring stale signal state for %s: "
+                                "incoming_eval=%s < stored_eval=%s",
+                                symbol, incoming_eval, stored_eval
+                            )
+                            await db.rollback()
+                            return
+                    except Exception as exc:
+                        logger.warning(
+                            "Signal-state timestamp comparison failed for %s: %s",
+                            symbol, exc
+                        )
+
             row.active_side = state.get("active_side", "NONE")
             row.candidate_side = state.get("candidate_side", "NONE")
             row.confirmations = int(state.get("confirmations", 0) or 0)

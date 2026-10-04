@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Text, UniqueConstraint, Index
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -66,3 +66,40 @@ class SignalHistory(Base):
     reasons = Column(JSON, nullable=True)
     timestamp = Column(DateTime, server_default=func.now(), index=True)
 
+
+
+class IntradayOHLC(Base):
+    """
+    Persisted real completed 5-minute intraday candles.
+
+    15-minute and 1-hour frames are derived locally from these raw 5-minute
+    candles, so there is only one source-of-truth candle stream to persist.
+    """
+    __tablename__ = "intraday_ohlc"
+
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True, nullable=False)
+    timestamp = Column(DateTime, nullable=False, index=True)
+
+    # `open` is nullable because the WebSocket completed-candle feed may not
+    # provide it for a WS-only candle. REST candles populate it when available.
+    open_price = Column("open", Float, nullable=True)
+    high = Column(Float, nullable=False)
+    low = Column(Float, nullable=False)
+    close = Column(Float, nullable=False)
+    volume = Column(Integer, nullable=False, default=0)
+
+    data_source = Column(String, nullable=False, default="angel_one_intraday")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "timestamp",
+            name="uq_intraday_ohlc_symbol_timestamp",
+        ),
+        Index(
+            "ix_intraday_ohlc_symbol_timestamp",
+            "symbol",
+            "timestamp",
+        ),
+    )

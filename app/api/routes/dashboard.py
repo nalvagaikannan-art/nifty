@@ -37,16 +37,15 @@ async def dashboard_status(
 
 @router.get("/summary")
 async def dashboard_summary(analyzer: MarketAnalyzer = Depends(get_analyzer)):
-    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
 
     async def _one(sym):
         try:
             data = await analyzer.get_full_market_overview(sym)
             dec  = data.get("decision", {})
-            await save_market_snapshot(data["spot"])
             return sym, {
                 "price":       data["spot"]["price"],
-                "change":      data["spot"]["change_percent"],
+                "change":      data["spot"].get("change_percent", 0),
                 "high":        data["spot"].get("high", 0),
                 "low":         data["spot"].get("low", 0),
                 "pcr":         data.get("pcr", 0),

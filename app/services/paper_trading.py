@@ -18,6 +18,8 @@ from __future__ import annotations
 import uuid
 import json
 import logging
+
+from app.services.contract_specs import resolve_lot_size
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -25,6 +27,7 @@ from sqlalchemy import Column, String, Float, Integer, DateTime, JSON, Boolean, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, AsyncSessionLocal
+from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +39,9 @@ STATUS_STOPPED   = "STOPPED"
 STATUS_CLOSED    = "CLOSED"
 STATUS_EXPIRED   = "EXPIRED"
 
-LOT_SIZE_MAP = {
-    "NIFTY":     50,
-    "BANKNIFTY": 15,
-    "FINNIFTY":  40,
-}
+# PAPER_TRADING_LOT_SIZE_SOURCE_20260925
+# Contract size comes from the resolved chain metadata when available;
+# otherwise use the current-contract fallback resolver.
 
 
 # ── SQLAlchemy Model ──────────────────────────────────────────────────────
@@ -49,8 +50,8 @@ class PaperTrade(Base):
     __tablename__ = "paper_trades"
 
     id                = Column(String, primary_key=True, default=lambda: str(uuid.uuid4())[:8])
-    created_at        = Column(DateTime, default=datetime.utcnow)
-    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at        = Column(DateTime, default=now_utc_naive)
+    updated_at        = Column(DateTime, default=now_utc_naive, onupdate=now_utc_naive)
     closed_at         = Column(DateTime, nullable=True)
 
     symbol            = Column(String, nullable=False)
@@ -97,7 +98,7 @@ class TradeJournal(Base):
 
     id                = Column(String, primary_key=True, default=lambda: str(uuid.uuid4())[:8])
     paper_trade_id    = Column(String, nullable=True)
-    created_at        = Column(DateTime, default=datetime.utcnow)
+    created_at        = Column(DateTime, default=now_utc_naive)
     closed_at         = Column(DateTime, nullable=True)
 
     symbol            = Column(String)
@@ -133,7 +134,12 @@ async def open_paper_trade(data: Dict) -> Dict:
                signal_strength, confluence_score, market_regime, ...
     """
     async with AsyncSessionLocal() as session:
-        lot_size = LOT_SIZE_MAP.get(data.get("symbol", "NIFTY").upper(), 50)
+        # PAPER_TRADING_LOT_SIZE_SOURCE_20260925
+        _symbol = str(data.get("symbol", "NIFTY")).upper()
+        lot_size = int(
+            data.get("lot_size")
+            or resolve_lot_size(_symbol, data.get("option_chain"))
+        )
         lots     = data.get("lots", 1)
         qty      = data.get("quantity", lots * lot_size)
 
@@ -182,8 +188,8 @@ async def close_paper_trade(trade_id: str, exit_price: float, exit_reason: str =
 
         trade.exit_price   = exit_price
         trade.exit_reason  = exit_reason
-        trade.closed_at    = datetime.utcnow()
-        trade.updated_at   = datetime.utcnow()
+        trade.closed_at    = now_utc_naive()
+        trade.updated_at   = now_utc_naive()
 
         # P&L
         if trade.side == "BUY":
@@ -365,7 +371,7 @@ async def get_paper_trade_stats(symbol: Optional[str] = None) -> Dict:
 async def get_daily_pnl() -> float:
     """Today's realized P&L from paper trades"""
     async with AsyncSessionLocal() as session:
-        today = datetime.utcnow().date()
+        today = now_utc_naive().date()
         q = select(PaperTrade).where(
             PaperTrade.status != STATUS_OPEN,
             func.date(PaperTrade.closed_at) == today

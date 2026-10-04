@@ -59,6 +59,27 @@ def bullish_market_data(spot: float = 24650.0) -> dict:
     d["gift_nifty_change_pct"] = 0.8
     d["fii_net_cr"] = 2000
     d["dii_net_cr"] = 500
+    d["technical_data_source"] = "intraday_5min_ohlc"
+    d["multi_timeframe"] = {
+        "5min": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+        "15min": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+        "1hr": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+    }
     return d
 
 
@@ -85,7 +106,7 @@ def bearish_market_data(spot: float = 24650.0) -> dict:
 def test_strongly_bullish_conditions_produce_call_bias():
     result = run_decision_engine(bullish_market_data())
     assert result["market_bias"] == "Bullish"
-    assert result["preferred_side"] == "CALL"
+    assert result["raw_preferred_side"] == "CALL"
     assert result["bull_score"] > result["bear_score"]
     assert result["confidence"] >= 60
 
@@ -93,7 +114,7 @@ def test_strongly_bullish_conditions_produce_call_bias():
 def test_strongly_bearish_conditions_produce_put_bias():
     result = run_decision_engine(bearish_market_data())
     assert result["market_bias"] == "Bearish"
-    assert result["preferred_side"] == "PUT"
+    assert result["raw_preferred_side"] == "PUT"
     assert result["bear_score"] > result["bull_score"]
 
 
@@ -125,11 +146,11 @@ def test_confidence_is_bounded_0_to_100():
 
 
 def test_reasons_list_has_one_entry_per_scored_condition():
-    """accuracy_engine.py / signal_accuracy.py assume exactly 20 reason
-    lines in this fixed order — this test is a contract check between the
-    two modules so a future edit to one doesn't silently break the other."""
+    """The first 20 reason entries are the fixed indicator slots used by
+    accuracy_engine.py; later entries may contain guard/session/MTF diagnostics."""
+
     result = run_decision_engine(bullish_market_data())
-    assert len(result["reasons"]) == 20
+    assert len(result["reasons"]) >= 20
 
 
 def test_high_vix_does_not_directly_flip_bull_bear_score():
@@ -160,7 +181,7 @@ def test_high_vix_does_not_directly_flip_bull_bear_score():
     # Direction is preserved — still bullish, not flipped to bearish/neutral.
     assert r_calm["bull_score"] > r_calm["bear_score"]
     assert r_volatile["bull_score"] > r_volatile["bear_score"]
-    assert r_calm["preferred_side"] == r_volatile["preferred_side"] == "CALL"
+    assert r_calm["raw_preferred_side"] == r_volatile["raw_preferred_side"] == "CALL"
     # but the volatility regime label itself should differ
     assert r_calm["volatility_regime"] != r_volatile["volatility_regime"]
     assert r_volatile["volatility_regime"] == "high"
@@ -246,10 +267,10 @@ def test_persistent_lifecycle_weak_opposite_signal_does_not_reverse():
     decision = _lifecycle_decision("PUT", -10)
 
     out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
-    assert out["signal_lifecycle"] == "HOLD_CALL"
+    assert out["signal_lifecycle"] == "WATCH_PUT"
     assert out["signal_reversal_confirmations"] == 0
-    assert out["signal_active_side"] == "CALL"
-    assert out["preferred_side"] == "CALL"
+    assert out["signal_active_side"] == "NONE"
+    assert out["preferred_side"] == "NONE"
 
 
 def test_persistent_lifecycle_same_active_side_remains_hold():
@@ -291,3 +312,25 @@ def test_persistent_lifecycle_hard_gate_clears_directional_state():
     assert out["signal_confirmations"] == 0
     assert out["signal_reversal_confirmations"] == 0
     assert out["preferred_side"] == "NONE"
+
+
+# DB_MTF_LINEAGE_REGRESSION_20260930
+def test_mtf_live_valid_rejects_history_db_fallback_even_when_fresh():
+    from app.services.decision_engine import _mtf_live_valid
+
+    mtf = {
+        "5min": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+        "15min": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+        "1hr": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+    }
+
+    assert _mtf_live_valid(mtf) is False

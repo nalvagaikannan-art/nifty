@@ -42,7 +42,7 @@ def test_bearish_signal_does_not_force_buy_ce():
         _market_data(10, 23, -20, "NONE", 48)
     )
 
-    assert result["candidates"]["BUY PE"] == 30
+    assert result["candidates"]["BUY PE"] == 31
     assert result["candidates"]["BUY CE"] == 7
     assert result["best"] == "WAIT"
 

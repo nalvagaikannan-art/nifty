@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.services.angel_one import angel_session, AngelOneAuthError, AngelOneError
+from app.services.angel_live_feed import angel_live_feed
 import logging
 
 router = APIRouter()
@@ -22,6 +23,16 @@ logger = logging.getLogger(__name__)
 async def get_status():
     """Angel One session status + configured check."""
     return angel_session.get_status()
+
+
+# ── Live WebSocket Feed Diagnostic ───────────────────────────────────────────
+@router.get("/live-feed")
+async def get_live_feed_status():
+    """Production Angel WebSocket connection and latest tick diagnostics."""
+    return {
+        "websocket": angel_live_feed.status(),
+        "ticks": angel_live_feed.get_snapshot(),
+    }
 
 
 # ── Login ──────────────────────────────────────────────────────────────────
