@@ -9,6 +9,7 @@ BUY CE / BUY PE / SELL CE / SELL PE / WAIT
 Order placement இல்லை — Analysis + Decision Support மட்டும்.
 """
 from fastapi import APIRouter, Depends, HTTPException
+from app.schemas import StrategyRecommendationResponse
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.strategy_engine import generate_option_strategy, generate_price_levels
@@ -936,7 +937,7 @@ async def resolve_final_strategy_action(
         "whipsaw_result": whipsaw_result,
     }
 
-@router.get("/recommend/{symbol}")
+@router.get("/recommend/{symbol}", response_model=StrategyRecommendationResponse)
 async def strike_recommendation(
 
 

@@ -222,6 +222,87 @@ class AIAnalysisRouteResponse(BaseModel):
 
     model_config = {"extra": "allow"}
 
+
+class StrategyRecommendationResponse(BaseModel):
+    """
+    Public API contract for /api/strategy/recommend/{symbol}.
+
+    Strategy output contains several nested engine payloads whose internal
+    structures may evolve independently, so those objects remain flexible.
+    Extra fields are preserved for backward compatibility with branch-specific
+    fields such as signal_lifecycle_reason.
+    """
+    action: str
+    ai_reason: str
+    all_expiries: List[str]
+    bear_score: int
+    best_score: float
+    best_strategy: str
+    bull_score: int
+    candidates: Dict
+    confidence: int
+    confluence: Dict
+    data_completeness_pct: int
+    disclaimer: str
+    entry_gate: Dict
+    expected_move: Dict
+    expiry: str
+    expiry_info: Dict
+    hard_gated: bool
+    iv_info: Dict
+    lot_size: int
+    macd: Dict
+    margin: int
+    market_bias: str
+    market_open: bool
+    market_regime: Dict
+    market_regime_confidence: str
+    market_regime_no_trade: bool
+    market_regime_no_trade_reason: str
+    market_regime_reasons: List[str]
+    market_snapshot_timestamp: Optional[str] = None
+    market_state: str
+    max_pain: float
+    multi_timeframe: Dict
+    pcr: float
+    preferred_side: str
+    price_levels: Optional[Dict] = None
+    raw_preferred_side: str
+    reversal_type: str
+    risk: str
+    rsi: float
+    signal_action: str
+    signal_active_side: str
+    signal_candidate: str
+    signal_confirmations: int
+    signal_history: List[Dict]
+    signal_lifecycle: str
+    signal_reversal: bool
+    signal_reversal_confirmations: int
+    signal_strength: int
+    spot: float
+    strategy: str
+    strategy_detail: Optional[Dict] = None
+    strategy_reason: str
+    strikes: List[Dict]
+    symbol: str
+    technical_data_source: str
+    technicals: Dict
+    technicals_daily: Dict
+    time_session: str
+    trade_confidence: int
+    v2_risk: Optional[Dict] = None
+    v2_trade_levels: Optional[Dict] = None
+    vix: float
+    volatility_label: str
+    volatility_regime: str
+    wait_reasons: List[str]
+    warnings: List[str]
+    win_probability: Optional[float] = None
+    win_probability_note: str
+
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
