@@ -3,13 +3,14 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.data_fetcher import DataFetcher
 from app.exceptions import MarketDataError
 from app.api.deps import get_fetcher
+from app.schemas import MarketSpotResponse
 
 router = APIRouter()
 
 VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 VALID_INTERVALS = {"ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE", "ONE_HOUR"}
 
-@router.get("/spot/{symbol}")
+@router.get("/spot/{symbol}", response_model=MarketSpotResponse)
 async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     try:
         return await fetcher.get_spot(symbol)

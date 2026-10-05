@@ -2,6 +2,34 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Literal
 from datetime import datetime
 
+class MarketSpotResponse(BaseModel):
+    """
+    Public API contract for /api/market/spot/{symbol}.
+
+    Covers the common 13-field REST/NSE/Zerodha shape and the additional
+    Angel One WebSocket freshness metadata when available.
+    Extra provider fields are preserved so the API does not silently lose
+    upstream data during response-model validation.
+    """
+    symbol: str
+    price: float
+    change: float
+    change_percent: float
+    high: float
+    low: float
+    open: float
+    prev_close: float
+    volume: int
+    market_open: bool
+    market_status_source: str
+    data_source: str
+    timestamp: datetime
+    exchange_timestamp: Optional[float] = None
+    tick_age_sec: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
+
 class MarketSnapshot(BaseModel):
     symbol: str
     price: float
