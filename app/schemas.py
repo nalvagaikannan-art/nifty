@@ -303,6 +303,41 @@ class StrategyRecommendationResponse(BaseModel):
 
     model_config = {"extra": "allow"}
 
+
+class OptionsChainAnalyticsResponse(BaseModel):
+    """
+    Public API contract for /api/options/chain/{symbol}.
+
+    The option-chain rows and derived analytics contain provider-specific
+    nested fields, so nested payloads remain flexible while the top-level
+    API contract is explicit.
+    """
+    symbol: str
+    expiry: str
+    all_expiries: List[str]
+    underlying_price: float
+    pcr: float
+    max_pain: float
+    oi_summary: Dict
+    candidates: Dict
+    data_source: str
+    data: List[Dict]
+
+    model_config = {"extra": "allow"}
+
+
+class OptionsChainAliasResponse(OptionsChainAnalyticsResponse):
+    """
+    Public API contract for /api/options/{symbol}.
+
+    This alias exposes three ATM/IV fields flattened from oi_summary.
+    """
+    atm_call_oi: Optional[float] = None
+    atm_put_oi: Optional[float] = None
+    iv_skew: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from app.services.option_analyzer import OptionAnalyzer
 from app.services.data_fetcher import DataFetcher
 from app.api.deps import get_fetcher
+from app.schemas import OptionsChainAnalyticsResponse, OptionsChainAliasResponse
 
 router = APIRouter()
 
@@ -33,7 +34,7 @@ async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     maxpain = analyzer.compute_max_pain(df)
     return {"symbol": symbol, "max_pain": maxpain}
 
-@router.get("/chain/{symbol}")
+@router.get("/chain/{symbol}", response_model=OptionsChainAnalyticsResponse)
 async def get_option_chain(
     symbol: str,
     expiry: str = None,
@@ -66,7 +67,7 @@ async def get_option_chain(
         "data":             chain.get("data", []),
     }
 
-@router.get("/{symbol}")
+@router.get("/{symbol}", response_model=OptionsChainAliasResponse)
 async def get_option_chain_alias(
     symbol: str,
     expiry: str = None,
