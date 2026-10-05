@@ -24,6 +24,13 @@ from app.services.signal_accuracy import (
     compute_signal_accuracy, compute_premium_accuracy, calibrate_confidence, HORIZONS_MINUTES,
 )
 from app.services.error_log import record_error, recent_errors
+from app.schemas import (
+    AccuracyIndicatorsResponse,
+    AccuracySignalsResponse,
+    AccuracyPremiumResponse,
+    ConfidenceCalibrationResponse,
+    AccuracyStatusResponse,
+)
 import logging
 
 router = APIRouter()
@@ -61,7 +68,7 @@ async def _run_with_timeout(coro, *, endpoint: str, sym: str, timeout_detail: st
         raise HTTPException(500, detail=error_detail)
 
 
-@router.get("/indicators/{symbol}")
+@router.get("/indicators/{symbol}", response_model=AccuracyIndicatorsResponse)
 async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
     sym = _check_symbol(symbol)
     return await _run_with_timeout(
@@ -72,7 +79,7 @@ async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
     )
 
 
-@router.get("/signals/{symbol}")
+@router.get("/signals/{symbol}", response_model=AccuracySignalsResponse)
 async def signal_accuracy(
     symbol: str,
     days: int = Query(15, ge=1, le=60),
@@ -87,7 +94,7 @@ async def signal_accuracy(
     )
 
 
-@router.get("/premium/{symbol}")
+@router.get("/premium/{symbol}", response_model=AccuracyPremiumResponse)
 async def premium_accuracy(
     symbol: str,
     days: int = Query(15, ge=1, le=60),
@@ -105,7 +112,7 @@ async def premium_accuracy(
     )
 
 
-@router.get("/calibration/{symbol}")
+@router.get("/calibration/{symbol}", response_model=ConfidenceCalibrationResponse)
 async def confidence_calibration(
     symbol: str,
     confidence: float = Query(..., ge=0, le=100, description="Current Signal Strength (0-100) to look up"),
@@ -128,7 +135,7 @@ async def confidence_calibration(
     )
 
 
-@router.get("/status/{symbol}")
+@router.get("/status/{symbol}", response_model=AccuracyStatusResponse)
 async def accuracy_status(symbol: str):
     """Persistence diagnostics: proves whether history is actually being stored."""
     sym = _check_symbol(symbol)

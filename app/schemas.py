@@ -410,6 +410,134 @@ class MarketBreadthResponse(BaseModel):
     source: str
     model_config = {"extra": "allow"}
 
+
+class AccuracyIndicatorResponse(BaseModel):
+    id: str
+    icon: str
+    title_ta: str
+    hits: int
+    total: int
+    success_rate: float
+    insufficient_data: bool
+    metric_type: str
+    model_config = {"extra": "allow"}
+
+
+class AccuracyIndicatorsOverallResponse(BaseModel):
+    hits: int
+    total: int
+    success_rate: float
+    insufficient_data: bool
+    model_config = {"extra": "allow"}
+
+
+class AccuracyIndicatorsResponse(BaseModel):
+    days: int
+    horizon_minutes: int
+    indicators: List[AccuracyIndicatorResponse]
+    overall: AccuracyIndicatorsOverallResponse
+    snapshots_used: int
+    symbol: str
+    model_config = {"extra": "allow"}
+
+
+class AccuracySignalsResponse(BaseModel):
+    accuracy_basis: str
+    actionable_episodes: int
+    by_confidence_range: Dict
+    by_horizon: Dict
+    by_regime: Dict
+    call_buy_accuracy: Dict
+    call_sell_accuracy: Dict
+    days: int
+    episode_gap_minutes: int
+    headline_horizon_minutes: int
+    no_directional_recommendation: int
+    no_price_data: int
+    overall: Dict
+    pending_at_headline_horizon: int
+    put_buy_accuracy: Dict
+    put_sell_accuracy: Dict
+    signals_seen: int
+    symbol: str
+    model_config = {"extra": "allow"}
+
+
+class AccuracyPremiumResponse(BaseModel):
+    accuracy_basis: str
+    actionable_episodes: int
+    by_horizon: Dict
+    by_moneyness: Dict
+    by_strike: List[Dict]
+    call_buy_accuracy: Dict
+    call_buy_accuracy_net_of_costs: Dict
+    call_sell_accuracy: Dict
+    call_sell_accuracy_net_of_costs: Dict
+    days: int
+    disagreement: Dict
+    episode_gap_minutes: int
+    estimated_round_trip_cost_pct: float
+    headline_horizon_minutes: int
+    mfe_mae: Dict
+    no_premium_data: int
+    overall: Dict
+    overall_net_of_costs: Dict
+    pending_at_headline_horizon: int
+    put_buy_accuracy: Dict
+    put_buy_accuracy_net_of_costs: Dict
+    put_sell_accuracy: Dict
+    put_sell_accuracy_net_of_costs: Dict
+    signals_seen: int
+    signals_with_recommendation: int
+    signals_without_recommendation: int
+    symbol: str
+    model_config = {"extra": "allow"}
+
+
+class ConfidenceCalibrationResponse(BaseModel):
+    actionable_episodes_total: int
+    calibration_basis: str
+    calibration_curve: List[Dict]
+    confidence_bucket: Optional[str] = None
+    disclaimer: str
+    episode_gap_minutes: int
+    episodes: int
+    graded: int
+    historical_win_rate_pct: Optional[float] = None
+    horizon_minutes: int
+    insufficient_data: bool
+    lookback_days: int
+    min_signals_required: int
+    pending_episodes: int
+    sample_size: int
+    signal_strength: float
+    symbol: str
+    unknown_confidence_bucket_episodes: int
+    model_config = {"extra": "allow"}
+
+
+class AccuracyStatusSavedResponse(BaseModel):
+    market_snapshots: int
+    ai_signals: int
+    option_rows: int
+    model_config = {"extra": "allow"}
+
+
+class AccuracyStatusTimestampsResponse(BaseModel):
+    market: Optional[str] = None
+    analysis: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class AccuracyStatusResponse(BaseModel):
+    symbol: str
+    saved: AccuracyStatusSavedResponse
+    last_saved_utc: AccuracyStatusTimestampsResponse
+    database_configured: bool
+    note: str
+    recent_errors: List[Dict]
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
