@@ -68,6 +68,63 @@ class SignalHistory(Base):
 
 
 
+
+class DailySignalLedger(Base):
+    """
+    Permanent audit ledger for actionable daily strategy signals.
+
+    This is intentionally separate from SignalHistory, which is only a
+    rolling UI history. Outcome is collected later; P0 only records the
+    entry-time evidence snapshot.
+    """
+    __tablename__ = "daily_signal_ledger"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+    symbol = Column(String, nullable=False, index=True)
+    action = Column(String, nullable=False, index=True)
+    option_type = Column(String, nullable=False)
+    strike = Column(Float, nullable=False)
+    expiry = Column(String, nullable=True)
+
+    spot = Column(Float, nullable=False, default=0)
+    option_ltp_snapshot = Column(Float, nullable=True)
+    entry_price = Column(Float, nullable=True)
+
+    signal_strength = Column(Float, nullable=False, default=0)
+    confidence = Column(Float, nullable=False, default=0)
+    lifecycle = Column(String, nullable=False, default="UNKNOWN")
+    confirmations = Column(Integer, nullable=False, default=0)
+
+    market_snapshot_timestamp = Column(String, nullable=True)
+    technical_data_source = Column(String, nullable=True)
+
+    confluence = Column(JSON, nullable=True)
+    mtf_freshness = Column(JSON, nullable=True)
+    entry_snapshot = Column(JSON, nullable=True)
+
+    # P0: NULL until a later outcome/replay phase is explicitly implemented.
+    outcome = Column(String, nullable=True)
+
+    # Stable duplicate key for repeated browser/API observations.
+    ledger_key = Column(String, nullable=False, unique=True, index=True)
+
+    __table_args__ = (
+        Index(
+            "ix_daily_signal_ledger_symbol_timestamp",
+            "symbol",
+            "timestamp",
+        ),
+        Index(
+            "ix_daily_signal_ledger_symbol_action_timestamp",
+            "symbol",
+            "action",
+            "timestamp",
+        ),
+    )
+
+
 class IntradayOHLC(Base):
     """
     Persisted real completed 5-minute intraday candles.

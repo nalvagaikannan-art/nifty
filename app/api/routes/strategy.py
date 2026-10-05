@@ -13,6 +13,7 @@ from app.schemas import StrategyRecommendationResponse, StrategyHistoryResponse
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.strategy_engine import generate_option_strategy, generate_price_levels
+from app.services.strategy_history import record_daily_signal_ledger
 from app.services.strategy_history import (
     record_signal, get_history, load_signal_state, save_signal_state,
     record_signal_persistent, get_history_persistent,
@@ -1369,6 +1370,67 @@ async def strike_recommendation(
         if not liq["liquid"]:
             liquidity_warnings.append(f"{s['strike']} {s['type']} ({s.get('expiry','')}): {liq['reason']}")
         strikes.append(s)
+
+    # DAILY_SIGNAL_LEDGER_CAPTURE_P0
+    # Permanent evidence capture for actionable signals only.
+    # `strikes[0]` is the authoritative selected contract after the final
+    # liquidity annotations have been applied. No outcome is calculated here.
+    if best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE") and strikes:
+        _ledger_selected = strikes[0]
+        _ledger_mtf = market_data.get("multi_timeframe", {}) or {}
+
+        _ledger_mtf_snapshot = {}
+        for _tf in ("5min", "15min", "1hr"):
+            _frame = _ledger_mtf.get(_tf, {}) or {}
+            _ledger_mtf_snapshot[_tf] = {
+                "fresh": bool(_frame.get("fresh", False)),
+                "freshness_minutes": _frame.get("freshness_minutes"),
+                "freshness_reason": _frame.get("freshness_reason"),
+                "last_timestamp": _frame.get("last_timestamp"),
+                "data_source": _frame.get("data_source"),
+            }
+
+        try:
+            await record_daily_signal_ledger(
+                symbol=symbol,
+                action=best,
+                option_type=(
+                    _ledger_selected.get("type")
+                    or ("CE" if "CE" in best else "PE")
+                ),
+                strike=float(_ledger_selected.get("strike", 0) or 0),
+                expiry=_ledger_selected.get("expiry") or expiry,
+                spot=float(spot or 0),
+                option_ltp_snapshot=(
+                    _ledger_selected.get("ltp")
+                    if _ledger_selected.get("ltp") is not None
+                    else None
+                ),
+                entry_price=(
+                    _ledger_selected.get("entry_price")
+                    if _ledger_selected.get("entry_price") is not None
+                    else None
+                ),
+                signal_strength=signal_strength,
+                confidence=dec.get("confidence", 0),
+                lifecycle=lifecycle_state,
+                confirmations=dec.get("signal_confirmations", 0),
+                market_snapshot_timestamp=market_data.get("timestamp"),
+                technical_data_source=market_data.get(
+                    "technical_data_source", "unknown"
+                ),
+                confluence=confluence,
+                mtf_freshness=_ledger_mtf_snapshot,
+                entry_snapshot=_ledger_selected,
+                lifecycle_confirmation_at=persistent_state.get(
+                    "last_confirmation_at"
+                ),
+            )
+        except Exception as _ledger_exc:
+            logger.warning(
+                "Daily signal ledger capture failed: %s",
+                _ledger_exc,
+            )
 
     # Price levels + Strategy detail
     # FINAL_ACTION_DETAIL_SYNC_20261001:
