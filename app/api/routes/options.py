@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends
 from app.services.option_analyzer import OptionAnalyzer
 from app.services.data_fetcher import DataFetcher
 from app.api.deps import get_fetcher
-from app.schemas import OptionsChainAnalyticsResponse, OptionsChainAliasResponse
+from app.schemas import (OptionsChainAnalyticsResponse, OptionsChainAliasResponse, OptionPcrResponse, OptionMaxPainResponse)
 
 router = APIRouter()
 
@@ -18,7 +18,7 @@ def _strikes_for_range(range_value: str):
     return max(1, min(n, 100))
 
 
-@router.get("/pcr/{symbol}")
+@router.get("/pcr/{symbol}", response_model=OptionPcrResponse)
 async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()
@@ -26,7 +26,7 @@ async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     pcr = analyzer.compute_pcr(df)
     return {"symbol": symbol, "pcr": pcr}
 
-@router.get("/maxpain/{symbol}")
+@router.get("/maxpain/{symbol}", response_model=OptionMaxPainResponse)
 async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()

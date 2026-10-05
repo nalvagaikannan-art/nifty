@@ -590,6 +590,55 @@ class AngelOptionChainResponse(BaseModel):
     data: Dict
     model_config = {"extra": "allow"}
 
+
+class OptionPcrResponse(BaseModel):
+    symbol: str
+    pcr: float
+    model_config = {"extra": "allow"}
+
+
+class OptionMaxPainResponse(BaseModel):
+    symbol: str
+    max_pain: float
+    model_config = {"extra": "allow"}
+
+
+class FiiDiiResponse(BaseModel):
+    date: str
+    dii: Dict
+    fii: Dict
+    source: str
+    model_config = {"extra": "allow"}
+
+
+class SectorPerformanceResponse(BaseModel):
+    advancing: int
+    declining: int
+    rotation: str
+    sectors: List[Dict]
+    source: str
+    top_sector: Dict
+    weak_sector: Dict
+    model_config = {"extra": "allow"}
+
+
+class GlobalMarketsResponse(BaseModel):
+    gift_nifty_change_pct: float
+    gift_nifty_expiry: str
+    gift_nifty_price: float
+    gift_nifty_status: str
+    global_change_pct: float
+    instruments: Dict
+    source: str
+    model_config = {"extra": "allow"}
+
+
+class EconomicCalendarResponse(BaseModel):
+    expiry: Dict
+    macro_events: List[Dict]
+    macro_source: str
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
