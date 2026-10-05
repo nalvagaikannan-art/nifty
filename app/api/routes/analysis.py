@@ -3,6 +3,7 @@ from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.exceptions import AIProviderError, MarketDataError
 from app.api.deps import get_analyzer, get_ai_engine
+from app.schemas import AnalysisDecisionResponse
 from app.utils.helpers import safe_float
 from app.utils.ai_result_cache import get_ai_analysis
 from app.services.strategy_history import load_signal_state
@@ -537,7 +538,7 @@ async def ai_analysis(
     return result
 
 
-@router.get("/decision/{symbol}")
+@router.get("/decision/{symbol}", response_model=AnalysisDecisionResponse)
 async def rule_decision(symbol: str, analyzer: MarketAnalyzer = Depends(get_analyzer)):
     """Rule engine analysis மட்டும் — AI இல்லாமல் fast. Bias/probability/risk
     காட்டும், buy/sell instruction எதுவும் தராது."""

@@ -85,6 +85,59 @@ class OptionChainResponse(BaseModel):
     underlying_price: float
     options: List[OptionChainItem]
 
+class AnalysisDecisionResponse(BaseModel):
+    """
+    Public API contract for /api/analysis/decision/{symbol}.
+
+    Nested observation/strategy objects remain flexible because their
+    internal shapes can evolve independently of this route contract.
+    Extra fields are preserved for backward compatibility.
+    """
+    symbol: str
+    market_bias: str
+    bullish_probability: int
+    bearish_probability: int
+    preferred_side: str
+    signal_lifecycle: str
+    signal_candidate: str
+    signal_confirmations: int
+    signal_reversal_confirmations: int
+    signal_active_side: str
+    recommended_strike: str
+    bull_score: int
+    bear_score: int
+    confidence: int
+    signal_strength: int
+    forecast: str
+    volatility_regime: str
+    volatility_label: str
+    risk: str
+    reasons: List[str]
+    strategy: str
+    strategy_reason: str
+    strategy_detail: Optional[Dict] = None
+    price_levels: Optional[Dict] = None
+    scenarios: List[Dict]
+    pcr: float
+    max_pain: float
+    vix: float
+    rsi: float
+    macd: Dict
+    technicals: Dict
+    multi_timeframe: Dict
+    session_state: Dict
+    oi_change_tracked: Dict
+    support_resistance: Dict
+    tamil_indicators: List[Dict]
+    option_volume: Dict
+    market_open: bool
+    expiry_risk: Dict
+    data_quality: Dict
+    disclaimer: str
+
+    model_config = {"extra": "allow"}
+
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
