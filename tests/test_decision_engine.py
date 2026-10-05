@@ -118,6 +118,36 @@ def test_strongly_bearish_conditions_produce_put_bias():
     assert result["bear_score"] > result["bull_score"]
 
 
+def test_mtf_observation_log_does_not_change_decision(caplog):
+    import logging
+
+    data = bullish_market_data()
+    data["symbol"] = "NIFTY"
+    data["timestamp"] = "2026-10-05T10:15:00+05:30"
+
+    with caplog.at_level(logging.INFO, logger="app.services.decision_engine"):
+        result = run_decision_engine(data)
+
+    assert result["raw_preferred_side"] == "CALL"
+    assert result["market_bias"] == "Bullish"
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.services.decision_engine"
+    ]
+    logs = [m for m in messages if m.startswith("MTF_OBSERVATION ")]
+    assert logs
+
+    line = logs[-1]
+    assert "symbol=NIFTY" in line
+    assert "technical_source=intraday_5min_ohlc" in line
+    assert "live_valid=True" in line
+    assert "5min=" in line
+    assert "15min=" in line
+    assert "1hr=" in line
+
+
 def test_neutral_conditions_produce_sideways_no_trade():
     """Spec §20: WAIT/NO TRADE only when direction is genuinely unclear —
     verify a flat/neutral input doesn't get forced into a directional call."""

@@ -1588,6 +1588,32 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # A stale intraday response is treated exactly like unavailable data.
     mtf_live_valid = _mtf_live_valid(multi_tf)
 
+    # P0 OBSERVE-ONLY MTF LOGGING
+    # Diagnostics only: do not change the decision, score, gate, or output.
+    _mtf_observation = {}
+    for _tf in ("5min", "15min", "1hr"):
+        _frame = multi_tf.get(_tf) or {}
+        _mtf_observation[_tf] = {
+            "source": _frame.get("data_source"),
+            "fresh": bool(_frame.get("fresh", False)),
+            "age_min": _frame.get("freshness_minutes"),
+            "timestamp": _frame.get("last_timestamp"),
+            "reason": _frame.get("freshness_reason"),
+            "trend": _frame.get("trend"),
+        }
+
+    logger.info(
+        "MTF_OBSERVATION symbol=%s snapshot=%s technical_source=%s "
+        "live_valid=%s 5min=%s 15min=%s 1hr=%s",
+        market_data.get("symbol", "UNKNOWN"),
+        market_data.get("timestamp"),
+        market_data.get("technical_data_source"),
+        mtf_live_valid,
+        _mtf_observation["5min"],
+        _mtf_observation["15min"],
+        _mtf_observation["1hr"],
+    )
+
     live_intraday_tech = (
         market_data.get("technical_data_source") == "intraday_5min_ohlc"
         and mtf_live_valid
