@@ -1004,6 +1004,7 @@ async def strike_recommendation(
         dec, persistent_state = apply_persistent_signal_lifecycle(
             dec, persisted_state, _lifecycle_now
         )
+        persistent_state["symbol"] = symbol.upper()
 
         # Persist immediately so the next concurrent request sees the
         # updated last_evaluation_at / confirmation state before it proceeds.
