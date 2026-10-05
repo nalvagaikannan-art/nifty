@@ -338,6 +338,78 @@ class OptionsChainAliasResponse(OptionsChainAnalyticsResponse):
 
     model_config = {"extra": "allow"}
 
+
+class DashboardStatusResponse(BaseModel):
+    ai_provider_configured: bool
+    ai_providers_available: List[str]
+    angel_one_connected: bool
+    market_open: bool
+    model_config = {"extra": "allow"}
+
+
+class DashboardSummaryItem(BaseModel):
+    price: Optional[float] = None
+    change: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    pcr: Optional[float] = None
+    vix: Optional[float] = None
+    max_pain: Optional[float] = None
+    market_open: Optional[bool] = None
+    market_bias: Optional[str] = None
+    bullish_probability: Optional[int] = None
+    bearish_probability: Optional[int] = None
+    preferred_side: Optional[str] = None
+    bull_score: Optional[int] = None
+    bear_score: Optional[int] = None
+    confidence: Optional[int] = None
+    forecast: Optional[str] = None
+    risk: Optional[str] = None
+    error: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class DashboardSummaryResponse(BaseModel):
+    model_config = {"extra": "allow"}
+
+    NIFTY: Optional[DashboardSummaryItem] = None
+    BANKNIFTY: Optional[DashboardSummaryItem] = None
+    FINNIFTY: Optional[DashboardSummaryItem] = None
+    SENSEX: Optional[DashboardSummaryItem] = None
+
+
+class MarketCandlesResponse(BaseModel):
+    available: bool
+    bar_count: int = 0
+    closes: Optional[List[float]] = None
+    data_source: Optional[str] = None
+    fresh: Optional[bool] = None
+    freshness_minutes: Optional[float] = None
+    highs: Optional[List[float]] = None
+    interval: Optional[str] = None
+    latest_timestamp: Optional[str] = None
+    lows: Optional[List[float]] = None
+    market_open: Optional[bool] = None
+    opens: Optional[List[float]] = None
+    session_date: Optional[str] = None
+    timestamps: Optional[List[str]] = None
+    volumes: Optional[List[float]] = None
+    reason: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class MarketVixResponse(BaseModel):
+    vix: float
+    model_config = {"extra": "allow"}
+
+
+class MarketBreadthResponse(BaseModel):
+    advances: int
+    declines: int
+    unchanged: int
+    source: str
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]

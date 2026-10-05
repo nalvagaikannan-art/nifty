@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.data_fetcher import DataFetcher
 from app.exceptions import MarketDataError
 from app.api.deps import get_fetcher
-from app.schemas import MarketOptionChainResponse, MarketSpotResponse
+from app.schemas import (MarketOptionChainResponse, MarketSpotResponse, MarketCandlesResponse, MarketVixResponse, MarketBreadthResponse)
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/candles/{symbol}")
+@router.get("/candles/{symbol}", response_model=MarketCandlesResponse)
 async def get_candles(
     symbol: str,
     interval: str = Query("FIVE_MINUTE"),
@@ -51,10 +51,10 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fet
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/vix")
+@router.get("/vix", response_model=MarketVixResponse)
 async def get_vix(fetcher: DataFetcher = Depends(get_fetcher)):
     return {"vix": await fetcher.get_volatility()}
 
-@router.get("/breadth")
+@router.get("/breadth", response_model=MarketBreadthResponse)
 async def get_breadth(fetcher: DataFetcher = Depends(get_fetcher)):
     return await fetcher.get_market_breadth()
