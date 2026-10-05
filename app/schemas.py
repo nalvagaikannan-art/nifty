@@ -538,6 +538,58 @@ class AccuracyStatusResponse(BaseModel):
     recent_errors: List[Dict]
     model_config = {"extra": "allow"}
 
+
+class AngelStatusResponse(BaseModel):
+    client_id: str
+    configured: bool
+    logged_in: bool
+    session_age_minutes: float
+    model_config = {"extra": "allow"}
+
+
+class AngelLiveFeedResponse(BaseModel):
+    websocket: Dict
+    ticks: Dict
+    model_config = {"extra": "allow"}
+
+
+class AngelLtpResponse(BaseModel):
+    change: float
+    change_percent: float
+    close: float
+    high: float
+    low: float
+    open: float
+    price: float
+    source: str
+    symbol: str
+    timestamp: str
+    model_config = {"extra": "allow"}
+
+
+class AngelCandleRowResponse(BaseModel):
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    model_config = {"extra": "allow"}
+
+
+class AngelCandlesResponse(BaseModel):
+    symbol: str
+    interval: str
+    candles: List[AngelCandleRowResponse]
+    model_config = {"extra": "allow"}
+
+
+class AngelOptionChainResponse(BaseModel):
+    symbol: str
+    expiry: Optional[str] = None
+    data: Dict
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
