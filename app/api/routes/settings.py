@@ -2,7 +2,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.config import settings
-from app.schemas import SettingsConfigResponse, SettingsHealthResponse
+from app.schemas import (
+    SettingsConfigResponse,
+    SettingsHealthResponse,
+    SettingsAngelSaveResponse,
+)
 from app.utils import health_metrics
 import os, re, logging
 
@@ -48,7 +52,7 @@ class AngelCredsPayload(BaseModel):
     angel_totp_secret: Optional[str] = None
 
 
-@router.post("/angel")
+@router.post("/angel", response_model=SettingsAngelSaveResponse)
 async def save_angel_creds(payload: AngelCredsPayload):
     """
     Angel One credentials-ஐ .env file-ல் write செய்யும்.

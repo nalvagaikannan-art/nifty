@@ -1,4 +1,4 @@
-from app.schemas import PositionsResponse
+from app.schemas import PositionsResponse, ApiErrorResponse
 """
 Positions Router
 GET  /api/portfolio/positions                  -> live positions + P&L + AI suggestion
@@ -301,7 +301,7 @@ async def get_positions(
     }
 
 
-@router.post("/positions/square-off/{symbol}")
+@router.post("/positions/square-off/{symbol}", status_code=403, response_model=ApiErrorResponse)
 async def square_off_position(symbol: str, angel: AngelOneSession = Depends(get_angel_session)):
     # This app is analysis/information only by design -- it never places,
     # modifies, or squares off real orders with the broker (see

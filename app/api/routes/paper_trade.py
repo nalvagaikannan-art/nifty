@@ -23,6 +23,7 @@ import logging
 from app.schemas import (
     PaperTradeOpenResponse, PaperTradeHistoryResponse,
     PaperTradeStatsResponse, DailyPnlResponse,
+    PaperTradeActionResponse,
 )
 
 router  = APIRouter()
@@ -63,7 +64,7 @@ class CloseTradeRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
-@router.post("/open")
+@router.post("/open", response_model=PaperTradeActionResponse)
 async def open_trade(req: OpenTradeRequest):
     """New paper trade open செய்கிறோம்"""
     try:
@@ -75,7 +76,7 @@ async def open_trade(req: OpenTradeRequest):
         raise HTTPException(500, detail=str(e))
 
 
-@router.post("/close/{trade_id}")
+@router.post("/close/{trade_id}", response_model=PaperTradeActionResponse)
 async def close_trade(trade_id: str, req: CloseTradeRequest):
     """Paper trade close செய்கிறோம்"""
     result = await close_paper_trade(trade_id, req.exit_price, req.exit_reason)

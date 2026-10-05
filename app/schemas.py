@@ -741,6 +741,36 @@ class StrategyHistoryResponse(BaseModel):
     count: int
     model_config = {"extra": "allow"}
 
+
+class PaperTradeActionResponse(BaseModel):
+    success: bool
+    trade: Dict
+    model_config = {"extra": "allow"}
+
+
+class AngelLoginResponse(BaseModel):
+    status: str
+    client_id: Optional[str] = None
+    feed_token: Optional[str] = None
+    session_expiry: Optional[str] = None
+    model_config = {"extra": "allow"}
+
+
+class AngelLogoutResponse(BaseModel):
+    status: str
+    model_config = {"extra": "allow"}
+
+
+class SettingsAngelSaveResponse(BaseModel):
+    status: str
+    keys: List[str]
+    model_config = {"extra": "allow"}
+
+
+class ApiErrorResponse(BaseModel):
+    detail: str
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]

@@ -8,6 +8,7 @@ Angel One API Routes
 """
 
 from fastapi import APIRouter, HTTPException
+from app.schemas import AngelLoginResponse, AngelLogoutResponse
 from pydantic import BaseModel
 from typing import Optional
 from app.services.angel_one import angel_session, AngelOneAuthError, AngelOneError
@@ -43,7 +44,7 @@ async def get_live_feed_status():
 
 
 # ── Login ──────────────────────────────────────────────────────────────────
-@router.post("/login")
+@router.post("/login", response_model=AngelLoginResponse)
 async def login():
     """Angel One-ல் login செய்யும். TOTP automatic-ஆக generate ஆகும்."""
     try:
@@ -56,7 +57,7 @@ async def login():
 
 
 # ── Logout ─────────────────────────────────────────────────────────────────
-@router.post("/logout")
+@router.post("/logout", response_model=AngelLogoutResponse)
 async def logout():
     """Session terminate செய்யும்."""
     return await angel_session.logout()
