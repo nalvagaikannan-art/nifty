@@ -639,6 +639,108 @@ class EconomicCalendarResponse(BaseModel):
     macro_source: str
     model_config = {"extra": "allow"}
 
+
+class PaperTradeOpenResponse(BaseModel):
+    open_trades: List[Dict]
+    count: int
+    model_config = {"extra": "allow"}
+
+
+class PaperTradeHistoryResponse(BaseModel):
+    history: List[Dict]
+    count: int
+    model_config = {"extra": "allow"}
+
+
+class PaperTradeStatsResponse(BaseModel):
+    avg_r: Optional[float] = None
+    by_regime: Dict
+    by_strength: Dict
+    calibration_note: str
+    daily_pnl: float
+    losses: int
+    open_trades: int
+    total_pnl: float
+    total_trades: int
+    win_rate: Optional[float] = None
+    wins: int
+    model_config = {"extra": "allow"}
+
+
+class DailyPnlResponse(BaseModel):
+    daily_pnl: float
+    model_config = {"extra": "allow"}
+
+
+class PositionItemResponse(BaseModel):
+    symbol: str
+    quantity: int
+    avg_price: float
+    ltp: float
+    side: str
+    pnl: float
+    status: str
+    ai_suggestion: str
+    ai_reasons: List[str]
+    change_pct: float
+    days_to_expiry: Optional[int] = None
+    vix: Optional[float] = None
+    pcr: Optional[float] = None
+    market_bias: Optional[str] = None
+    stop_loss_hit: bool
+    market_data_age_seconds: Optional[float] = None
+    model_config = {"extra": "allow"}
+
+
+class PositionsResponse(BaseModel):
+    positions: List[PositionItemResponse]
+    total_pnl: float
+    count: int
+    disclaimer: str
+    model_config = {"extra": "allow"}
+
+
+class SettingsConfigResponse(BaseModel):
+    ai_provider: str
+    cache_ttl: int
+    log_level: str
+    angel_configured: bool
+    angel_client_id: Optional[str] = None
+    zerodha_configured: bool
+    model_config = {"extra": "allow"}
+
+
+class SettingsHealthResponse(BaseModel):
+    sources: Dict
+    alert_webhook_configured: bool
+    redis_configured: bool
+    database: str
+    model_config = {"extra": "allow"}
+
+
+class StrategyHistoryItemResponse(BaseModel):
+    symbol: str
+    strategy: str
+    score: float
+    market_state: str
+    confidence: float
+    spot: float
+    pcr: float
+    vix: float
+    reversal: bool
+    reversal_type: str
+    timestamp: str
+    date: str
+    reasons: List[str]
+    model_config = {"extra": "allow"}
+
+
+class StrategyHistoryResponse(BaseModel):
+    symbol: str
+    history: List[StrategyHistoryItemResponse]
+    count: int
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]

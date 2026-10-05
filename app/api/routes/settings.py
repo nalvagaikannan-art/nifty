@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.config import settings
+from app.schemas import SettingsConfigResponse, SettingsHealthResponse
 from app.utils import health_metrics
 import os, re, logging
 
@@ -9,7 +10,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("/config")
+@router.get("/config", response_model=SettingsConfigResponse)
 async def get_config():
     return {
         "ai_provider": settings.ai_provider,
@@ -23,7 +24,7 @@ async def get_config():
     }
 
 
-@router.get("/health")
+@router.get("/health", response_model=SettingsHealthResponse)
 async def get_health():
     """
     Rolling data-source health (CODE_REVIEW.md #19/#20) — NSE/Angel One

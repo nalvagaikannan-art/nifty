@@ -1,3 +1,4 @@
+from app.schemas import PositionsResponse
 """
 Positions Router
 GET  /api/portfolio/positions                  -> live positions + P&L + AI suggestion
@@ -248,7 +249,7 @@ def _ai_suggestion(p: dict, market: dict) -> dict:
     }
 
 
-@router.get("/positions")
+@router.get("/positions", response_model=PositionsResponse)
 async def get_positions(
     angel: AngelOneSession = Depends(get_angel_session),
     analyzer: MarketAnalyzer = Depends(get_analyzer),

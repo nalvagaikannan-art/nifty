@@ -9,7 +9,7 @@ BUY CE / BUY PE / SELL CE / SELL PE / WAIT
 Order placement இல்லை — Analysis + Decision Support மட்டும்.
 """
 from fastapi import APIRouter, Depends, HTTPException
-from app.schemas import StrategyRecommendationResponse
+from app.schemas import StrategyRecommendationResponse, StrategyHistoryResponse
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.strategy_engine import generate_option_strategy, generate_price_levels
@@ -1562,7 +1562,7 @@ async def strike_recommendation(
     }
 
 
-@router.get("/history/{symbol}")
+@router.get("/history/{symbol}", response_model=StrategyHistoryResponse)
 async def signal_history(symbol: str):
     """Last 20 persisted strategy signals for a symbol."""
     history = await get_history_persistent(symbol.upper())
