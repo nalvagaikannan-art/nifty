@@ -1678,6 +1678,7 @@ function ltRefresh(forceRefresh){
       ltRenderAdvanced(d);
       ltRenderTimeframes(d);
       ltRenderAtmIv(d);
+       if(ltLastData) ltRenderDataHealth(ltLastData);
 
       if(ltLastData) ltRenderMetrics(ltLastData);
       if(ltLastData) ltRenderSR(ltLastData);
@@ -1928,9 +1929,16 @@ function ltRenderMetrics(d){
   // futures_premium_value, so read it from the cached AI fetch if we have
   // it yet; ltRenderMetrics also gets called again indirectly once that
   // fetch lands (see ltRenderAtmIv / the second .then in ltRefresh).
-  var futVal = (ltLastAI && ltLastAI.futures_premium_value != null) ? ltLastAI.futures_premium_value : null;
-  document.getElementById('m-fut').textContent = futVal ? (futVal > 0 ? '+' : '') + fmtN(futVal,1) : '--';
-  document.getElementById('m-fut-sub').textContent = futVal > 0 ? 'Premium' : futVal < 0 ? 'Discount' : '--';
+  var futAI = ltLastAI || {};
+  var futDQ = futAI.data_quality || {};
+  var futStatus = futDQ.futures_premium || 'unavail';
+  var futVal = futStatus === 'live' && futAI.futures_premium_value != null
+    ? Number(futAI.futures_premium_value)
+    : null;
+  document.getElementById('m-fut').textContent =
+    futVal != null ? (futVal > 0 ? '+' : '') + fmtN(futVal,1) : '--';
+  document.getElementById('m-fut-sub').textContent =
+    futVal != null ? (futVal > 0 ? 'Premium' : futVal < 0 ? 'Discount' : 'Flat') : '--';
 
   // ATM IV — see ltRenderAtmIv(), called once the AI fetch (which carries
   // oi_summary.atm_iv) resolves. Left as-is here for the first paint.
@@ -2131,7 +2139,7 @@ function ltRenderWarnings(d){
 
 // ── Data health ──
 function ltRenderDataHealth(d){
-  var dq = d.data_quality || {};
+  var dq = d.data_quality || ((ltLastAI && ltLastAI.data_quality) || {});
   var cf = d.confluence || {};
   var scores = {
     spot: 'live',
