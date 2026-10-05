@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.data_fetcher import DataFetcher
 from app.exceptions import MarketDataError
 from app.api.deps import get_fetcher
-from app.schemas import MarketSpotResponse
+from app.schemas import MarketOptionChainResponse, MarketSpotResponse
 
 router = APIRouter()
 
@@ -44,7 +44,7 @@ async def get_candles(
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/option-chain/{symbol}")
+@router.get("/option-chain/{symbol}", response_model=MarketOptionChainResponse)
 async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fetcher: DataFetcher = Depends(get_fetcher)):
     try:
         return await fetcher.get_option_chain(symbol, expiry)

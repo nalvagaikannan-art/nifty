@@ -40,6 +40,40 @@ class MarketSnapshot(BaseModel):
     volume: int
     timestamp: datetime
 
+class MarketOptionChainItemResponse(BaseModel):
+    """
+    Public API row contract for /api/market/option-chain/{symbol}.
+    CE/PE retain the provider-specific option-leg payload unchanged.
+    """
+    strikePrice: float
+    expiryDate: str
+    CE: Optional[Dict] = None
+    PE: Optional[Dict] = None
+
+    model_config = {"extra": "allow"}
+
+
+class MarketOptionChainResponse(BaseModel):
+    """
+    Public API contract for /api/market/option-chain/{symbol}.
+
+    Supports Angel One, Zerodha and NSE fallback paths. Broker-specific
+    metadata such as lot_size/live websocket metadata is optional because
+    those fields are not guaranteed on every fallback provider.
+    """
+    symbol: str
+    expiry: str
+    all_expiries: List[str]
+    underlying_price: float
+    data: List[MarketOptionChainItemResponse]
+    data_source: Optional[str] = None
+    lot_size: Optional[int] = None
+    live_option_data_source: Optional[str] = None
+    live_option_ticks_merged: Optional[int] = None
+
+    model_config = {"extra": "allow"}
+
+
 class OptionChainItem(BaseModel):
     strike: float
     ce: Optional[Dict] = None
