@@ -138,6 +138,90 @@ class AnalysisDecisionResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 
+
+class AIAnalysisRouteResponse(BaseModel):
+    """
+    Public API contract for /api/analysis/ai/{symbol}.
+
+    This is intentionally separate from AIAnalysisResponse, which is used
+    internally by AIEngine for validating the model's core AI fields.
+    Nested analysis objects remain flexible because their internal payloads
+    evolve independently of this route contract.
+    """
+    _provider: str
+    ai_agrees: Optional[bool] = None
+    all_expiries: List[str]
+    all_reasons: List[str]
+    bear_score: int
+    bearish_probability: int
+    best_strategy: str
+    bull_score: int
+    bullish_probability: int
+    candidates: Dict
+    confidence: int
+    confidence_calibration: Dict
+    confluence: Dict
+    data_completeness_pct: int
+    data_quality: Dict
+    disclaimer: str
+    expiry: str
+    expiry_risk: Dict
+    forecast: str
+    futures_premium_pct_value: float
+    futures_premium_value: float
+    hard_gated: bool
+    key_factors: List[str]
+    margin: int
+    market_bias: str
+    market_open: bool
+    market_regime: str
+    market_regime_confidence: str
+    market_regime_reasons: List[str]
+    market_snapshot_timestamp: Optional[str] = None
+    market_trend: str
+    max_pain: float
+    multi_timeframe: Dict
+    oi_change_tracked: Dict
+    oi_summary: Dict
+    option_volume: Dict
+    pcr: float
+    preferred_side: str
+    price_levels: Optional[Dict] = None
+    reason: str
+    recommended_option: Optional[Dict] = None
+    recommended_strike: str
+    resistance: List[float]
+    risk: str
+    rule_confidence: int
+    rule_market_bias: str
+    scenarios: List[Dict]
+    session_context: Dict
+    session_state: Dict
+    signal_action: str
+    signal_active_side: str
+    signal_candidate: str
+    signal_confirmations: int
+    signal_lifecycle: str
+    signal_reversal_confirmations: int
+    signal_strength: int
+    spot: Dict
+    strategy: str
+    strategy_detail: Optional[Dict] = None
+    strategy_reason: str
+    support: List[float]
+    support_resistance: Dict
+    symbol: str
+    tamil_indicators: List[Dict]
+    technical_data_source: str
+    timeframe_data_source: str
+    timeframe_trend: Dict
+    v3_gate: Dict
+    vix: float
+    volatility_label: str
+    volatility_regime: str
+
+    model_config = {"extra": "allow"}
+
 class TechnicalIndicators(BaseModel):
     support: List[float]
     resistance: List[float]
