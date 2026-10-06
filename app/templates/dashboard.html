@@ -1505,6 +1505,8 @@ function ltSetSym(btn, sym){
   btn.classList.add('active');
   ltSym = sym;
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
+  // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
+  // response must not remain visible after the selected symbol changes.
   ltRefresh();
 }
 
@@ -1603,6 +1605,7 @@ function ltRefresh(forceRefresh){
   // Each refresh gets its own generation number.
   // Older responses are ignored if a newer refresh has started.
   var refreshSeq = ++ltRefreshSeq;
+  var refreshSym = ltSym;
 
   // Manual refresh gets a unique cache_bust token.
   // Strategy + AI receive the same token.
@@ -1636,13 +1639,20 @@ function ltRefresh(forceRefresh){
       ltLoading = false;
       btn.textContent = '↻ Refresh';
       btn.classList.remove('spinning');
+
+      // SYMBOL_SWITCH_QUEUE_FIX: the user may have switched symbols while
+      // the previous requests were still running. Refresh the newly
+      // selected symbol as soon as the old pair has fully finished.
+      if(refreshSym !== ltSym){
+        setTimeout(function(){ ltRefresh(false); }, 0);
+      }
     }
   }
 
   // Fetch strategy (primary — has strikes, levels, regime, confluence)
   ltFetchJsonRetry(strategyUrl)
     .then(function(d){
-      if(refreshSeq !== ltRefreshSeq) return;
+      if(refreshSeq !== ltRefreshSeq || refreshSym !== ltSym) return;
 
       ltLastData = d;
       ltRenderSignal(d);
@@ -1670,7 +1680,7 @@ function ltRefresh(forceRefresh){
   // technicals / multi_timeframe / oi_summary.atm_iv / futures_premium_value.
   ltFetchJsonRetry(aiUrl)
     .then(function(d){
-      if(refreshSeq !== ltRefreshSeq) return;
+      if(refreshSeq !== ltRefreshSeq || refreshSym !== ltSym) return;
 
       ltLastAI = d;
       ltRenderTamil(d);
