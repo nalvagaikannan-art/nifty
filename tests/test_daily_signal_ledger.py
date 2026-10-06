@@ -46,7 +46,12 @@ async def test_actionable_signal_captured_with_mtf_and_null_outcome(ledger_sessi
             "15min": {"fresh": True, "freshness_minutes": 5.0},
             "1hr": {"fresh": True, "freshness_minutes": 12.0},
         },
-        entry_snapshot={"strike": 22600, "ltp": 142.5, "entry_price": 143.2},
+        entry_snapshot={
+            "strike": 22600,
+            "ltp": 142.5,
+            "entry_price": 143.2,
+            "lot_size": 65,
+        },
         lifecycle_confirmation_at="2026-10-05T12:10:00+05:30",
     )
 
@@ -71,6 +76,7 @@ async def test_actionable_signal_captured_with_mtf_and_null_outcome(ledger_sessi
     assert row.mtf_freshness["15min"]["fresh"] is True
     assert row.mtf_freshness["1hr"]["fresh"] is True
     assert row.confluence["quality"] == "HIGH"
+    assert row.entry_snapshot["lot_size"] == 65
     assert row.outcome is None
 
 

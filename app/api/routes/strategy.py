@@ -1421,7 +1421,10 @@ async def strike_recommendation(
                 ),
                 confluence=confluence,
                 mtf_freshness=_ledger_mtf_snapshot,
-                entry_snapshot=_ledger_selected,
+                entry_snapshot={
+                    **(_ledger_selected or {}),
+                    "lot_size": _contract_lot_size,
+                },
                 lifecycle_confirmation_at=persistent_state.get(
                     "last_confirmation_at"
                 ),
