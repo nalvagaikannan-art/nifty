@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 import logging
@@ -7,6 +7,107 @@ import logging
 logger = logging.getLogger(__name__)
 
 IST = ZoneInfo("Asia/Kolkata")
+
+UTC = timezone.utc
+
+
+def now_ist() -> datetime:
+    """Current timezone-aware India Standard Time."""
+    return datetime.now(IST)
+
+
+def intraday_hold_days_to_close(timestamp) -> float:
+    """Fractional calendar days from a market snapshot timestamp to 15:30 IST.
+
+    Used for intraday option theta only.  The snapshot timestamp is the
+    authoritative starting point; no arbitrary 0.25/0.5/1.0-day assumption is
+    introduced.  Naive timestamps are treated as UTC to match the existing
+    application's timestamp handling.
+    """
+    if timestamp is None:
+        return 0.0
+
+    try:
+        if isinstance(timestamp, datetime):
+            ts = timestamp
+        elif isinstance(timestamp, (int, float)):
+            value = float(timestamp)
+            if abs(value) > 100_000_000_000:
+                value /= 1000.0
+            ts = datetime.fromtimestamp(value, tz=UTC)
+        else:
+            text = str(timestamp).strip()
+            ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
+
+        ts = ts.astimezone(IST)
+        market_close = ts.replace(
+            hour=15, minute=30, second=0, microsecond=0
+        )
+
+        remaining_seconds = max(
+            0.0, (market_close - ts).total_seconds()
+        )
+        return remaining_seconds / 86400.0
+
+    except (TypeError, ValueError, OverflowError, OSError):
+        logger.debug(
+            "Unable to parse market snapshot timestamp for intraday theta: %r",
+            timestamp,
+        )
+        return 0.0
+
+
+def now_utc_aware() -> datetime:
+    """Current timezone-aware UTC instant."""
+    return datetime.now(UTC)
+
+
+def now_utc_naive() -> datetime:
+    """Current UTC as naive datetime for existing DB DateTime columns."""
+    return now_utc_aware().replace(tzinfo=None)
+
+
+def epoch_to_ist(value) -> datetime:
+    """Convert Unix epoch seconds to timezone-aware IST."""
+    return datetime.fromtimestamp(
+        float(value),
+        tz=UTC,
+    ).astimezone(IST)
+
+
+def epoch_ms_to_ist(value) -> datetime:
+    """Convert Unix epoch milliseconds to timezone-aware IST."""
+    return epoch_to_ist(float(value) / 1000.0)
+
+
+def parse_timestamp_ist(value):
+    """Parse ISO/datetime input and normalize it to timezone-aware IST."""
+    if value is None:
+        return None
+
+    try:
+        if isinstance(value, datetime):
+            ts = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+
+            ts = datetime.fromisoformat(
+                text.replace("Z", "+00:00")
+            )
+
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=IST)
+
+        return ts.astimezone(IST)
+
+    except (TypeError, ValueError, OverflowError):
+        return None
+
 
 # NSE trading holidays (equity + equity-derivatives segments), keyed by year.
 # Weekday holidays only — dates that already fall on Sat/Sun are omitted since

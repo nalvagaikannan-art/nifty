@@ -61,6 +61,24 @@ NSE_OPTION_CHAIN_RESPONSE = {
     "filtered": {},
 }
 
+@pytest.fixture(autouse=True)
+def disable_external_brokers(monkeypatch):
+    """DataFetcher tests must never use live broker data."""
+    async def no_angel(*args, **kwargs):
+        return None
+
+    async def no_zerodha(*args, **kwargs):
+        return None
+
+    from app.services.angel_one import angel_session
+    monkeypatch.setattr(angel_session, "get_india_vix", no_angel)
+
+    monkeypatch.setattr(DataFetcher, "_try_angel_spot", no_angel)
+    monkeypatch.setattr(DataFetcher, "_try_angel_option_chain", no_angel)
+    monkeypatch.setattr(DataFetcher, "_try_zerodha_spot", no_zerodha)
+    monkeypatch.setattr(DataFetcher, "_try_zerodha_option_chain", no_zerodha)
+
+
 NSE_ALL_INDICES_WITH_VIX = {
     "data": [
         {"indexSymbol": "NIFTY 50", "last": 24650.5,

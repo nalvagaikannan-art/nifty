@@ -25,6 +25,8 @@ IMPORTANT: Signal strength அதிகம் என்பதற்காக pos
 from typing import Dict, List, Optional
 import logging
 
+from app.services.contract_specs import resolve_lot_size
+
 logger = logging.getLogger(__name__)
 
 # ── Default risk parameters ────────────────────────────────────────────────
@@ -34,7 +36,7 @@ MAX_OPEN_POSITIONS        = 3      # Concurrent positions limit
 MIN_RR_RATIO              = 1.5    # Minimum R:R to enter
 MIN_OPTION_LTP            = 5.0    # Below this → no liquidity
 MIN_OI_FOR_TRADE          = 500    # Minimum OI
-NIFTY_LOT_SIZE            = 50
+NIFTY_LOT_SIZE            = resolve_lot_size("NIFTY")  # COMMON_CONTRACT_LOT_FALLBACK_20260925
 
 # ── NO-TRADE conditions ────────────────────────────────────────────────────
 NO_TRADE_CONDITIONS = {
@@ -59,12 +61,13 @@ def assess_risk(
     capital: float,
     entry_price: float,       # Option LTP
     stop_loss_price: float,   # Option SL level
-    rr_ratio: float,          # From trade_levels
+    rr_ratio: float,          # Structural/spot-model R:R
     market_regime: str,
     vix: float,
     days_to_expiry: int,
     confluence_quality: str,
     signal_strength: int,
+    option_rr_ratio: Optional[float] = None,  # Actual option-premium R:R
     open_positions: int = 0,
     daily_pnl: float = 0.0,
     max_risk_pct: float = DEFAULT_MAX_RISK_PCT,
@@ -144,10 +147,17 @@ def assess_risk(
             f"{NO_TRADE_CONDITIONS['weak_confluence']} — quality: LOW"
         )
 
-    # Low R:R
-    if rr_ratio > 0 and rr_ratio < MIN_RR_RATIO:
+    # Actual option-premium R:R is the authoritative gate for BUY options.
+    # Structural/spot R:R remains useful for setup quality, but must not
+    # allow a trade whose real option premium reward/risk is below minimum.
+    if option_rr_ratio is None or option_rr_ratio <= 0:
         no_trade_reasons.append(
-            f"{NO_TRADE_CONDITIONS['low_rr']} (R:R {rr_ratio:.1f} < {MIN_RR_RATIO})"
+            "Actual option R:R unavailable — cannot validate premium risk/reward"
+        )
+    elif option_rr_ratio < MIN_RR_RATIO:
+        no_trade_reasons.append(
+            f"{NO_TRADE_CONDITIONS['low_rr']} "
+            f"(Option R:R {option_rr_ratio:.2f} < {MIN_RR_RATIO})"
         )
 
     # If any NO-TRADE condition triggered, return immediately
@@ -159,7 +169,7 @@ def assess_risk(
             "quantity":         0,
             "lots":             0,
             "max_loss":         0,
-            "risk_reward":      rr_ratio,
+            "risk_reward":      option_rr_ratio if option_rr_ratio is not None else rr_ratio,
             "reasons":          reasons,
             "no_trade_reasons": no_trade_reasons,
             "warnings":         warnings,
@@ -181,7 +191,7 @@ def assess_risk(
             "quantity":         0,
             "lots":             0,
             "max_loss":         0,
-            "risk_reward":      rr_ratio,
+            "risk_reward":      option_rr_ratio if option_rr_ratio is not None else rr_ratio,
             "reasons":          reasons,
             "no_trade_reasons": no_trade_reasons,
             "warnings":         warnings,
@@ -218,7 +228,7 @@ def assess_risk(
         "quantity":          quantity,
         "lots":              lots,
         "max_loss":          max_loss,
-        "risk_reward":       rr_ratio,
+        "risk_reward":       option_rr_ratio if option_rr_ratio is not None else rr_ratio,
         "risk_per_lot":      round(risk_per_lot, 1),
         "max_risk_amount":   round(max_risk_amount, 0),
         "reasons":           reasons,

@@ -5,7 +5,21 @@ market-closed conditions (spec §43: "bullish market, bearish market,
 sideways market ... conflicting timeframe"). No network needed — this
 exercises the pure scoring/aggregation logic in isolation.
 """
-from app.services.decision_engine import run_decision_engine
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def fixed_market_session(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._time_session",
+        lambda: "MID",
+    )
+
+
+from app.services.decision_engine import (
+    run_decision_engine,
+    apply_persistent_signal_lifecycle,
+)
 
 
 def _base(spot: float) -> dict:
@@ -45,6 +59,27 @@ def bullish_market_data(spot: float = 24650.0) -> dict:
     d["gift_nifty_change_pct"] = 0.8
     d["fii_net_cr"] = 2000
     d["dii_net_cr"] = 500
+    d["technical_data_source"] = "intraday_5min_ohlc"
+    d["multi_timeframe"] = {
+        "5min": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+        "15min": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+        "1hr": {
+            "data_source": "angel_one_intraday",
+            "fresh": True,
+            "trend": "up",
+            "indicators": d["technicals"],
+        },
+    }
     return d
 
 
@@ -71,7 +106,7 @@ def bearish_market_data(spot: float = 24650.0) -> dict:
 def test_strongly_bullish_conditions_produce_call_bias():
     result = run_decision_engine(bullish_market_data())
     assert result["market_bias"] == "Bullish"
-    assert result["preferred_side"] == "CALL"
+    assert result["raw_preferred_side"] == "CALL"
     assert result["bull_score"] > result["bear_score"]
     assert result["confidence"] >= 60
 
@@ -79,8 +114,38 @@ def test_strongly_bullish_conditions_produce_call_bias():
 def test_strongly_bearish_conditions_produce_put_bias():
     result = run_decision_engine(bearish_market_data())
     assert result["market_bias"] == "Bearish"
-    assert result["preferred_side"] == "PUT"
+    assert result["raw_preferred_side"] == "PUT"
     assert result["bear_score"] > result["bull_score"]
+
+
+def test_mtf_observation_log_does_not_change_decision(caplog):
+    import logging
+
+    data = bullish_market_data()
+    data["symbol"] = "NIFTY"
+    data["timestamp"] = "2026-10-05T10:15:00+05:30"
+
+    with caplog.at_level(logging.INFO, logger="app.services.decision_engine"):
+        result = run_decision_engine(data)
+
+    assert result["raw_preferred_side"] == "CALL"
+    assert result["market_bias"] == "Bullish"
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "app.services.decision_engine"
+    ]
+    logs = [m for m in messages if m.startswith("MTF_OBSERVATION ")]
+    assert logs
+
+    line = logs[-1]
+    assert "symbol=NIFTY" in line
+    assert "technical_source=intraday_5min_ohlc" in line
+    assert "live_valid=True" in line
+    assert "5min=" in line
+    assert "15min=" in line
+    assert "1hr=" in line
 
 
 def test_neutral_conditions_produce_sideways_no_trade():
@@ -111,11 +176,11 @@ def test_confidence_is_bounded_0_to_100():
 
 
 def test_reasons_list_has_one_entry_per_scored_condition():
-    """accuracy_engine.py / signal_accuracy.py assume exactly 20 reason
-    lines in this fixed order — this test is a contract check between the
-    two modules so a future edit to one doesn't silently break the other."""
+    """The first 20 reason entries are the fixed indicator slots used by
+    accuracy_engine.py; later entries may contain guard/session/MTF diagnostics."""
+
     result = run_decision_engine(bullish_market_data())
-    assert len(result["reasons"]) == 20
+    assert len(result["reasons"]) >= 20
 
 
 def test_high_vix_does_not_directly_flip_bull_bear_score():
@@ -146,7 +211,7 @@ def test_high_vix_does_not_directly_flip_bull_bear_score():
     # Direction is preserved — still bullish, not flipped to bearish/neutral.
     assert r_calm["bull_score"] > r_calm["bear_score"]
     assert r_volatile["bull_score"] > r_volatile["bear_score"]
-    assert r_calm["preferred_side"] == r_volatile["preferred_side"] == "CALL"
+    assert r_calm["raw_preferred_side"] == r_volatile["raw_preferred_side"] == "CALL"
     # but the volatility regime label itself should differ
     assert r_calm["volatility_regime"] != r_volatile["volatility_regime"]
     assert r_volatile["volatility_regime"] == "high"
@@ -162,3 +227,140 @@ def test_scenarios_and_invalidation_always_present():
     assert len(result["scenarios"]) >= 1
     for scenario in result["scenarios"]:
         assert "invalidation" in scenario
+
+def _lifecycle_decision(side: str, margin: float, market_open: bool = True) -> dict:
+    return {
+        "preferred_side": side,
+        "margin": margin,
+        "market_open": market_open,
+        "market_regime_no_trade": False,
+    }
+
+
+def test_persistent_lifecycle_requires_three_spaced_call_confirmations():
+    state = None
+
+    decision = _lifecycle_decision("CALL", 20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1000)
+    assert out["signal_lifecycle"] == "WATCH_CALL"
+    assert out["signal_candidate"] == "CALL"
+    assert out["signal_confirmations"] == 1
+    assert out["signal_active_side"] == "NONE"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "WATCH_CALL"
+    assert out["signal_confirmations"] == 2
+    assert out["signal_active_side"] == "NONE"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1092)
+    assert out["signal_lifecycle"] == "CONFIRMED_CALL"
+    assert out["signal_confirmations"] == 3
+    assert out["signal_active_side"] == "CALL"
+    assert out["preferred_side"] == "CALL"
+
+
+def test_persistent_lifecycle_requires_two_spaced_reversal_confirmations():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 0,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("PUT", -20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "HOLD_CALL_REVERSAL_WATCH_PUT"
+    assert out["signal_reversal_confirmations"] == 1
+    assert out["signal_active_side"] == "CALL"
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1092)
+    assert out["signal_lifecycle"] == "CONFIRMED_PUT"
+    assert out["signal_reversal_confirmations"] == 2
+    assert out["signal_active_side"] == "PUT"
+    assert out["preferred_side"] == "PUT"
+
+
+def test_persistent_lifecycle_weak_opposite_signal_does_not_reverse():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 1,
+        "lifecycle": "HOLD_CALL_REVERSAL_WATCH_PUT",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("PUT", -10)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "WATCH_PUT"
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["signal_active_side"] == "NONE"
+    assert out["preferred_side"] == "NONE"
+
+
+def test_persistent_lifecycle_same_active_side_remains_hold():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 0,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("CALL", 20)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "HOLD_CALL"
+    assert out["signal_confirmations"] == 3
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["signal_active_side"] == "CALL"
+    assert out["preferred_side"] == "CALL"
+
+
+def test_persistent_lifecycle_hard_gate_clears_directional_state():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 1,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1000,
+    }
+
+    decision = _lifecycle_decision("CALL", 20, market_open=False)
+
+    out, state = apply_persistent_signal_lifecycle(decision, state, 1046)
+    assert out["signal_lifecycle"] == "WAIT"
+    assert out["signal_active_side"] == "NONE"
+    assert out["signal_candidate"] == "NONE"
+    assert out["signal_confirmations"] == 0
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["preferred_side"] == "NONE"
+
+
+# DB_MTF_LINEAGE_REGRESSION_20260930
+def test_mtf_live_valid_rejects_history_db_fallback_even_when_fresh():
+    from app.services.decision_engine import _mtf_live_valid
+
+    mtf = {
+        "5min": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+        "15min": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+        "1hr": {
+            "data_source": "history_db_intraday_ohlc",
+            "fresh": True,
+        },
+    }
+
+    assert _mtf_live_valid(mtf) is False

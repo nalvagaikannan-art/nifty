@@ -8,6 +8,7 @@
     <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
     <button class="sym-tab" data-sym="BANKNIFTY">BNIFTY</button>
     <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+  <button class="sym-tab" data-sym="SENSEX">SENSEX</button>
     <select id="expiry-select" style="display:none;" title="Expiry-ஐ மாற்றி அந்த expiry-க்கான suggestion பாருங்க">
       <option value="">Nearest Expiry</option>
     </select>
@@ -71,6 +72,51 @@
 </div>
 
 <!-- ── RECOMMENDED OPTION (review #5 — structured strike/entry/SL/target, not just a bare CALL/PUT label) ── -->
+<!-- SESSION_STATE_UI_20260924 -->
+<div class="card" id="session-state-card" style="margin-bottom:1rem;">
+  <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.6rem;">
+    Intraday Session State
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:.65rem;">
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">PHASE</span>
+      <div id="session-phase" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">DAY TYPE</span>
+      <div id="session-day-type" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">5M / 15M</span>
+      <div id="session-tf" style="font-weight:800;">-- / --</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">VWAP</span>
+      <div id="session-vwap" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">VOLATILITY</span>
+      <div id="session-volatility" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">TRANSITION</span>
+      <div id="session-transition" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">SIGNAL ALIGNMENT</span>
+      <div id="session-alignment" style="font-weight:800;">--</div>
+    </div>
+    <div>
+      <span style="color:var(--text2);font-size:.68rem;">STATE STRENGTH</span>
+      <div id="session-confidence" style="font-weight:800;">--</div>
+    </div>
+  </div>
+
+  <div id="session-state-detail"
+       style="margin-top:.65rem;font-size:.74rem;color:var(--text2);"></div>
+</div>
+
 <div class="card" id="rec-option-card" style="margin-bottom:1rem; display:none;">
   <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.5rem;">Recommended Option</div>
   <div id="rec-option-body" style="display:flex;flex-wrap:wrap;gap:1.5rem;align-items:flex-start;"></div>
@@ -89,7 +135,15 @@
 
 <!-- ── V2 DECISION DASHBOARD ─────────────────────────── -->
 <div id="v2-dashboard" class="card" style="margin-bottom:1rem;display:none;">
-  <h3 style="margin-bottom:.9rem;">🧭 V2 Decision Board</h3>
+  <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.6rem;margin-bottom:.9rem;">
+    <h3 style="margin:0;">🧭 V2 Decision Board</h3>
+    <div id="v2-market-identity" style="display:flex;align-items:center;gap:.65rem;flex-wrap:wrap;">
+      <span id="v2-symbol-spot" style="font-size:.95rem;font-weight:800;">NIFTY · --</span>
+      <span style="opacity:.45;">|</span>
+      <span style="font-size:.75rem;color:var(--text2);">EXPIRY</span>
+      <span id="v2-expiry" style="font-size:.85rem;font-weight:800;color:var(--primary);">--</span>
+    </div>
+  </div>
 
   <!-- Row 1: Market status -->
   <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
@@ -116,7 +170,7 @@
   </div>
 
   <!-- Row 2: Trade setup -->
-  <div id="v2-trade-row" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+  <div id="v2-trade-row" style="display:none;display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;margin-bottom:.7rem;">
     <div class="v2-cell">
       <div class="v2-label">SETUP</div>
       <div id="v2-setup" class="v2-big" style="color:#ffd740;">--</div>
@@ -131,13 +185,17 @@
       <div id="v2-entry" class="v2-big">₹--</div>
     </div>
     <div class="v2-cell">
-      <div class="v2-label">R:R</div>
+      <div class="v2-label">Spot R:R (T2)</div>
       <div id="v2-rr" class="v2-big" style="color:var(--green);">--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">Option R:R (T2)</div>
+      <div id="v2-option-rr" class="v2-big" style="color:var(--green);">--</div>
     </div>
   </div>
 
   <!-- Row 3: SL / Targets -->
-  <div id="v2-sl-row" style="display:none;display:grid;grid-template-columns:repeat(4,1fr);gap:.5rem;margin-bottom:.7rem;">
+  <div id="v2-sl-row" style="display:none;display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem;margin-bottom:.7rem;">
     <div class="v2-cell">
       <div class="v2-label">STOP LOSS</div>
       <div id="v2-sl" class="v2-big" style="color:var(--red);">₹--</div>
@@ -149,6 +207,10 @@
     <div class="v2-cell">
       <div class="v2-label">TARGET 2 (2R)</div>
       <div id="v2-t2" class="v2-big" style="color:var(--green);">₹--</div>
+    </div>
+    <div class="v2-cell">
+      <div class="v2-label">TARGET 3 (2.5R)</div>
+      <div id="v2-t3" class="v2-big" style="color:var(--green);">₹--</div>
     </div>
     <div class="v2-cell">
       <div class="v2-label">MAX RISK / LOT</div>
@@ -310,7 +372,7 @@
 .badge-sell-ce { background:rgba(255,152,0,.15);color:#ff9800; }
 .badge-sell-pe { background:rgba(76,175,80,.15);color:#4caf50; }
 .strike-stats { display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;font-size:.78rem; }
-.strike-targets { display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;font-size:.78rem;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border); }
+.strike-targets { display:grid;grid-template-columns:repeat(5,1fr);gap:.4rem;font-size:.78rem;margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--border); }
 .s-stat { text-align:center; }
 .s-label { color:var(--text2);font-size:.68rem;margin-bottom:.1rem; }
 .s-val   { font-weight:600; }
@@ -442,28 +504,82 @@ function populateExpirySelect(allExpiries, resolvedExpiry){
   $('#expiry-resolved-label').text(resolvedExpiry ? ('Suggestions for: ' + resolvedExpiry) : '');
 }
 
+  // ANALYSIS_LIVE_POSITION_FAST_10S:
+  // Refresh broker positions/LTP independently from the 60s
+  // AI + Strategy analysis cycle.
+  var analysisLivePositionSignalData = null;
+  var analysisLivePositionSeq = 0;
+  var analysisLivePositionTimer = null;
+
+  function analysisLivePositionRefresh(){
+    var seq = ++analysisLivePositionSeq;
+
+    // ANALYSIS_POSITION_HEARTBEAT
+    window.__analysisPositionPollCount =
+      (window.__analysisPositionPollCount || 0) + 1;
+    window.__analysisPositionLastPollTs = Date.now();
+
+    $.get('/api/portfolio/positions?cache_bust=' + Date.now())
+      .done(function(data){
+        if(seq !== analysisLivePositionSeq) return;
+        window.__analysisPositionLastSuccessTs = Date.now();
+        window.__analysisPositionLastCount =
+          ((data && data.positions) || []).length;
+        renderLivePositions(data, analysisLivePositionSignalData);
+      })
+      .fail(function(){
+        $('#live-position-status')
+          .text('Live position status unavailable.');
+      });
+  }
+
 function loadAll(sym, force, expiry){
   if(expiry === undefined) expiry = curExpiry;
   curExpiry = expiry || '';
   var qs = curExpiry ? ('?expiry=' + encodeURIComponent(curExpiry)) : '';
-  var key = sym+'_'+(curExpiry||'nearest')+'_'+Math.floor(Date.now()/60000);
-  if(!force && apiCache[key]){ renderAnalysis(apiCache[key].ai); renderStrikes(apiCache[key].strat); return; }
+
+  // Manual refresh gets a unique cache_bust token.
+  // AI + Strategy receive the same token.
+  var refreshToken = force ? String(Date.now()) : '';
+  var cacheQs = qs;
+
+  if(refreshToken){
+    cacheQs += (cacheQs ? '&' : '?') +
+      'cache_bust=' + encodeURIComponent(refreshToken);
+  }
+  var key = sym+'_'+(curExpiry||'nearest')+'_'+Math.floor(Date.now()/15000);
+  if(!force && apiCache[key]){ analysisLivePositionSignalData=apiCache[key].ai; renderAnalysis(apiCache[key].ai); renderStrikes(apiCache[key].strat); analysisLivePositionRefresh(); return; }
   setRefreshState(true);
   var done={ai:false,strat:false};
   function chk(){ if(done.ai&&done.strat) setRefreshState(false); }
 
   $('#ai-reason').html('<span class="spinner"></span> Analyzing...');
-  $.get('/api/analysis/ai/'+sym+qs)
-    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); $.get('/api/portfolio/positions').done(function(p){ renderLivePositions(p,d); }).fail(function(){ $('#live-position-status').text('Live position status unavailable.'); }); })
+  $.get('/api/analysis/ai/'+sym+cacheQs)
+    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); analysisLivePositionSignalData=d; analysisLivePositionRefresh(); })
     .fail(function(x){ var m='Analysis failed'; try{m=JSON.parse(x.responseText).detail;}catch(e){} $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>'); })
     .always(function(){ done.ai=true; chk(); });
 
   $('#strikes-loading').text('Loading...').show();
   $('#strikes-grid,#strikes-wait,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
-  $.get('/api/strategy/recommend/'+sym+qs)
+  $.get('/api/strategy/recommend/'+sym+cacheQs)
     .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].strat=d; renderStrikes(d); populateExpirySelect(d.all_expiries, d.expiry); })
     .fail(function(){ $('#strikes-loading').text('Strategy data unavailable.'); })
     .always(function(){ done.strat=true; chk(); });
+}
+
+// SAFETY UI GUARD:
+// When backend data is hard-gated or market regime is NO_TRADE, suppress
+// fresh directional presentation. Existing HOLD lifecycle remains visible.
+function analysisEffectiveStrategy(d){
+  var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
+  var blocked = !!d.hard_gated ||
+    !!(d.market_regime && d.market_regime.no_trade);
+
+  if(blocked && !lifecycle.startsWith('HOLD_')){
+    return 'WAIT';
+  }
+
+  return String(d.best_strategy || 'WAIT').toUpperCase();
 }
 
 function renderCandidates(candidates, best){
@@ -485,10 +601,25 @@ function renderV2Dashboard(d){
   var cf = d.confluence || {};
   var rg = d.market_regime || {};
   var tl = d.v2_trade_levels || {};
-  var rk = d.v2_risk || {};
 
+var rk = d.v2_risk || {};
+
+    var uiBlocked = !!d.hard_gated ||
+      !!(d.market_regime && d.market_regime.no_trade);
+    var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
+    var freshSetupBlocked = uiBlocked && !lifecycle.startsWith('HOLD_');
+
+
+    var effectiveBest = analysisEffectiveStrategy(d);
   // Show dashboard
   $('#v2-dashboard').show();
+
+  // Market identity: show the exact expiry and spot used by this API response.
+  // Do not infer or hard-code the expiry.
+  var v2Spot = d.spot != null ? fmtN(d.spot, 2) : '--';
+  var v2Expiry = d.expiry || '--';
+  $('#v2-symbol-spot').text((d.symbol || 'NIFTY') + ' · ' + v2Spot);
+  $('#v2-expiry').text(v2Expiry);
 
   // Regime
   var regimeColors = {
@@ -519,31 +650,166 @@ function renderV2Dashboard(d){
   // Trade quality
   var tqColor = cQuality === 'HIGH' ? 'var(--green)' : cQuality === 'MEDIUM' ? '#ffd740' : 'var(--red)';
   $('#v2-quality').text(cQuality).css('color', tqColor);
+    // Action banner
+    if(d.action && !freshSetupBlocked){
+      var actColor = (d.action||'').includes('NO TRADE') ? '#ff1744' :
+                     (d.action||'').includes('WAIT') ? '#ffd740' : 'var(--green)';
+      $('#v2-action-banner').text('⚡ ACTION: ' + d.action).css('color', actColor).show();
+    } else {
+      $('#v2-action-banner').hide();
+    }
 
-  // Action banner
-  if(d.action){
-    var actColor = (d.action||'').includes('NO TRADE') ? '#ff1744' :
-                   (d.action||'').includes('WAIT') ? '#ffd740' : 'var(--green)';
-    $('#v2-action-banner').text('⚡ ACTION: ' + d.action).css('color', actColor).show();
-  }
+
 
   // Trade levels
-  if(tl && tl.trigger){
-    $('#v2-trade-row').show();
-    $('#v2-setup').text(d.best_strategy || '--');
-    $('#v2-trigger').text(fmtN(tl.trigger));
-    $('#v2-trigger-note').text(tl.reasons && tl.reasons[0] ? tl.reasons[0].replace('Trigger: ','') : '');
-    $('#v2-entry').text('₹' + fmtN(tl.option_entry || tl.entry_mid, 1));
-    $('#v2-rr').text('1 : ' + fmtN(tl.rr_ratio, 1));
+  // BUY CE/PE uses the V2 trade-level engine.  // T3_UI_PATCH_20260921
+  // SELL CE/PE uses the exact recommended strike's
+  // action-aware premium levels from d.strikes[0].
+  // Do NOT reuse BUY-oriented trade_levels.py for SELL.
+  var isSellStrategy = effectiveBest === 'SELL CE' || effectiveBest === 'SELL PE';
+  var sellStrike = (
+    isSellStrategy &&
+    d.strikes &&
+    d.strikes.length
+  ) ? d.strikes[0] : null;
 
-    $('#v2-sl-row').show();
-    $('#v2-sl').text('₹' + fmtN(tl.option_sl || tl.stop_loss_spot, 1));
-    $('#v2-t1').text('₹' + fmtN(tl.option_t1 || tl.target_1_spot, 1));
-    $('#v2-t2').text('₹' + fmtN(tl.option_t2 || tl.target_2_spot, 1));
-    $('#v2-risk').text('₹' + fmtN(tl.risk_per_lot, 0));
+  var hasV2Levels = tl && tl.trigger;
+  var hasSellLevels = (
+    sellStrike &&
+    sellStrike.entry_price != null &&
+    sellStrike.sl != null &&
+    sellStrike.t1 != null
+  );
+
+  if((hasV2Levels || hasSellLevels) && !freshSetupBlocked){
+    $('#v2-trade-row').show();
+    $('#v2-setup').text(effectiveBest || '--');
+
+    if(isSellStrategy && hasSellLevels){
+      // SELL: use the exact recommended strike's premium levels.
+      // This keeps Analysis consistent with Dashboard.
+      $("#v2-option-rr").text(
+        sellStrike.rr != null
+          ? "1 : " + fmtN(sellStrike.rr, 2)
+          : "--"
+      );
+
+      $('#v2-trigger').text(
+        sellStrike.strike != null
+          ? String(sellStrike.strike) + ' ' + String(sellStrike.type || '')
+          : '--'
+      );
+
+      $('#v2-trigger-note').text(
+        sellStrike.levels_basis ||
+        sellStrike.note ||
+        'SELL option premium levels'
+      );
+
+      $('#v2-entry').text(
+        '₹' + fmtN(sellStrike.entry_price, 1)
+      );
+
+      $('#v2-rr').text(
+        sellStrike.rr != null
+          ? '1 : ' + fmtN(sellStrike.rr, 1)
+          : '--'
+      );
+
+      $('#v2-sl-row').show();
+
+      $('#v2-sl').text(
+        '₹' + fmtN(sellStrike.sl, 1)
+      );
+
+      $('#v2-t1').text(
+        sellStrike.t1 != null
+          ? '₹' + fmtN(sellStrike.t1, 1)
+          : '--'
+      );
+
+      $('#v2-t2').text(
+        sellStrike.t2 != null
+          ? '₹' + fmtN(sellStrike.t2, 1)
+          : '--'
+      );
+
+        $('#v2-t3').text(
+          sellStrike.t3 != null
+            ? '₹' + fmtN(sellStrike.t3, 1)
+            : '--'
+        );
+        // T3_JS_SELL_20260921
+
+      // Existing V2 risk calculator is BUY-oriented.
+      // Do not display a misleading SELL risk number.
+      $('#v2-risk').text('--');
+
+    } else {
+      // BUY: existing V2 trade-level engine remains unchanged.
+      $("#v2-option-rr").text(
+        tl.option_rr_ratio != null
+          ? "1 : " + fmtN(tl.option_rr_ratio, 2)
+          : "--"
+      );
+
+      $('#v2-trigger').text(fmtN(tl.trigger));
+
+      $('#v2-trigger-note').text(
+        tl.reasons && tl.reasons[0]
+          ? tl.reasons[0].replace('Trigger: ','')
+          : ''
+      );
+
+      $('#v2-entry').text(
+        tl.option_entry != null
+          ? '₹' + fmtN(tl.option_entry, 1)
+          : '--'
+      );
+
+      $('#v2-rr').text(
+        '1 : ' + fmtN(tl.rr_ratio, 1)
+      );
+
+      $('#v2-sl-row').show();
+
+      $('#v2-sl').text(
+        tl.option_sl != null
+          ? '₹' + fmtN(tl.option_sl, 1)
+          : '--'
+      );
+
+      $('#v2-t1').text(
+        tl.option_t1 != null
+          ? '₹' + fmtN(tl.option_t1, 1)
+          : '--'
+      );
+
+      $('#v2-t2').text(
+        tl.option_t2 != null
+          ? '₹' + fmtN(tl.option_t2, 1)
+          : '--'
+      );
+
+        $('#v2-t3').text(
+          tl.option_t3 != null
+            ? '₹' + fmtN(tl.option_t3, 1)
+            : '--'
+        );
+        // T3_JS_BUY_20260921
+
+      $('#v2-risk').text(
+        '₹' + fmtN(tl.risk_per_lot, 0)
+      );
+    }
   }
 
-  // Risk sizing
+
+    if(freshSetupBlocked){
+      $('#v2-trade-row').hide();
+    }
+
+// Risk sizing
   if(rk && rk.hasOwnProperty('allowed')){
     $('#v2-risk-row').show();
     if(rk.allowed){
@@ -592,8 +858,35 @@ function renderStrikes(d){
   // V2 dashboard
   renderV2Dashboard(d);
 
+    var effectiveBest = analysisEffectiveStrategy(d);
   // Candidates
-  renderCandidates(d.candidates, d.best_strategy);
+    // SAFETY UI GUARD:
+    // Do not present cached strike/entry/SL/target levels as a fresh setup.
+    var uiBlocked = !!d.hard_gated ||
+      !!(d.market_regime && d.market_regime.no_trade);
+    var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
+
+    if(uiBlocked && !lifecycle.startsWith('HOLD_')){
+      $('#strikes-grid,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
+      $('#strikes-wait').show();
+
+      var blockedReasons =
+        (d.market_regime && d.market_regime.reasons) ||
+        d.wait_reasons || [];
+
+      $('#wait-reasons').html(
+        blockedReasons.length
+          ? blockedReasons.map(function(r){
+              return '<div>• ' + esc(r) + '</div>';
+            }).join('')
+          : '<div>• Live intraday data is not confirmed for a fresh setup.</div>'
+      );
+
+      return;
+    }
+
+    // STRIKE_VISIBILITY_GUARD
+  renderCandidates(d.candidates, effectiveBest);
 
   // Signal reversal alert
   if(d.signal_reversal && d.reversal_type){
@@ -608,11 +901,20 @@ function renderStrikes(d){
   var hist = d.signal_history || [];
   if(hist.length){
     var histMap = {'BUY CE':'hb-buy-ce','BUY PE':'hb-buy-pe','SELL CE':'hb-sell-ce','SELL PE':'hb-sell-pe','WAIT':'hb-wait'};
+      // IST_HISTORY_TIMESTAMP_DISPLAY_FIX
+      function historyTimeIST(ts){
+        if(!ts) return "";
+        var m = String(ts).match(/^(\d{2}):(\d{2}):(\d{2})$/);
+        if(!m) return ts;
+        var d = new Date();
+        d.setUTCHours(Number(m[1]), Number(m[2]), Number(m[3]), 0);
+        return d.toLocaleTimeString("en-IN", {timeZone:"Asia/Kolkata", hour12:false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+      }
     var histHtml = hist.slice(0,10).map(function(h){
       var bClass = histMap[h.strategy]||'hb-wait';
       var rev = h.reversal ? '<span style="color:#ff9800;font-size:.65rem;"> 🔄</span>' : '';
       return '<div class="hist-row' + (h.reversal?' reversal':'') + '">' +
-        '<span>' + esc(h.timestamp) + '</span>' +
+        '<span>' + esc(historyTimeIST(h.timestamp)) + '</span>' +
         '<span class="hist-badge '+bClass+'">'+esc(h.strategy)+'</span>'+rev+
         '<span style="color:var(--text2);">Score:'+h.score+'</span>'+
         '<span style="color:var(--text2);font-size:.75rem;">'+esc(h.market_state||'')+'</span>'+
@@ -687,9 +989,23 @@ function renderStrikes(d){
         '<span>₹'+fmtN(leg.premium||leg.ltp,2)+'</span>'+
       '</div>';
     }).join('');
-    if(sd.net_credit) html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--green);">Net Credit: <b>₹'+fmtN(sd.net_credit,2)+'</b></div>';
-    if(sd.net_debit)  html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--red);">Net Debit: <b>₹'+fmtN(sd.net_debit,2)+'</b></div>';
-    if(sd.max_loss)   html += '<div style="text-align:right;font-size:.82rem;color:var(--text2);">Max Loss: ₹'+fmtN(sd.max_loss,2)+'</div>';
+    if(sd.net_credit_per_lot != null) {
+      html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--green);">Net Credit: <b>'+fmtN(sd.net_credit_points ?? sd.net_credit,2)+' pts = ₹'+fmtN(sd.net_credit_per_lot,2)+'/lot</b></div>';
+    } else if(sd.net_credit != null) {
+      html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--green);">Net Credit: <b>'+fmtN(sd.net_credit,2)+' pts</b></div>';
+    }
+
+    if(sd.net_debit_per_lot != null) {
+      html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--red);">Net Debit: <b>'+fmtN(sd.net_debit_points ?? sd.net_debit,2)+' pts = ₹'+fmtN(sd.net_debit_per_lot,2)+'/lot</b></div>';
+    } else if(sd.net_debit != null) {
+      html += '<div style="text-align:right;font-size:.84rem;margin-top:.4rem;color:var(--red);">Net Debit: <b>'+fmtN(sd.net_debit,2)+' pts</b></div>';
+    }
+
+    if(sd.max_loss_per_lot != null) {
+      html += '<div style="text-align:right;font-size:.82rem;color:var(--text2);">Max Loss: <b>'+fmtN(sd.max_loss_points ?? sd.max_loss,2)+' pts = ₹'+fmtN(sd.max_loss_per_lot,2)+'/lot</b></div>';
+    } else if(sd.max_loss != null) {
+      html += '<div style="text-align:right;font-size:.82rem;color:var(--text2);">Max Loss: <b>'+fmtN(sd.max_loss,2)+' pts</b></div>';
+    }
     if(sd.reasoning)  html += '<div style="font-size:.75rem;color:var(--text2);margin-top:.5rem;line-height:1.5;">'+esc(sd.reasoning)+'</div>';
     $('#strategy-detail-body').html(html);
     $('#strategy-detail-card').show();
@@ -708,7 +1024,7 @@ function renderStrikes(d){
   d.strikes.forEach(function(s,i){
     var cc = i===0?'best':i===1?'agg':'con';
     var isCall = s.type==='CE';
-    var isSell = d.best_strategy&&d.best_strategy.startsWith('SELL');
+    var isSell = effectiveBest.startsWith('SELL');
     var bc = isSell ? (isCall?'badge-sell-ce':'badge-sell-pe') : (isCall?'badge-call':'badge-put');
     var lc = isCall?'#00c853':'#ff6b6b';
     if(isSell) lc = isCall?'#ff9800':'#4caf50';
@@ -729,6 +1045,8 @@ function renderStrikes(d){
       html+='<div class="s-stat"><div class="s-label">SL</div><div class="s-val" style="color:var(--red);">₹'+fmtN(s.sl,1)+'</div></div>';
       html+='<div class="s-stat"><div class="s-label">T1</div><div class="s-val" style="color:var(--green);">₹'+fmtN(s.t1,1)+'</div></div>';
       html+='<div class="s-stat"><div class="s-label">T2</div><div class="s-val" style="color:var(--green);">₹'+fmtN(s.t2,1)+'</div></div>';
+      html+='<div class="s-stat"><div class="s-label">T3</div><div class="s-val" style="color:var(--green);">₹'+fmtN(s.t3,1)+'</div></div>';
+      // STRIKE_CARD_T3_20260921
       html+='<div class="s-stat"><div class="s-label">R:R</div><div class="s-val" style="color:var(--primary);">1:'+fmtN(s.rr,1)+'</div></div>';
       html+='</div>';
     }
@@ -736,6 +1054,99 @@ function renderStrikes(d){
   });
   html+='<div style="font-size:.72rem;color:var(--text2);margin-top:.5rem;padding:.4rem;background:rgba(255,200,0,.06);border-radius:6px;">⚠️ '+esc(d.disclaimer)+'</div>';
   $('#strikes-grid').html(html).show();
+}
+
+function renderSessionState(d){
+  var ss = d.session_state || {};
+  var ctx = d.session_context || {};
+
+  // SESSION_STATE_SOURCE_PRIORITY_FIX_20260924
+  // session_state is MarketAnalyzer's live/refreshed source of truth.
+  // session_context is observation context and may originate from an
+  // earlier decision snapshot, so it must only be a fallback.
+  var phase = ss.phase || ctx.phase || '--';
+  var dayType = ss.day_type || ctx.day_type || '--';
+  var tf5 = ss.trend_5m || ctx.trend_5m || '--';
+  var tf15 = ss.trend_15m || ctx.trend_15m || '--';
+  var vwap = ss.vwap_relation || ctx.vwap_relation || '--';
+  var vol = ss.volatility_state || ctx.volatility_state || '--';
+  var transition = ss.transition_state || ctx.transition_state || 'NONE';
+  var alignment = ctx.alignment || 'NEUTRAL';
+
+  var strength =
+    ss.state_confidence != null
+      ? ss.state_confidence
+      : (ctx.state_confidence != null ? ctx.state_confidence : '--');
+
+  // Last-resort display fallback: derive VWAP relation from the live 5M
+  // MTF VWAP when session_state itself is temporarily unavailable.
+  if (vwap === 'UNAVAILABLE' || vwap === '--') {
+    var liveMtf = d.multi_timeframe || {};
+    var five = liveMtf['5min'] || {};
+    var ind = five.indicators || {};
+    var liveVwap = Number(ind.vwap || 0);
+    var spotObj = d.spot || {};
+    var liveSpot = Number(
+      spotObj.price != null ? spotObj.price : spotObj
+    );
+
+    if (liveVwap > 0 && liveSpot > 0) {
+      vwap =
+        liveSpot > liveVwap ? 'ABOVE' :
+        liveSpot < liveVwap ? 'BELOW' :
+        'AT_VWAP';
+    }
+  }
+
+  var details = [];
+
+  if (ss.morning_direction && ss.morning_direction !== 'NEUTRAL') {
+    details.push('Morning ' + ss.morning_direction);
+  }
+
+  if (ss.recent_direction && ss.recent_direction !== 'NEUTRAL') {
+    details.push('Recent ' + ss.recent_direction);
+  }
+
+  if (ss.range_ratio != null) {
+    details.push('Range ' + Number(ss.range_ratio).toFixed(2) + 'x');
+  }
+
+  $('#session-phase').text(String(phase).replace(/_/g,' '));
+  $('#session-day-type').text(String(dayType).replace(/_/g,' '));
+  $('#session-tf').text(
+    String(tf5).toUpperCase() + ' / ' + String(tf15).toUpperCase()
+  );
+  $('#session-vwap').text(String(vwap).replace(/_/g,' '));
+  $('#session-volatility').text(String(vol).replace(/_/g,' '));
+  $('#session-transition').text(String(transition).replace(/_/g,' '));
+  $('#session-alignment').text(String(alignment).replace(/_/g,' '));
+
+  $('#session-confidence').text(
+    strength === '--' ? '--' : strength + ' / 100'
+  );
+
+  $('#session-state-detail').text(
+    details.join(' · ') || 'Observation-only session context'
+  );
+
+  $('#session-alignment').css(
+    'color',
+    alignment === 'ALIGNED'
+      ? 'var(--green)'
+      : alignment === 'CONFLICTING'
+        ? 'var(--red)'
+        : 'var(--text)'
+  );
+
+  $('#session-transition').css(
+    'color',
+    transition === 'REVERSAL_WATCH'
+      ? 'var(--red)'
+      : transition === 'TRANSITION'
+        ? 'var(--yellow)'
+        : 'var(--text)'
+  );
 }
 
 function renderAnalysis(d){
@@ -780,6 +1191,7 @@ function renderAnalysis(d){
 
   renderRecommendedOption(d.recommended_option);
   renderSignalLifecycle(d);
+    renderSessionState(d);
 
   if (d.market_regime && d.market_regime !== 'unknown') {
     var regimeLabels = {
@@ -923,9 +1335,42 @@ function renderDataQuality(dq){
   $('#dq-body').html(html);
   $('#dq-card').show();
 }
+  // Init
 
-// Init
-loadAll(curSym);
+  // ANALYSIS_POSITION_TIMER_ORDER_FIX
+  // Register lightweight position polling before the first full analysis call.
+
+  // ANALYSIS_LIVE_POSITION_FAST_10S
+  analysisLivePositionTimer = setInterval(function(){
+    analysisLivePositionRefresh();
+  },10000);
+
+  window.__analysisPositionTimerStarted = Date.now();
+
+    // Auto-refresh every 60s, but do not trigger heavy analysis calls
+    // outside the NSE cash-market session. The timer remains alive so it
+    // automatically resumes on the next trading session.
+    function analysisIsNseMarketHoursNow(){
+      var now = new Date();
+      var ist = new Date(now.getTime() + (330 * 60000));
+      var day = ist.getUTCDay(); // 0=Sun, 6=Sat
+      if(day === 0 || day === 6) return false;
+
+      var mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+      return mins >= (9 * 60 + 15) && mins < (15 * 60 + 30);
+    }
+
+    var autoRefreshTimer = setInterval(function(){
+      if(!analysisIsNseMarketHoursNow()) return;
+      loadAll(curSym,false,curExpiry);
+    },15000);
+
+  // Start initial analysis after timers are registered.
+  setTimeout(function(){
+    loadAll(curSym);
+  },0);
+
+
 var t=null;
 $('#refresh-btn').on('click',function(){ clearTimeout(t); t=setTimeout(function(){loadAll(curSym,true,curExpiry);},300); });
 $('.sym-tab').on('click',function(){

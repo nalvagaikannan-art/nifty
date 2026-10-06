@@ -144,6 +144,18 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
         no_trade_reason = "Opening 30 min — false signals likely, wait for range to form"
         reasons.append(no_trade_reason)
 
+    # -- Priority 2b: Closing window (15:00-15:30) --
+    # BUG FIX: _time_session() already computed "CLOSING" for this window
+    # but nothing ever checked it -- a fresh directional signal issued in
+    # the last 30 minutes before close has little to no time to develop
+    # before the market shuts, so it graded "wrong"/"flat" far more often
+    # (theta decay, settlement-driven moves, reduced liquidity). Same
+    # treatment as the OPENING gate above.
+    if session == "CLOSING":
+        no_trade = True
+        no_trade_reason = "Closing 30 min -- little time left for a fresh signal to play out, avoid new entries"
+        reasons.append(no_trade_reason)
+
     # ── Priority 3: Extreme VIX ───────────────────────────────────────────
     if vix > 30:
         no_trade = True

@@ -43,6 +43,7 @@ SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS = 45
 # A direction must have a meaningful score margin, not merely cross the
 # old ±10 preferred-side threshold, before it can become an entry confirmation.
 SIGNAL_CONFIRMATION_MIN_MARGIN = 12
+SIGNAL_HOLD_MIN_MARGIN = 12
 SIGNAL_REVERSAL_MIN_MARGIN = 12
 
 def _apply_signal_lifecycle(
@@ -51,10 +52,11 @@ def _apply_signal_lifecycle(
     margin: float,
     hard_gated: bool,
 ) -> Tuple[str, Dict]:
-    """Turn noisy raw CALL/PUT/NONE readings into WATCH/CONFIRMED/HOLD states.
+    """Turn raw CALL/PUT/NONE readings into WATCH/CONFIRMED/HOLD states.
 
-    This is intentionally in-memory, matching the existing per-process
-    hysteresis state. It does not place orders or change broker positions.
+    HOLD is only allowed while the currently active side still has
+    meaningful supporting evidence.  A weak active reading is released
+    instead of being carried indefinitely by hysteresis.
     """
     now = time.time()
     prev = _signal_state.get(symbol_key, {})
@@ -63,24 +65,16 @@ def _apply_signal_lifecycle(
     confirmations = int(prev.get("confirmations", 0) or 0)
     reversal_confirmations = int(prev.get("reversal_confirmations", 0) or 0)
     last_confirmation_ts = float(prev.get("last_confirmation_ts", 0) or 0)
-    can_count_confirmation = (last_confirmation_ts <= 0 or
-        (now - last_confirmation_ts) >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS)
 
-    if hard_gated or raw_side not in ("CALL", "PUT"):
-        if prev_active in ("CALL", "PUT") and not hard_gated:
-            # Existing active signal stays HOLD while the evidence is merely
-            # weakening; a hard safety gate is the only immediate exit here.
-            return prev_active, {
-                "state": f"HOLD_{prev_active}",
-                "candidate_side": "NONE",
-                "confirmations": confirmations,
-                "reversal_confirmations": 0,
-                "active_side": prev_active,
-                "changed": False,
-                "reason": "Active signal held while confirmation is temporarily weak.",
-                "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
-            }
+    can_count_confirmation = (
+        last_confirmation_ts <= 0
+        or (now - last_confirmation_ts) >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS
+    )
+
+    # ------------------------------------------------------------------
+    # Hard safety gate: immediate reset.
+    # ------------------------------------------------------------------
+    if hard_gated:
         return "NONE", {
             "state": "WAIT",
             "candidate_side": "NONE",
@@ -88,13 +82,31 @@ def _apply_signal_lifecycle(
             "reversal_confirmations": 0,
             "active_side": "NONE",
             "changed": prev_active != "NONE",
-            "reason": "No confirmed directional signal.",
+            "reason": "Hard safety gate is active; no directional signal is allowed.",
             "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
+            "ts": now,
         }
 
-    # No active position/signal yet: build a fresh confirmation sequence.
-    # A weak ±10 reading is WATCH only; confirmation needs a wider margin.
+    # ------------------------------------------------------------------
+    # Raw NONE: an active signal must be released.
+    # Do NOT keep stale HOLD_CALL/HOLD_PUT when there is no direction.
+    # ------------------------------------------------------------------
+    if raw_side not in ("CALL", "PUT"):
+        return "NONE", {
+            "state": "WAIT",
+            "candidate_side": "NONE",
+            "confirmations": 0,
+            "reversal_confirmations": 0,
+            "active_side": "NONE",
+            "changed": prev_active != "NONE",
+            "reason": "No confirmed directional signal; active signal released.",
+            "last_confirmation_ts": last_confirmation_ts,
+            "ts": now,
+        }
+
+    # ------------------------------------------------------------------
+    # No active signal: build a fresh confirmation sequence.
+    # ------------------------------------------------------------------
     if prev_active not in ("CALL", "PUT"):
         if abs(margin) < SIGNAL_CONFIRMATION_MIN_MARGIN:
             return "NONE", {
@@ -104,10 +116,14 @@ def _apply_signal_lifecycle(
                 "reversal_confirmations": 0,
                 "active_side": "NONE",
                 "changed": False,
-                "reason": f"{raw_side} direction is not strong enough yet (margin {margin:.1f} < {SIGNAL_CONFIRMATION_MIN_MARGIN}).",
+                "reason": (
+                    f"{raw_side} direction is not strong enough yet "
+                    f"(margin {margin:.1f} < {SIGNAL_CONFIRMATION_MIN_MARGIN})."
+                ),
                 "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
             }
+
         if raw_side == prev_candidate:
             if can_count_confirmation:
                 confirmations += 1
@@ -116,6 +132,7 @@ def _apply_signal_lifecycle(
             prev_candidate = raw_side
             confirmations = 1
             last_confirmation_ts = now
+
         if confirmations >= SIGNAL_CONFIRMATIONS_REQUIRED:
             return raw_side, {
                 "state": f"CONFIRMED_{raw_side}",
@@ -124,10 +141,14 @@ def _apply_signal_lifecycle(
                 "reversal_confirmations": 0,
                 "active_side": raw_side,
                 "changed": True,
-                "reason": f"{raw_side} confirmed after {confirmations} consecutive readings.",
+                "reason": (
+                    f"{raw_side} confirmed after "
+                    f"{confirmations} consecutive readings."
+                ),
                 "last_confirmation_ts": last_confirmation_ts,
                 "ts": now,
             }
+
         return "NONE", {
             "state": f"WATCH_{raw_side}",
             "candidate_side": raw_side,
@@ -135,14 +156,48 @@ def _apply_signal_lifecycle(
             "reversal_confirmations": 0,
             "active_side": "NONE",
             "changed": False,
-            "reason": f"Waiting for {SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} more confirmation cycle(s).",
+            "reason": (
+                f"Waiting for "
+                f"{SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} "
+                f"more confirmation cycle(s)."
+            ),
             "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
+            "ts": now,
         }
 
-    # Active direction: keep holding same side. A reversal needs two
-    # consecutive opposite readings AND a meaningful opposite margin.
+    # ------------------------------------------------------------------
+    # Active signal: first verify that the ACTIVE direction itself is
+    # still supported by a meaningful margin.
+    #
+    # CALL requires +12 or more.
+    # PUT  requires -12 or less.
+    #
+    # This is the critical HOLD revalidation.
+    # ------------------------------------------------------------------
+    active_evidence_strong = (
+        (prev_active == "CALL" and margin >= SIGNAL_HOLD_MIN_MARGIN)
+        or
+        (prev_active == "PUT" and margin <= -SIGNAL_HOLD_MIN_MARGIN)
+    )
+
+    # Same raw side.
     if raw_side == prev_active:
+        if not active_evidence_strong:
+            return "NONE", {
+                "state": f"WATCH_{raw_side}",
+                "candidate_side": raw_side,
+                "confirmations": 0,
+                "reversal_confirmations": 0,
+                "active_side": "NONE",
+                "changed": True,
+                "reason": (
+                    f"Active {prev_active} released because its supporting "
+                    f"margin is weak ({margin:.1f}); fresh confirmation required."
+                ),
+                "last_confirmation_ts": last_confirmation_ts,
+                "ts": now,
+            }
+
         return prev_active, {
             "state": f"HOLD_{prev_active}",
             "candidate_side": raw_side,
@@ -150,17 +205,47 @@ def _apply_signal_lifecycle(
             "reversal_confirmations": 0,
             "active_side": prev_active,
             "changed": False,
-            "reason": f"{prev_active} trend remains confirmed.",
+            "reason": (
+                f"{prev_active} remains confirmed with supporting "
+                f"margin {margin:.1f}."
+            ),
             "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
+            "ts": now,
         }
 
-    # Weak opposite readings are only noise; do not even start reversal
-    # confirmation until the opposite margin is materially negative/positive.
+    # ------------------------------------------------------------------
+    # Opposite raw side.
+    #
+    # If the active side is already weak AND the opposite side is also not
+    # strong enough for reversal, release to WATCH instead of stale HOLD.
+    #
+    # If the opposite side IS strong enough, retain the existing
+    # two-confirmation reversal mechanism.
+    # ------------------------------------------------------------------
     opposite_margin_ok = (
-        (raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN) or
+        (raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN)
+        or
         (raw_side == "PUT" and margin <= -SIGNAL_REVERSAL_MIN_MARGIN)
     )
+
+    if not active_evidence_strong and not opposite_margin_ok:
+        return "NONE", {
+            "state": f"WATCH_{raw_side}",
+            "candidate_side": raw_side,
+            "confirmations": 0,
+            "reversal_confirmations": 0,
+            "active_side": "NONE",
+            "changed": True,
+            "reason": (
+                f"Active {prev_active} released: its supporting margin "
+                f"is weak ({margin:.1f}) and opposite {raw_side} is not "
+                f"strong enough for reversal."
+            ),
+            "last_confirmation_ts": last_confirmation_ts,
+            "ts": now,
+        }
+
+    # Opposite side is strong enough: existing reversal confirmation logic.
     if not opposite_margin_ok:
         return prev_active, {
             "state": f"HOLD_{prev_active}",
@@ -169,7 +254,10 @@ def _apply_signal_lifecycle(
             "reversal_confirmations": 0,
             "active_side": prev_active,
             "changed": False,
-            "reason": f"Opposite {raw_side} reading is too weak for reversal (margin {margin:.1f}).",
+            "reason": (
+                f"Opposite {raw_side} reading is too weak for reversal "
+                f"(margin {margin:.1f}); {prev_active} remains supported."
+            ),
             "last_confirmation_ts": last_confirmation_ts,
             "ts": now,
         }
@@ -179,6 +267,7 @@ def _apply_signal_lifecycle(
             reversal_confirmations += 1
             last_confirmation_ts = now
     else:
+        prev_candidate = raw_side
         reversal_confirmations = 1
         last_confirmation_ts = now
 
@@ -190,9 +279,12 @@ def _apply_signal_lifecycle(
             "reversal_confirmations": reversal_confirmations,
             "active_side": raw_side,
             "changed": True,
-            "reason": f"Reversal to {raw_side} confirmed after {reversal_confirmations} consecutive readings.",
+            "reason": (
+                f"Reversal to {raw_side} confirmed after "
+                f"{reversal_confirmations} consecutive readings."
+            ),
             "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
+            "ts": now,
         }
 
     return prev_active, {
@@ -202,9 +294,12 @@ def _apply_signal_lifecycle(
         "reversal_confirmations": reversal_confirmations,
         "active_side": prev_active,
         "changed": False,
-        "reason": f"Possible {raw_side} reversal detected; holding {prev_active} until confirmation.",
+        "reason": (
+            f"Possible {raw_side} reversal detected; holding "
+            f"{prev_active} until confirmation."
+        ),
         "last_confirmation_ts": last_confirmation_ts,
-                "ts": now,
+        "ts": now,
     }
 
 
@@ -215,15 +310,21 @@ def apply_persistent_signal_lifecycle(
 ) -> Tuple[Dict, Dict]:
     """Apply the restart-safe lifecycle stored by the strategy router.
 
-    ``run_decision_engine`` remains synchronous because it is also used by the
-    market analyzer.  The database I/O therefore lives in the async router;
-    this pure helper performs only the deterministic state transition.
+    HOLD is allowed only while the currently active side still has
+    meaningful supporting evidence. Weak active evidence releases the
+    signal and requires fresh confirmation.
     """
     state = dict(persisted_state or {})
-    raw_side = str(decision.get("preferred_side", "NONE")).upper()
+    raw_side = str(
+        decision.get("raw_preferred_side", decision.get("preferred_side", "NONE"))
+    ).upper()
     margin = float(decision.get("margin", 0) or 0)
     market_open = bool(decision.get("market_open", True))
-    hard_gated = bool(decision.get("market_regime_no_trade", False)) or not market_open
+    hard_gated = (
+        bool(decision.get("hard_gated", False))
+        or bool(decision.get("market_regime_no_trade", False))
+        or not market_open
+    )
 
     active = state.get("active_side", "NONE")
     candidate = state.get("candidate_side", "NONE")
@@ -244,8 +345,52 @@ def apply_persistent_signal_lifecycle(
         except (TypeError, ValueError):
             return 0.0
 
-    can_count = (epoch(last_eval) <= 0 or now - epoch(last_eval) >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS)
+    # SNAPSHOT_DEDUP_FIX_20260923
+    # Several browser pages can evaluate the exact same cached market
+    # snapshot. Such a snapshot is one observation, not several
+    # confirmations. Older in-flight snapshots must also be ignored.
+    _incoming_eval_epoch = float(now or 0)
+    _stored_eval_epoch = epoch(last_eval)
 
+    if (
+        _stored_eval_epoch > 0
+        and _incoming_eval_epoch > 0
+        and _incoming_eval_epoch <= _stored_eval_epoch
+    ):
+        lifecycle = str(state.get("lifecycle", "WAIT") or "WAIT")
+        active = str(state.get("active_side", "NONE") or "NONE").upper()
+        candidate = str(state.get("candidate_side", "NONE") or "NONE").upper()
+        confirmations = int(state.get("confirmations", 0) or 0)
+        reversal_confirmations = int(
+            state.get("reversal_confirmations", 0) or 0
+        )
+
+        out = dict(decision)
+        out["signal_lifecycle"] = lifecycle
+        out["signal_candidate"] = candidate
+        out["signal_confirmations"] = confirmations
+        out["signal_reversal_confirmations"] = reversal_confirmations
+        out["signal_active_side"] = active
+        out["signal_lifecycle_reason"] = (
+            "Duplicate/older market snapshot ignored; lifecycle state preserved."
+        )
+
+        if lifecycle.startswith(("CONFIRMED_", "HOLD_")) and active in ("CALL", "PUT"):
+            out["preferred_side"] = active
+        else:
+            out["preferred_side"] = "NONE"
+
+        return out, state
+
+    can_count = (
+        _stored_eval_epoch <= 0
+        or _incoming_eval_epoch - _stored_eval_epoch
+        >= SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS
+    )
+
+    # ------------------------------------------------------------------
+    # Hard safety gate.
+    # ------------------------------------------------------------------
     if hard_gated:
         active = "NONE"
         candidate = "NONE"
@@ -253,17 +398,21 @@ def apply_persistent_signal_lifecycle(
         reversal_confirmations = 0
         lifecycle = "WAIT"
         reason = "Hard safety gate is active; no directional signal is allowed."
+
+    # ------------------------------------------------------------------
+    # No raw direction: release any active signal.
+    # ------------------------------------------------------------------
     elif raw_side not in ("CALL", "PUT"):
-        if active in ("CALL", "PUT"):
-            lifecycle = f"HOLD_{active}"
-            reason = f"Holding confirmed {active}; current directional evidence is temporarily weak."
-        else:
-            active = "NONE"
-            candidate = "NONE"
-            confirmations = 0
-            reversal_confirmations = 0
-            lifecycle = "WAIT"
-            reason = "No confirmed directional signal."
+        active = "NONE"
+        candidate = "NONE"
+        confirmations = 0
+        reversal_confirmations = 0
+        lifecycle = "WAIT"
+        reason = "No confirmed directional signal; active signal released."
+
+    # ------------------------------------------------------------------
+    # No active signal: fresh confirmation sequence.
+    # ------------------------------------------------------------------
     elif active not in ("CALL", "PUT"):
         if abs(margin) < SIGNAL_CONFIRMATION_MIN_MARGIN:
             candidate = raw_side
@@ -271,7 +420,10 @@ def apply_persistent_signal_lifecycle(
             reversal_confirmations = 0
             active = "NONE"
             lifecycle = f"WATCH_{raw_side}"
-            reason = f"{raw_side} is below confirmation margin {SIGNAL_CONFIRMATION_MIN_MARGIN}."
+            reason = (
+                f"{raw_side} is below confirmation margin "
+                f"{SIGNAL_CONFIRMATION_MIN_MARGIN}."
+            )
         else:
             if candidate == raw_side:
                 if can_count:
@@ -279,46 +431,130 @@ def apply_persistent_signal_lifecycle(
             else:
                 candidate = raw_side
                 confirmations = 1
+
             reversal_confirmations = 0
+
             if confirmations >= SIGNAL_CONFIRMATIONS_REQUIRED:
                 active = raw_side
                 lifecycle = f"CONFIRMED_{raw_side}"
                 last_confirm = datetime_from_epoch(now)
-                reason = f"{raw_side} confirmed after {confirmations} spaced readings."
+                reason = (
+                    f"{raw_side} confirmed after "
+                    f"{confirmations} spaced readings."
+                )
             else:
                 active = "NONE"
                 lifecycle = f"WATCH_{raw_side}"
-                reason = f"Waiting for {SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} more confirmation cycle(s)."
-    elif raw_side == active:
-        candidate = raw_side
-        confirmations = max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED)
-        reversal_confirmations = 0
-        lifecycle = f"HOLD_{active}"
-        reason = f"{active} remains confirmed."
+                reason = (
+                    f"Waiting for "
+                    f"{SIGNAL_CONFIRMATIONS_REQUIRED - confirmations} "
+                    f"more confirmation cycle(s)."
+                )
+
     else:
-        opposite_ok = ((raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN) or
-                        (raw_side == "PUT" and margin <= -SIGNAL_REVERSAL_MIN_MARGIN))
-        if not opposite_ok:
-            candidate = raw_side
-            reversal_confirmations = 0
-            lifecycle = f"HOLD_{active}"
-            reason = f"Opposite {raw_side} reading is too weak for reversal."
-        else:
-            if candidate == raw_side:
-                if can_count:
-                    reversal_confirmations += 1
+        # --------------------------------------------------------------
+        # Revalidate currently active side.
+        # --------------------------------------------------------------
+        active_evidence_strong = (
+            (active == "CALL" and margin >= SIGNAL_HOLD_MIN_MARGIN)
+            or
+            (active == "PUT" and margin <= -SIGNAL_HOLD_MIN_MARGIN)
+        )
+
+        # Same side but weak evidence => RELEASE, not HOLD.
+        if raw_side == active:
+            if not active_evidence_strong:
+                active = "NONE"
+                candidate = raw_side
+                confirmations = 0
+                reversal_confirmations = 0
+                lifecycle = f"WATCH_{raw_side}"
+                reason = (
+                    f"Active {raw_side} released because its supporting "
+                    f"margin is weak ({margin:.1f}); fresh confirmation required."
+                )
             else:
                 candidate = raw_side
-                reversal_confirmations = 1
-            if reversal_confirmations >= SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED:
-                active = raw_side
-                confirmations = SIGNAL_CONFIRMATIONS_REQUIRED
-                lifecycle = f"CONFIRMED_{raw_side}"
-                last_confirm = datetime_from_epoch(now)
-                reason = f"Reversal to {raw_side} confirmed after {reversal_confirmations} spaced readings."
+                confirmations = max(confirmations, SIGNAL_CONFIRMATIONS_REQUIRED)
+                reversal_confirmations = 0
+                lifecycle = f"HOLD_{active}"
+                reason = (
+                    f"{active} remains confirmed with supporting "
+                    f"margin {margin:.1f}."
+                )
+
+        else:
+            # ----------------------------------------------------------
+            # Opposite direction.
+            # ----------------------------------------------------------
+            opposite_ok = (
+                (raw_side == "CALL" and margin >= SIGNAL_REVERSAL_MIN_MARGIN)
+                or
+                (raw_side == "PUT" and margin <= -SIGNAL_REVERSAL_MIN_MARGIN)
+            )
+
+            # Active weak + opposite weak => release stale active signal.
+            if not active_evidence_strong and not opposite_ok:
+                released_side = active
+                active = "NONE"
+                candidate = raw_side
+                confirmations = 0
+                reversal_confirmations = 0
+                lifecycle = f"WATCH_{raw_side}"
+                reason = (
+                    f"Active {released_side} released: its supporting margin "
+                    f"is weak ({margin:.1f}) and opposite {raw_side} is not "
+                    f"strong enough for reversal."
+                )
+
+            # Active still supported; opposite too weak => HOLD active.
+            elif not opposite_ok:
+                candidate = raw_side
+                reversal_confirmations = 0
+                lifecycle = f"HOLD_{active}"
+                reason = (
+                    f"Opposite {raw_side} reading is too weak for reversal; "
+                    f"{active} remains supported."
+                )
+
+            # Opposite is strong enough: existing 2-confirmation reversal.
             else:
-                lifecycle = f"HOLD_{active}_REVERSAL_WATCH_{raw_side}"
-                reason = f"Possible {raw_side} reversal; holding {active} until confirmation."
+                if candidate == raw_side:
+                    if can_count:
+                        reversal_confirmations += 1
+                else:
+                    candidate = raw_side
+                    reversal_confirmations = 1
+
+                if reversal_confirmations >= SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED:
+                    active = raw_side
+                    confirmations = SIGNAL_CONFIRMATIONS_REQUIRED
+                    lifecycle = f"CONFIRMED_{raw_side}"
+                    last_confirm = datetime_from_epoch(now)
+                    reason = (
+                        f"Reversal to {raw_side} confirmed after "
+                        f"{reversal_confirmations} spaced readings."
+                    )
+                else:
+                    lifecycle = f"HOLD_{active}_REVERSAL_WATCH_{raw_side}"
+                    reason = (
+                        f"Possible {raw_side} reversal; holding {active} "
+                        f"until confirmation."
+                    )
+
+    # CONFIRMATION_ANCHOR_FIX_20260923
+    # last_evaluation_at is the anchor for the 45-second confirmation
+    # interval. Do not advance it on duplicate/too-early directional
+    # requests, otherwise browser refreshes can postpone confirmation
+    # indefinitely.
+    next_last_evaluation = last_eval
+    if (
+        can_count
+        or lifecycle == "WAIT"
+        or raw_side not in ("CALL", "PUT")
+        or hard_gated
+    ):
+        next_last_evaluation = datetime_from_epoch(now)
 
     state.update({
         "active_side": active,
@@ -327,7 +563,7 @@ def apply_persistent_signal_lifecycle(
         "reversal_confirmations": reversal_confirmations,
         "lifecycle": lifecycle,
         "last_confirmation_at": last_confirm,
-        "last_evaluation_at": datetime_from_epoch(now),
+        "last_evaluation_at": next_last_evaluation,
         "margin": margin,
     })
 
@@ -338,10 +574,13 @@ def apply_persistent_signal_lifecycle(
     out["signal_reversal_confirmations"] = reversal_confirmations
     out["signal_active_side"] = active
     out["signal_lifecycle_reason"] = reason
+
     if lifecycle.startswith(("CONFIRMED_", "HOLD_")) and active in ("CALL", "PUT"):
         out["preferred_side"] = active
-    elif lifecycle == "WAIT":
+    else:
+        # WATCH and WAIT are not active directional signals.
         out["preferred_side"] = "NONE"
+
     return out, state
 
 
@@ -469,6 +708,33 @@ REGIME_CONFIDENCE_MULTIPLIERS: Dict[str, float] = {
     "HIGH_VOLATILITY":   0.80,
     "EXPIRY_HIGH_GAMMA":  0.85,
 }
+
+
+def _max_dampened_score_for_regime(regime: str) -> float:
+    """Theoretical maximum score after regime weighting and bucket dampening."""
+    mult = REGIME_BUCKET_MULTIPLIERS.get(regime, {})
+
+    per_bucket: Dict[str, List[float]] = {}
+    for name, weight in WEIGHTS.items():
+        if weight <= 0:
+            continue
+
+        bucket = INDICATOR_BUCKET.get(name, name)
+        regime_weight = weight * mult.get(bucket, 1.0)
+        per_bucket.setdefault(bucket, []).append(regime_weight)
+
+    total = 0.0
+    for weights in per_bucket.values():
+        weights.sort(reverse=True)
+        for i, w in enumerate(weights):
+            factor = (
+                BUCKET_DIMINISHING[i]
+                if i < len(BUCKET_DIMINISHING)
+                else BUCKET_DIMINISHING[-1]
+            )
+            total += w * factor
+
+    return total
 
 
 def _apply_regime_weighting(items: List[Tuple[str, str, int]], regime: str) -> List[Tuple[str, str, float]]:
@@ -746,12 +1012,20 @@ def _score_supertrend(supertrend: str) -> Tuple[str, int, str]:
     return "neutral", 0, "Supertrend: Neutral"
 
 
-def _score_volume(volume_spike: bool, volume_ratio: float) -> Tuple[str, int, str]:
-    if volume_spike and volume_ratio > 1.5:
-        return "bull", WEIGHTS["volume_spike"], f"Volume spike {volume_ratio:.1f}x avg — strong interest"
-    elif volume_spike:
-        return "bull", int(WEIGHTS["volume_spike"] * 0.5), f"Volume slightly elevated {volume_ratio:.1f}x"
-    return "neutral", 0, "Volume normal"
+def _score_volume(volume_spike: bool, volume_ratio: float, price_up: Optional[bool]) -> Tuple[str, int, str]:
+    """Volume alone has no direction — a spike on a DOWN move is bearish
+    (heavy selling), not bullish. price_up (spot vs VWAP, same reference
+    _score_vwap uses) tells us which side the spike actually supported.
+    price_up=None (VWAP unavailable) means we can't attribute a direction,
+    so it scores neutral/0 like any other missing-data case in this file."""
+    if not volume_spike or price_up is None:
+        reason = "Volume normal" if not volume_spike else "Volume spike but direction unavailable (VWAP missing)"
+        return "neutral", 0, reason
+    direction = "bull" if price_up else "bear"
+    verb = "strong buying" if price_up else "strong selling"
+    if volume_ratio > 1.5:
+        return direction, WEIGHTS["volume_spike"], f"Volume spike {volume_ratio:.1f}x avg, price {'up' if price_up else 'down'} — {verb} interest"
+    return direction, int(WEIGHTS["volume_spike"] * 0.5), f"Volume slightly elevated {volume_ratio:.1f}x, price {'up' if price_up else 'down'}"
 
 
 def _score_vix(vix: float) -> Tuple[str, int, str]:
@@ -896,6 +1170,14 @@ def _suggest_strategy(
 
     if preferred_side in ("CALL", "PUT") and not trending:
         opt = "CE" if preferred_side == "CALL" else "PE"
+        if high_vol:
+            return (
+                "Long Straddle / Strangle",
+                f"Weak/uncertain direction (margin {margin:+.0f}, ADX {adx:.1f} < 20) "
+                f"ஆனா high volatility (VIX {vix:.1f}, ATR {atr_pct:.1f}%) — பெரிய move "
+                f"எதிர்பார்க்கலாம் ஆனா {opt} lean மட்டும் நம்பி conviction போட போதாது. "
+                f"Straddle/Strangle எந்த side move ஆனாலும் capture பண்ணும்."
+            )
         return (
             f"Weak-Trend {opt} Bias — Small Size",
             f"Direction bias இருக்கு (margin {margin:+.0f}) ஆனா ADX {adx:.1f} < 20 "
@@ -996,29 +1278,77 @@ def _build_scenarios(
 # 14 being blind. This maps each indicator to whether its underlying data
 # was actually available (independent of what direction it scored), and
 # dampens confidence by how much of the total possible weight was missing.
+def _mtf_live_valid(multi_tf: Dict) -> bool:
+    """
+    Return True only when all three required MTF frames are real AND fresh.
+
+    SAFETY FIX 2026-09-11:
+    data_source="angel_one_intraday" by itself does not prove freshness.
+    A stale broker response must never be used as live directional evidence.
+    """
+    return all(
+        (
+            (multi_tf.get(tf) or {}).get("data_source")
+            in ("angel_one_intraday", "zerodha_intraday")
+            and bool((multi_tf.get(tf) or {}).get("fresh", False))
+        )
+        for tf in ("5min", "15min", "1hr")
+    )
+
+
 def _data_availability(market_data: Dict, tech_src: str) -> Dict[str, bool]:
     # PCR/OI-change/max-pain/writing patterns all derive from the same
     # option-chain fetch — pcr<=0 is that fetch's own "empty/unavailable"
     # sentinel (see _score_pcr fix above), so it's a more direct signal
     # than the oi_summary truthiness check used before.
     chain_available = market_data.get("pcr", 0) > 0
-    # tech_src == "placeholder" means self.tech._empty() was used for ALL of
-    # these at once (see market_analyzer.py) — one flag covers the whole group.
-    tech_available = tech_src != "placeholder"
+    # SAFETY FIX 2026-09-11:
+    # Daily historical close data is useful for context, but it must NOT be
+    # counted as LIVE intraday technical data for directional-signal safety.
+    #
+    # A directional CALL/PUT decision requires all three real intraday
+    # timeframes produced by MarketAnalyzer:
+    #   5min + 15min + 1hr
+    #
+    # This prevents a situation where:
+    #   technical_source = historical_daily_close
+    #   MTF = unavailable
+    # yet the UI incorrectly reports data_completeness = 100%.
+    multi_tf = market_data.get("multi_timeframe") or {}
+    # SAFETY FIX 2026-09-11:
+    # Require both real broker source AND fresh candle timestamps.
+    mtf_live_valid = _mtf_live_valid(multi_tf)
+
+    # The primary technical frame must also be the real 5-minute OHLC frame.
+    live_intraday_tech = (
+        tech_src == "intraday_5min_ohlc"
+        and mtf_live_valid
+    )
+
     return {
         "pcr": chain_available, "oi_change": chain_available, "max_pain": chain_available,
         "call_writing": chain_available, "put_writing": chain_available,
         "futures_premium": market_data.get("futures_premium_status") == "live",
-        "vwap": tech_available, "ema20": tech_available, "ema50": tech_available,
-        "rsi": tech_available, "macd": tech_available, "adx": tech_available,
-        "supertrend": tech_available, "volume_spike": tech_available,
+
+        # SAFETY FIX:
+        # These technical indicators are considered directionally available
+        # only when the real intraday MTF pipeline is complete.
+        "vwap": live_intraday_tech, "ema20": live_intraday_tech,
+        "ema50": live_intraday_tech, "rsi": live_intraday_tech,
+        "macd": live_intraday_tech, "adx": live_intraday_tech,
+        "supertrend": live_intraday_tech, "volume_spike": live_intraday_tech,
+
         "global_market": market_data.get("global_status") == "live",
         "gift_nifty": market_data.get("gift_status") == "live",
         "fii": market_data.get("fii_status") == "live",
         "dii": market_data.get("dii_status") == "live",
-        # atr_risk/india_vix weigh 0 already — availability doesn't affect
-        # confidence math, but tracked for the data_completeness_pct display.
-        "atr_risk": tech_available, "india_vix": True,
+
+        # ATR has zero confidence weight, but keeping its availability tied
+        # to live intraday data makes the displayed completeness truthful.
+        "atr_risk": live_intraday_tech,
+
+        # India VIX is independently available and has zero confidence weight.
+        "india_vix": True,
     }
 
 
@@ -1077,7 +1407,9 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # 14. Supertrend
     record("supertrend", _score_supertrend(technicals.get("supertrend", "")))
     # 15. Volume Spike
-    record("volume_spike", _score_volume(technicals.get("volume_spike", False), technicals.get("volume_ratio", 1.0)))
+    _vwap_val = technicals.get("vwap", 0)
+    _price_up = (spot > _vwap_val) if _vwap_val > 0 else None
+    record("volume_spike", _score_volume(technicals.get("volume_spike", False), technicals.get("volume_ratio", 1.0), _price_up))
     # 16. India VIX
     record("india_vix", _score_vix(market_data.get("vix", 15)))
     # 17. Global Market
@@ -1110,6 +1442,24 @@ def run_decision_engine(market_data: Dict) -> Dict:
         logger.exception("Market regime classification failed — proceeding without regime reweighting")
         regime_info = {"regime": "RANGE", "confidence": "LOW", "no_trade": False, "reasons": []}
     regime = regime_info.get("regime", "RANGE")
+
+    # SESSION_CONTEXT_STAGE2A_20260924
+    # Session-state is an observation/context layer. It must NOT add/remove
+    # score points or alter gates/lifecycle in Stage 2A.
+    session_state = market_data.get("session_state") or {}
+    session_phase = str(session_state.get("phase", "UNKNOWN")).upper()
+    session_day_type = str(session_state.get("day_type", "UNKNOWN")).upper()
+    session_volatility = str(
+        session_state.get("volatility_state", "UNKNOWN")
+    ).upper()
+    session_transition = str(
+        session_state.get("transition_state", "NONE")
+    ).upper()
+    session_vwap = str(
+        session_state.get("vwap_relation", "UNAVAILABLE")
+    ).upper()
+    session_confidence = session_state.get("state_confidence", 0)
+
     weighted_items = _apply_regime_weighting(recorded_items, regime)
 
     # Review #7: raw scores["bull"]/["bear"] are the OLD sum-everything
@@ -1201,17 +1551,320 @@ def run_decision_engine(market_data: Dict) -> Dict:
     #   3. Spot must be valid
     # இல்லையெனில் → WAIT (preferred_side = "NONE")
     chain_available = market_data.get("pcr", 0) > 0
-    tech_available  = market_data.get("technical_data_source", "") != "placeholder"
-    spot_valid      = spot > 0
 
-    if preferred_side in ("CALL", "PUT"):
+    # Directional CALL/PUT signals require real intraday confirmation.
+    # Daily historical technicals remain context only.
+    multi_tf = market_data.get("multi_timeframe") or {}
+    mtf_available = all(
+        (multi_tf.get(tf) or {}).get("data_source")
+        in ("angel_one_intraday", "zerodha_intraday")
+        for tf in ("5min", "15min", "1hr")
+    )
+
+    tech_available = (
+        market_data.get("technical_data_source") == "intraday_5min_ohlc"
+        and mtf_available
+    )
+    spot_valid = spot > 0
+
+    # SAFETY FIX 2026-09-11:
+    # Directional CALL/PUT analysis must be blocked whenever the complete
+    # real intraday MTF pipeline is unavailable.
+    #
+    # Required real broker-derived frames:
+    #   5min + 15min + 1hr
+    #
+    # Daily historical data can still be shown as CONTEXT, but it must not
+    # be treated as a substitute for live intraday directional evidence.
+    #
+    # IMPORTANT:
+    # This is intentionally checked BEFORE the preferred_side branch below.
+    # Therefore even a neutral margin such as -2 cannot hide the fact that
+    # the live directional data pipeline is unavailable.
+    multi_tf = market_data.get("multi_timeframe") or {}
+
+    # SAFETY FIX 2026-09-11:
+    # Directional analysis requires complete REAL + FRESH MTF data.
+    # A stale intraday response is treated exactly like unavailable data.
+    mtf_live_valid = _mtf_live_valid(multi_tf)
+
+    # P0 OBSERVE-ONLY MTF LOGGING
+    # Diagnostics only: do not change the decision, score, gate, or output.
+    _mtf_observation = {}
+    for _tf in ("5min", "15min", "1hr"):
+        _frame = multi_tf.get(_tf) or {}
+        _mtf_observation[_tf] = {
+            "source": _frame.get("data_source"),
+            "fresh": bool(_frame.get("fresh", False)),
+            "age_min": _frame.get("freshness_minutes"),
+            "timestamp": _frame.get("last_timestamp"),
+            "reason": _frame.get("freshness_reason"),
+            "trend": _frame.get("trend"),
+        }
+
+    logger.info(
+        "MTF_OBSERVATION symbol=%s snapshot=%s technical_source=%s "
+        "live_valid=%s 5min=%s 15min=%s 1hr=%s",
+        market_data.get("symbol", "UNKNOWN"),
+        market_data.get("timestamp"),
+        market_data.get("technical_data_source"),
+        mtf_live_valid,
+        _mtf_observation["5min"],
+        _mtf_observation["15min"],
+        _mtf_observation["1hr"],
+    )
+
+    live_intraday_tech = (
+        market_data.get("technical_data_source") == "intraday_5min_ohlc"
+        and mtf_live_valid
+    )
+
+    if not spot_valid:
+        preferred_side = "NONE"
+        market_bias = "Sideways"
+        risk = "High"
+        hard_gated = True
+        reasons.append("🚫 Spot price invalid")
+        logger.warning("Decision hard-gated: invalid spot price=%s", spot)
+
+    elif not live_intraday_tech:
+        # SAFETY FIX 2026-09-11:
+        # No complete real intraday MTF data = no directional signal.
+        # Keep the market analysis visible, but force the decision into WAIT.
+        preferred_side = "NONE"
+        risk = "High"
+        hard_gated = True
+        market_bias = "Sideways"
+
+        # SAFETY FIX 2026-09-11:
+        # Separate "not real" from "real but stale" for diagnostics.
+        missing_frames = [
+            tf for tf in ("5min", "15min", "1hr")
+            if (multi_tf.get(tf) or {}).get("data_source")
+            not in ("angel_one_intraday", "zerodha_intraday")
+        ]
+
+        stale_frames = [
+            tf for tf in ("5min", "15min", "1hr")
+            if (
+                (multi_tf.get(tf) or {}).get("data_source")
+                in ("angel_one_intraday", "zerodha_intraday")
+                and not bool((multi_tf.get(tf) or {}).get("fresh", False))
+            )
+        ]
+
+        reasons.append(
+            "🚫 Live intraday technical data unavailable — "
+            "5m + 15m + 1h confirmation required"
+        )
+
+        if missing_frames:
+            reasons.append(
+                "🚫 Missing real MTF frame(s): "
+                + ", ".join(missing_frames)
+            )
+
+        if stale_frames:
+            reasons.append(
+                "🚫 Stale MTF frame(s): "
+                + ", ".join(stale_frames)
+            )
+
+            for tf in stale_frames:
+                frame = multi_tf.get(tf) or {}
+                reasons.append(
+                    f"🚫 {tf} freshness: "
+                    f"{frame.get('freshness_reason', 'stale')}"
+                )
+
+        logger.warning(
+            "Decision hard-gated: live intraday MTF unavailable "
+            "(technical_source=%s, missing=%s, stale=%s)",
+            market_data.get("technical_data_source"),
+            ",".join(missing_frames) if missing_frames else "none",
+            ",".join(stale_frames) if stale_frames else "none",
+        )
+
+        logger.warning(
+            "MTF gate diagnostics: "
+            "5min(src=%s,fresh=%s,age=%s,reason=%s,ts=%s) "
+            "15min(src=%s,fresh=%s,age=%s,reason=%s,ts=%s) "
+            "1hr(src=%s,fresh=%s,age=%s,reason=%s,ts=%s)",
+            (multi_tf.get("5min") or {}).get("data_source"),
+            (multi_tf.get("5min") or {}).get("fresh"),
+            (multi_tf.get("5min") or {}).get("freshness_minutes"),
+            (multi_tf.get("5min") or {}).get("freshness_reason"),
+            (multi_tf.get("5min") or {}).get("last_timestamp"),
+            (multi_tf.get("15min") or {}).get("data_source"),
+            (multi_tf.get("15min") or {}).get("fresh"),
+            (multi_tf.get("15min") or {}).get("freshness_minutes"),
+            (multi_tf.get("15min") or {}).get("freshness_reason"),
+            (multi_tf.get("15min") or {}).get("last_timestamp"),
+            (multi_tf.get("1hr") or {}).get("data_source"),
+            (multi_tf.get("1hr") or {}).get("fresh"),
+            (multi_tf.get("1hr") or {}).get("freshness_minutes"),
+            (multi_tf.get("1hr") or {}).get("freshness_reason"),
+            (multi_tf.get("1hr") or {}).get("last_timestamp"),
+        )
+
+    elif preferred_side in ("CALL", "PUT"):
+        # RANGE structural guard:
+        # STEP 2K-AS historical counterfactual:
+        # RANGE + CALL + 15m DOWN + 1h DOWN
+        # removed 127 signals: UP=6, DOWN=93, FLAT=28.
+        # Evaluated accuracy improved by +20.45pp.
+        # TIMEFRAME TREND SOURCE
+        # Prefer the normalized timeframe_trend contract when present.
+        # Otherwise derive it directly from MarketAnalyzer's authoritative
+        # multi_timeframe payload. The API route creates timeframe_trend
+        # only after the decision engine has already run.
+        timeframe_trend = market_data.get("timeframe_trend") or {}
+
+        if not timeframe_trend:
+            multi_tf = market_data.get("multi_timeframe") or {}
+            timeframe_trend = {
+                "5min": multi_tf.get("5min", {}).get("trend", "unavailable"),
+                "15min": multi_tf.get("15min", {}).get("trend", "unavailable"),
+                "1hr": multi_tf.get("1hr", {}).get("trend", "unavailable"),
+            }
+
+        trend_15m = str(
+            timeframe_trend.get("15min", "unavailable")
+        ).lower()
+        trend_1h = str(
+            timeframe_trend.get("1hr", "unavailable")
+        ).lower()
+
+        structural_range_call_block = (
+            regime == "RANGE"
+            and preferred_side == "CALL"
+            and trend_15m == "down"
+            and trend_1h == "down"
+        )
+
+        if structural_range_call_block:
+            preferred_side = "NONE"
+            risk = "High"
+            hard_gated = True
+            reasons.append(
+                "🚫 RANGE CALL blocked: 15m and 1h trends are both DOWN"
+            )
+            logger.info(
+                "RANGE CALL blocked by structural guard: "
+                "15m=%s 1h=%s margin=%.1f",
+                trend_15m,
+                trend_1h,
+                margin,
+            )
+
+        # Existing weak-margin guard remains as a second safeguard.
+        if (
+            preferred_side == "CALL"
+            and regime == "RANGE"
+            and 10 <= margin < 15
+        ):
+            preferred_side = "NONE"
+            risk = "High"
+            hard_gated = True
+            reasons.append(
+                f"🚫 RANGE CALL blocked: margin +{margin:.1f} "
+                "is in the weak +10..+14 confirmation zone"
+            )
+            logger.info(
+                "RANGE CALL blocked by quick guard: margin=%.1f",
+                margin,
+            )
+
         blocking_reasons = []
         if not chain_available:
             blocking_reasons.append("Option chain data unavailable (PCR=0) — CALL/PUT signal blocked")
         if not tech_available:
             blocking_reasons.append("Technical data is placeholder — real OHLC unavailable")
-        if not spot_valid:
-            blocking_reasons.append("Spot price invalid")
+
+        # SAFETY FIX 2026-09-11:
+        # The 5-minute timeframe is useful for short-term timing, but it
+        # must not override a clear higher-timeframe structure by itself.
+        #
+        # Example:
+        #   5m  = UP
+        #   15m = DOWN
+        #   1h  = DOWN
+        #
+        # A fresh CALL in this structure is conflicting with both higher
+        # timeframes. Therefore block the fresh CALL and force WAIT.
+        #
+        # Symmetric protection:
+        #   5m  = DOWN
+        #   15m = UP
+        #   1h  = UP
+        #
+        # In that case a fresh PUT is blocked.
+        #
+        # IMPORTANT:
+        # This is an ENTRY SAFETY GATE only.
+        # It does NOT change market_regime. The regime classifier can still
+        # report TREND_UP/TREND_DOWN based on its authoritative technical
+        # context. We only prevent a conflicting fresh directional signal.
+        mtf = market_data.get("multi_timeframe") or {}
+
+        mtf_5m = str(
+            (mtf.get("5min") or {}).get("trend", "unavailable")
+        ).lower()
+        mtf_15m = str(
+            (mtf.get("15min") or {}).get("trend", "unavailable")
+        ).lower()
+        mtf_1h = str(
+            (mtf.get("1hr") or {}).get("trend", "unavailable")
+        ).lower()
+
+        # Only apply the conflict gate when ALL three timeframe streams
+        # are real broker-derived intraday data. Missing data is handled by
+        # the existing technical-data safety gate above.
+        # SAFETY FIX 2026-09-11:
+        # MTF conflict detection must also require fresh candles.
+        # Otherwise stale 15m/1h data could incorrectly block a new signal.
+        mtf_live_valid = _mtf_live_valid(mtf)
+
+        mtf_conflict_call = (
+            mtf_live_valid
+            and mtf_5m == "up"
+            and mtf_15m == "down"
+            and mtf_1h == "down"
+            and preferred_side == "CALL"
+        )
+
+        mtf_conflict_put = (
+            mtf_live_valid
+            and mtf_5m == "down"
+            and mtf_15m == "up"
+            and mtf_1h == "up"
+            and preferred_side == "PUT"
+        )
+
+        if mtf_conflict_call:
+            preferred_side = "NONE"
+            risk = "High"
+            hard_gated = True
+            reasons.append(
+                "🚫 MTF conflict: 5m UP but 15m and 1h DOWN — fresh CALL blocked"
+            )
+            logger.warning(
+                "MTF conflict safety gate: blocking fresh CALL "
+                "(5m=UP, 15m=DOWN, 1h=DOWN)"
+            )
+
+        elif mtf_conflict_put:
+            preferred_side = "NONE"
+            risk = "High"
+            hard_gated = True
+            reasons.append(
+                "🚫 MTF conflict: 5m DOWN but 15m and 1h UP — fresh PUT blocked"
+            )
+            logger.warning(
+                "MTF conflict safety gate: blocking fresh PUT "
+                "(5m=DOWN, 15m=UP, 1h=UP)"
+            )
+
         if blocking_reasons:
             preferred_side = "NONE"
             risk = "High"
@@ -1233,8 +1886,23 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # ±HYSTERESIS_EXIT_MARGIN) keeps showing the previous side instead.
     symbol_key = market_data.get("symbol", "NIFTY")
     prev_state = _signal_state.get(symbol_key)
-    if not hard_gated and preferred_side == "NONE" and prev_state and prev_state.get("side") in ("CALL", "PUT"):
-        prev_side = prev_state["side"]
+
+    # BUG FIX 2026-09-11:
+    # Hysteresis may continue ONLY an already-confirmed active direction.
+    # A WATCH candidate must never be used as the previous signal.
+    prev_active_side = (
+        prev_state.get("active_side", "NONE")
+        if prev_state
+        else "NONE"
+    )
+
+    if (
+        not hard_gated
+        and preferred_side == "NONE"
+        and prev_state
+        and prev_active_side in ("CALL", "PUT")
+    ):
+        prev_side = prev_active_side
         if prev_side == "CALL" and margin > HYSTERESIS_EXIT_MARGIN:
             preferred_side = "CALL"
             reasons.append(
@@ -1250,16 +1918,22 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # Convert the hysteresis result into a stable signal lifecycle. Raw
     # CALL/PUT readings need consecutive confirmation; active signals are
     # held through temporary noise and reversals need confirmation too.
-    raw_lifecycle_side = preferred_side
+    # Preserve the scoring/gate result before lifecycle can convert WATCH
+    # into preferred_side=NONE. Persistent lifecycle needs this raw candidate
+    # to accumulate confirmations across requests.
+    raw_preferred_side = preferred_side
+    raw_lifecycle_side = raw_preferred_side
     lifecycle_side, lifecycle = _apply_signal_lifecycle(
         symbol_key, raw_lifecycle_side, margin, hard_gated
     )
     if lifecycle_side in ("CALL", "PUT") and lifecycle["state"].startswith(("CONFIRMED_", "HOLD_")):
         preferred_side = lifecycle_side
     elif lifecycle["state"].startswith("WATCH_"):
-        # Keep the raw side for backwards compatibility/debugging, but the
-        # lifecycle state is the actionable gate: WATCH is not confirmed.
-        pass
+        # BUG FIX 2026-09-11:
+        # WATCH is a candidate-only state, not an actionable directional signal.
+        # Keep the candidate visible through signal_candidate/lifecycle,
+        # but require full confirmation before exposing CALL/PUT.
+        preferred_side = "NONE"
     elif hard_gated:
         preferred_side = "NONE"
 
@@ -1281,7 +1955,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # since bull/bear are now bucket-dampened (review #7), normalising
     # against the old undampened sum would make confidence read
     # artificially low across the board.
-    max_possible = MAX_DAMPENED_SCORE
+    max_possible = _max_dampened_score_for_regime(regime)
     dominant = max(bull, bear)
     raw_conf = (dominant / max_possible) * 100 if max_possible > 0 else 0
 
@@ -1346,12 +2020,113 @@ def run_decision_engine(market_data: Dict) -> Dict:
         preferred_side, margin, adx_val, vix, atr_pct
     )
 
+    # CLOSED_MARKET_REASON_SANITIZATION_20260922
+    # The market-closed hard gate above already blocks directional signals.
+    # Do not let unavailable sentinel values (ADX/VIX/ATR = 0) generate a
+    # live-market strategy description such as RANGE / Iron Condor.
+    if not spot_data.get("market_open", True):
+        forecast = "Market Closed"
+        strategy = "WAIT"
+        strategy_reason = (
+            "Market closed — live intraday technical data unavailable. "
+            "No fresh directional strategy is generated."
+        )
+
     # ── Scenarios + invalidation levels ───────────────────────────────────
     # "What would prove this view wrong" is as important as the view itself
     # — a bias without an invalidation level isn't falsifiable. Built from
     # the same support/resistance levels already computed for this request.
     sr = market_data.get("support_resistance", {}) or {}
     scenarios = _build_scenarios(spot, sr, bullish_probability, bearish_probability, margin)
+
+    # SESSION_CONTEXT_STAGE2A_20260924
+    # Descriptive only: this tells the UI how the score sits inside today's
+    # intraday session structure. No score/gate/lifecycle mutation.
+    mtf5_context = str(
+        ((market_data.get("multi_timeframe") or {}).get("5min") or {}).get(
+            "trend", "unavailable"
+        )
+    ).upper()
+    # SESSION_CONTEXT_NORMALIZE_20260924
+    # Keep timeframe labels in a stable uppercase contract.
+    mtf15_context = str(
+        ((market_data.get("multi_timeframe") or {}).get("15min") or {}).get(
+            "trend", "unavailable"
+        )
+    ).upper()
+
+    if (
+        session_phase == "MIDDAY"
+        and session_volatility == "COMPRESSION"
+    ):
+        session_environment = "MIDDAY_COMPRESSION"
+    elif session_transition == "REVERSAL_WATCH":
+        session_environment = "REVERSAL_WATCH"
+    elif session_transition == "TRANSITION":
+        session_environment = "TRANSITION"
+    elif session_phase in {"AFTERNOON_EXPANSION", "CLOSING"}:
+        session_environment = "AFTERNOON_EXPANSION"
+    else:
+        session_environment = session_phase
+
+    session_alignment = "NEUTRAL"
+
+    if preferred_side == "CALL":
+        if (
+            mtf5_context == "UP"
+            and mtf15_context == "UP"
+            and session_vwap == "ABOVE"
+        ):
+            session_alignment = "ALIGNED"
+        elif (
+            mtf5_context == "DOWN"
+            or mtf15_context == "DOWN"
+            or session_vwap == "BELOW"
+        ):
+            session_alignment = "CONFLICTING"
+    elif preferred_side == "PUT":
+        if (
+            mtf5_context == "DOWN"
+            and mtf15_context == "DOWN"
+            and session_vwap == "BELOW"
+        ):
+            session_alignment = "ALIGNED"
+        elif (
+            mtf5_context == "UP"
+            or mtf15_context == "UP"
+            or session_vwap == "ABOVE"
+        ):
+            session_alignment = "CONFLICTING"
+
+    session_context = {
+        "phase": session_phase,
+        "day_type": session_day_type,
+        "environment": session_environment,
+        "volatility_state": session_volatility,
+        "transition_state": session_transition,
+        "vwap_relation": session_vwap,
+        "trend_5m": mtf5_context,
+        "trend_15m": mtf15_context,
+        "alignment": session_alignment,
+        "state_confidence": session_confidence,
+        "observation_only": True,
+    }
+
+    if session_environment == "MIDDAY_COMPRESSION":
+        reasons.append(
+            "🕒 Session context: MIDDAY compression — "
+            "directional score unchanged; breakout confirmation remains separate."
+        )
+    elif session_environment == "REVERSAL_WATCH":
+        reasons.append(
+            "🔄 Session context: REVERSAL_WATCH — "
+            "score unchanged; current direction is being monitored against the morning structure."
+        )
+    elif session_environment == "TRANSITION":
+        reasons.append(
+            "🔄 Session context: TRANSITION — "
+            "score unchanged; intraday structure is changing."
+        )
 
     # ── Recommended strike (ATM by default; ATM+1 when direction bias is
     # weak/uncertain — cheaper premium for a less-confident read) ────────
@@ -1363,10 +2138,12 @@ def run_decision_engine(market_data: Dict) -> Dict:
         recommended_strike = "ATM+1"
 
     return {
+        "market_open":           spot_data.get("market_open", True),
         "market_bias":           market_bias,
         "bullish_probability":   bullish_probability,
         "bearish_probability":   bearish_probability,
         "preferred_side":        preferred_side,
+        "raw_preferred_side":     raw_preferred_side,
         "recommended_strike":    recommended_strike,
         "bull_score":            bull,
         "bear_score":            bear,
@@ -1398,6 +2175,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         # trend indicators mattered more/less today.
         "market_regime":         regime,
         "market_regime_confidence": regime_info.get("confidence", "LOW"),
+        "session_context":       session_context,
         "market_regime_reasons": regime_info.get("reasons", []),
         "market_regime_no_trade": regime_info.get("no_trade", False),
         "market_regime_no_trade_reason": regime_info.get("no_trade_reason", ""),
@@ -1408,6 +2186,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "signal_reversal_confirmations": lifecycle.get("reversal_confirmations", 0),
         "signal_active_side":    lifecycle.get("active_side", "NONE"),
         "signal_lifecycle_reason": lifecycle.get("reason", ""),
+        "hard_gated":            hard_gated,
         "reasons":               reasons,
         "strategy":              strategy,
         "strategy_reason":       strategy_reason,

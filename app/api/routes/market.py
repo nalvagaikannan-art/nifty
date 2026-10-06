@@ -3,20 +3,21 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.data_fetcher import DataFetcher
 from app.exceptions import MarketDataError
 from app.api.deps import get_fetcher
+from app.schemas import (MarketOptionChainResponse, MarketSpotResponse, MarketCandlesResponse, MarketVixResponse, MarketBreadthResponse)
 
 router = APIRouter()
 
-VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 VALID_INTERVALS = {"ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE", "ONE_HOUR"}
 
-@router.get("/spot/{symbol}")
+@router.get("/spot/{symbol}", response_model=MarketSpotResponse)
 async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     try:
         return await fetcher.get_spot(symbol)
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/candles/{symbol}")
+@router.get("/candles/{symbol}", response_model=MarketCandlesResponse)
 async def get_candles(
     symbol: str,
     interval: str = Query("FIVE_MINUTE"),
@@ -43,17 +44,17 @@ async def get_candles(
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/option-chain/{symbol}")
+@router.get("/option-chain/{symbol}", response_model=MarketOptionChainResponse)
 async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fetcher: DataFetcher = Depends(get_fetcher)):
     try:
         return await fetcher.get_option_chain(symbol, expiry)
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-@router.get("/vix")
+@router.get("/vix", response_model=MarketVixResponse)
 async def get_vix(fetcher: DataFetcher = Depends(get_fetcher)):
     return {"vix": await fetcher.get_volatility()}
 
-@router.get("/breadth")
+@router.get("/breadth", response_model=MarketBreadthResponse)
 async def get_breadth(fetcher: DataFetcher = Depends(get_fetcher)):
     return await fetcher.get_market_breadth()

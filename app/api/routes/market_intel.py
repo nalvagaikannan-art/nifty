@@ -12,23 +12,29 @@ from app.services.data_fetcher import DataFetcher
 from app.services.global_market import global_market_service
 from app.services.economic_calendar import economic_calendar_service
 from app.api.deps import get_fetcher
+from app.schemas import (
+    FiiDiiResponse,
+    SectorPerformanceResponse,
+    GlobalMarketsResponse,
+    EconomicCalendarResponse,
+)
 
 router = APIRouter()
 
 
-@router.get("/fii-dii")
+@router.get("/fii-dii", response_model=FiiDiiResponse)
 async def fii_dii(fetcher: DataFetcher = Depends(get_fetcher)):
     """FII/DII cash-market net activity — NSE official public JSON."""
     return await fetcher.get_fii_dii()
 
 
-@router.get("/sector-performance")
+@router.get("/sector-performance", response_model=SectorPerformanceResponse)
 async def sector_performance(fetcher: DataFetcher = Depends(get_fetcher)):
     """NSE sector indices — top/weak sector, rotation, strength score."""
     return await fetcher.get_sector_performance()
 
 
-@router.get("/global-markets")
+@router.get("/global-markets", response_model=GlobalMarketsResponse)
 async def global_markets():
     """Gift Nifty*, Dow/Nasdaq/S&P futures, Nikkei, Hang Seng, Shanghai,
     FTSE, DAX, CAC, Crude, Gold, Silver, Dollar Index, USDINR, US 10Y yield.
@@ -40,7 +46,7 @@ async def global_markets():
     return await global_market_service.get_snapshot()
 
 
-@router.get("/economic-calendar")
+@router.get("/economic-calendar", response_model=EconomicCalendarResponse)
 async def economic_calendar():
     """NSE weekly/monthly expiry (computed) + this week's macro events
     (Fed, CPI, GDP, Employment, RBI/INR-tagged, etc.) from a free public feed.

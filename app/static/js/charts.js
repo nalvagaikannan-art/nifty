@@ -1,7 +1,7 @@
 // charts.js — Plotly chart rendering
 
 function updateChart(data) {
-    var symbols = ['NIFTY', 'BANKNIFTY', 'FINNIFTY'];
+    var symbols = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX'];
     var prices  = symbols.map(function(s) { return data[s] && !data[s].error ? data[s].price  : 0; });
     var changes = symbols.map(function(s) { return data[s] && !data[s].error ? data[s].change : 0; });
     var colors  = changes.map(function(c) { return c >= 0 ? '#00e676' : '#ff5252'; });

@@ -20,6 +20,11 @@ from app.services.paper_trading import (
     get_daily_pnl,
 )
 import logging
+from app.schemas import (
+    PaperTradeOpenResponse, PaperTradeHistoryResponse,
+    PaperTradeStatsResponse, DailyPnlResponse,
+    PaperTradeActionResponse,
+)
 
 router  = APIRouter()
 logger  = logging.getLogger(__name__)
@@ -59,7 +64,7 @@ class CloseTradeRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
-@router.post("/open")
+@router.post("/open", response_model=PaperTradeActionResponse)
 async def open_trade(req: OpenTradeRequest):
     """New paper trade open செய்கிறோம்"""
     try:
@@ -71,7 +76,7 @@ async def open_trade(req: OpenTradeRequest):
         raise HTTPException(500, detail=str(e))
 
 
-@router.post("/close/{trade_id}")
+@router.post("/close/{trade_id}", response_model=PaperTradeActionResponse)
 async def close_trade(trade_id: str, req: CloseTradeRequest):
     """Paper trade close செய்கிறோம்"""
     result = await close_paper_trade(trade_id, req.exit_price, req.exit_reason)
@@ -80,7 +85,7 @@ async def close_trade(trade_id: str, req: CloseTradeRequest):
     return {"success": True, "trade": result}
 
 
-@router.get("/open")
+@router.get("/open", response_model=PaperTradeOpenResponse)
 async def list_open_trades(symbol: Optional[str] = None):
     """Open positions list"""
     trades = await get_open_trades(symbol)
@@ -90,7 +95,7 @@ async def list_open_trades(symbol: Optional[str] = None):
     }
 
 
-@router.get("/history")
+@router.get("/history", response_model=PaperTradeHistoryResponse)
 async def trade_history(symbol: Optional[str] = None, limit: int = 50):
     """Trade history (closed trades)"""
     trades = await get_trade_history(symbol, limit)
@@ -100,7 +105,7 @@ async def trade_history(symbol: Optional[str] = None, limit: int = 50):
     }
 
 
-@router.get("/stats")
+@router.get("/stats", response_model=PaperTradeStatsResponse)
 async def paper_stats(symbol: Optional[str] = None):
     """
     P&L stats + signal strength calibration.
@@ -112,7 +117,7 @@ async def paper_stats(symbol: Optional[str] = None):
     return stats
 
 
-@router.get("/daily-pnl")
+@router.get("/daily-pnl", response_model=DailyPnlResponse)
 async def daily_pnl_endpoint():
     pnl = await get_daily_pnl()
     return {"daily_pnl": round(pnl, 2)}

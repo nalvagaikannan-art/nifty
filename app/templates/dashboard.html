@@ -386,7 +386,101 @@
   font-weight: 600;
 }
 
+/* ── ALL INDEX SIGNAL BOARD ── */
+.lt-all-signals {
+  margin-bottom: 12px;
+}
+.lt-all-signals-title {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: .4px;
+  margin: 0 0 8px;
+  color: var(--lt-text);
+}
+.lt-all-signals-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+.lt-all-signal-card {
+  position: relative;
+  border-radius: 12px;
+  padding: 11px 10px;
+  border: 1px solid var(--lt-gray-bd);
+  background: var(--lt-gray-bg);
+  box-shadow: var(--lt-shadow);
+  min-height: 104px;
+}
+.lt-all-signal-card.call {
+  background: var(--lt-green-bg);
+  border-color: var(--lt-green-bd);
+}
+.lt-all-signal-card.put {
+  background: var(--lt-red-bg);
+  border-color: var(--lt-red-bd);
+}
+.lt-all-signal-card.sell {
+  background: var(--lt-yellow-bg);
+  border-color: var(--lt-yellow-bd);
+}
+.lt-all-signal-card.wait {
+  background: var(--lt-yellow-bg);
+  border-color: var(--lt-yellow-bd);
+}
+.lt-all-signal-card.unavailable {
+  background: var(--lt-gray-bg);
+  border-color: var(--lt-gray-bd);
+  opacity: .82;
+}
+.lt-all-signal-symbol {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--lt-text2);
+  margin-bottom: 3px;
+}
+.lt-all-signal-action {
+  font-size: 17px;
+  font-weight: 900;
+  line-height: 1.15;
+  color: var(--lt-text);
+}
+.lt-all-signal-meta {
+  margin-top: 7px;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--lt-text2);
+  font-weight: 700;
+}
+.lt-all-signal-lead {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  font-size: 9px;
+  font-weight: 900;
+  padding: 3px 6px;
+  border-radius: 999px;
+  background: var(--lt-green);
+  color: #fff;
+}
+.lt-all-signal-error {
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.25;
+  color: var(--lt-text2);
+}
+@media (max-width: 900px) {
+  .lt-all-signals-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 520px) {
+  .lt-all-signals-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── SIGNAL CARD — the hero ── */
+
 .lt-signal-card {
   border-radius: var(--lt-radius);
   padding: 20px 16px;
@@ -667,6 +761,7 @@
   margin-bottom: 4px;
 }
 .lt-comp-bias.buy { background: var(--lt-green-bg); color: var(--lt-green); }
+.lt-comp-bias.sell { background: var(--lt-yellow-bg); color: var(--lt-yellow); }
 .lt-comp-bias.avoid { background: var(--lt-gray-bg); color: var(--lt-text3); }
 .lt-comp-conf { font-size: 12px; color: var(--lt-text3); margin-top: 4px; }
 .lt-comp-tgt { font-size: 11px; color: var(--lt-green); font-weight: 700; margin-top: 3px; }
@@ -841,7 +936,7 @@
         <span class="lt-live-dot unavail" id="lt-status-market">● Market</span>
       </span>
       <span class="lt-time" id="lt-clock">--:-- --</span>
-      <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh()">↻ Refresh</button>
+      <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh(true)">↻ Refresh</button>
     </div>
   </header>
 
@@ -852,6 +947,7 @@
       <button class="lt-sym-btn active" data-sym="NIFTY" onclick="ltSetSym(this,'NIFTY')">NIFTY</button>
       <button class="lt-sym-btn" data-sym="BANKNIFTY" onclick="ltSetSym(this,'BANKNIFTY')">BANK</button>
       <button class="lt-sym-btn" data-sym="FINNIFTY" onclick="ltSetSym(this,'FINNIFTY')">FIN</button>
+      <button class="lt-sym-btn" data-sym="SENSEX" onclick="ltSetSym(this,'SENSEX')">SENSEX</button>
     </div>
 
     <!-- ── WARNINGS ── -->
@@ -876,6 +972,13 @@
             <select class="lt-pos-form-input" id="pf-type">
               <option value="CE">CE (Call)</option>
               <option value="PE">PE (Put)</option>
+            </select>
+          </div>
+          <div>
+            <div class="lt-pos-form-label">Action</div>
+            <select class="lt-pos-form-input" id="pf-action">
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
             </select>
           </div>
         </div>
@@ -996,6 +1099,33 @@
     <!-- ── RIGHT COL ── -->
     <div id="lt-right-col">
 
+    <!-- ── ALL INDEX SIGNALS ── -->
+    <div class="lt-all-signals">
+      <div class="lt-all-signals-title">ALL INDEX SIGNALS</div>
+      <div class="lt-all-signals-grid" id="lt-all-signals">
+        <div class="lt-all-signal-card wait">
+          <div class="lt-all-signal-symbol">NIFTY</div>
+          <div class="lt-all-signal-action">LOADING...</div>
+          <div class="lt-all-signal-meta">Signal strength: --</div>
+        </div>
+        <div class="lt-all-signal-card wait">
+          <div class="lt-all-signal-symbol">BANKNIFTY</div>
+          <div class="lt-all-signal-action">LOADING...</div>
+          <div class="lt-all-signal-meta">Signal strength: --</div>
+        </div>
+        <div class="lt-all-signal-card wait">
+          <div class="lt-all-signal-symbol">FINNIFTY</div>
+          <div class="lt-all-signal-action">LOADING...</div>
+          <div class="lt-all-signal-meta">Signal strength: --</div>
+        </div>
+        <div class="lt-all-signal-card wait">
+          <div class="lt-all-signal-symbol">SENSEX</div>
+          <div class="lt-all-signal-action">LOADING...</div>
+          <div class="lt-all-signal-meta">Signal strength: --</div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── SIGNAL CARD ── -->
     <div class="lt-signal-card wait" id="lt-sig-card">
       <div class="lt-sig-icon" id="lt-sig-icon">⏳</div>
@@ -1032,6 +1162,10 @@
             <div class="lt-level-label">Target 2</div>
             <div class="lt-level-val tgt" id="lt-t2">--</div>
           </div>
+            <div class="lt-level-item">
+              <div class="lt-level-label">Target 3</div>
+              <div class="lt-level-val tgt" id="lt-t3">--</div>
+            </div>
         </div>
         <!-- Quick track button -->
         <button id="lt-track-btn" style="display:none;width:100%;margin-top:8px;padding:7px;
@@ -1159,6 +1293,147 @@ var ltLastAI = null;   // BUG FIX: /api/analysis/ai response, kept around so
                         // response instead of /api/strategy/recommend's.
 var ltAutoInterval = null;
 
+/* ── ALL INDEX SIGNAL BOARD ── */
+var LT_SIGNAL_SYMBOLS = ['NIFTY','BANKNIFTY','FINNIFTY','SENSEX'];
+var ltAllSignalSeq = 0;
+
+function ltAllSignalAction(d){
+  var best = String((d && d.best_strategy) || '').toUpperCase().trim();
+  if(['BUY CE','BUY PE','SELL CE','SELL PE','WAIT'].includes(best)) return best;
+
+  var sig = String((d && d.signal_action) || '').toUpperCase().trim();
+  if(['BUY CE','BUY PE','SELL CE','SELL PE','WAIT'].includes(sig)) return sig;
+
+  var strat = String((d && d.strategy) || '').toUpperCase().trim();
+  if(['BUY CE','BUY PE','SELL CE','SELL PE','WAIT'].includes(strat)) return strat;
+
+  return 'WAIT';
+}
+
+function ltAllSignalStrength(d){
+  var n = Number(d && (d.signal_strength ?? d.confidence));
+  return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+function ltAllSignalRisk(d){
+  return String((d && d.risk) || 'MEDIUM').toUpperCase();
+}
+
+function ltAllSignalClass(action){
+  if(action === 'BUY CE') return 'call';
+  if(action === 'BUY PE') return 'put';
+  if(action === 'SELL CE' || action === 'SELL PE') return 'sell';
+  return 'wait';
+}
+
+function ltRenderAllSignalBoard(results){
+  var root = document.getElementById('lt-all-signals');
+  if(!root) return;
+
+  var rows = [];
+
+  results.forEach(function(item){
+    if(item.error){
+      rows.push({
+        symbol: item.symbol,
+        error: true,
+        message: item.error
+      });
+      return;
+    }
+
+    var d = item.data || {};
+
+    rows.push({
+      symbol: item.symbol,
+      error: false,
+      action: ltAllSignalAction(d),
+      strength: ltAllSignalStrength(d),
+      risk: ltAllSignalRisk(d),
+      closed: d.market_open === false ||
+              String(d.market_state || '').toUpperCase().includes('CLOSED')
+    });
+  });
+
+  var strongestBuy = null;
+
+  rows.forEach(function(r){
+    if(r.error) return;
+    if(r.action !== 'BUY CE' && r.action !== 'BUY PE') return;
+    if(r.strength === null) return;
+
+    if(strongestBuy === null || r.strength > strongestBuy.strength){
+      strongestBuy = r;
+    }
+  });
+
+  root.innerHTML = rows.map(function(r){
+    if(r.error){
+      return '<div class="lt-all-signal-card unavailable">' +
+        '<div class="lt-all-signal-symbol">'+r.symbol+'</div>' +
+        '<div class="lt-all-signal-action">UNAVAILABLE</div>' +
+        '<div class="lt-all-signal-error">Live strategy data unavailable</div>' +
+        '</div>';
+    }
+
+    var cls = ltAllSignalClass(r.action);
+    var strengthText = r.strength === null ? '--' : (r.strength + ' / 100');
+    var closedText = r.closed ? ' • Market closed' : '';
+
+    var lead = '';
+    if(
+      strongestBuy &&
+      strongestBuy.symbol === r.symbol &&
+      strongestBuy.action === r.action &&
+      strongestBuy.strength === r.strength
+    ){
+      lead = '<div class="lt-all-signal-lead">முன்னணி</div>';
+    }
+
+    return '<div class="lt-all-signal-card '+cls+'">' +
+      lead +
+      '<div class="lt-all-signal-symbol">'+r.symbol+'</div>' +
+      '<div class="lt-all-signal-action">'+r.action+'</div>' +
+      '<div class="lt-all-signal-meta">' +
+        'Strength: '+strengthText+
+        '<br>Risk: '+r.risk+
+        closedText+
+      '</div>' +
+      '</div>';
+  }).join('');
+}
+
+function ltRefreshAllSignals(forceRefresh){
+  var seq = ++ltAllSignalSeq;
+  var refreshToken = forceRefresh ? String(Date.now()) : '';
+
+  var requests = LT_SIGNAL_SYMBOLS.map(function(sym){
+    var url = '/api/strategy/recommend/' + sym;
+
+    if(refreshToken){
+      url += '?cache_bust=' + encodeURIComponent(refreshToken);
+    }
+
+    return fetch(url, {cache:'no-store'})
+      .then(function(r){
+        if(!r.ok) throw new Error('HTTP '+r.status);
+        return r.json();
+      })
+      .then(function(data){
+        return {symbol:sym, data:data};
+      })
+      .catch(function(err){
+        return {symbol:sym, error:String(err.message || err)};
+      });
+  });
+
+  Promise.all(requests).then(function(results){
+    if(seq !== ltAllSignalSeq) return;
+    ltRenderAllSignalBoard(results);
+  });
+}
+
+
 // BUG FIX: a transient failure (e.g. the request happening to land during
 // the extra latency /api/strategy/recommend can have — see the AI-call
 // dedup fix above) used to leave the whole panel blank ("--") until the
@@ -1173,7 +1448,22 @@ function ltFetchJsonRetry(url, retriesLeft){
   // rate-limited request after only 1.5s, which could extend the 429 window
   // and turn a temporary limit into a request storm.
   if(retriesLeft === undefined) retriesLeft = 1;
-  return fetch(url).then(function(r){
+  return new Promise(function(resolve, reject){
+    var controller = new AbortController();
+    var timer = setTimeout(function(){
+      controller.abort();
+    }, 25000);
+
+    fetch(url, {signal: controller.signal})
+      .then(function(r){
+        clearTimeout(timer);
+        resolve(r);
+      })
+      .catch(function(e){
+        clearTimeout(timer);
+        reject(e);
+      });
+  }).then(function(r){
     if(!r.ok){
       var err = new Error('HTTP ' + r.status);
       err.status = r.status;
@@ -1215,6 +1505,8 @@ function ltSetSym(btn, sym){
   btn.classList.add('active');
   ltSym = sym;
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
+  // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
+  // response must not remain visible after the selected symbol changes.
   ltRefresh();
 }
 
@@ -1245,18 +1537,123 @@ function ltUpdateStatus(){
     });
 }
 
-function ltRefresh(){
+var ltRefreshSeq = 0;
+
+// POSITION_FAST_REFRESH_10S:
+// Refresh only broker positions/LTP without triggering the full
+// 60-second Strategy + AI analysis cycle.
+var ltPosLiveSeq = 0;
+var ltPosLiveInterval = null;
+
+function ltPosLiveRefresh(){
+  if(!ltPosTrades || !ltPosTrades.length) return;
+
+  var seq = ++ltPosLiveSeq;
+
+  $.get('/api/portfolio/positions?cache_bust=' + Date.now())
+    .done(function(data){
+      if(seq !== ltPosLiveSeq) return;
+
+      var positions = (data && data.positions) || [];
+      var changed = false;
+
+      ltPosTrades.forEach(function(t){
+        var strike = String(Math.round(Number(t.strike) || 0));
+        var type = String(t.type || '').toUpperCase();
+
+        if(strike === '0' || !type) return;
+
+        var wanted = strike + type;
+
+        var matched = positions.find(function(pos){
+          var symbol = String(
+            pos.symbol || pos.tradingsymbol || ''
+          ).toUpperCase();
+
+          return symbol.indexOf(wanted) >= 0;
+        });
+
+        if(matched && matched.ltp != null && isFinite(Number(matched.ltp))){
+          var newLtp = Number(matched.ltp);
+
+          if(Number(t.ltp) !== newLtp){
+            t.ltp = newLtp;
+            changed = true;
+          }
+
+          t._brokerLtpTs = Date.now();
+        }
+      });
+
+      if(changed){
+        localStorage.setItem(
+          LT_POS_KEY,
+          JSON.stringify(ltPosTrades)
+        );
+      }
+
+      ltPosRender(null);
+    })
+    .fail(function(){});
+}
+
+
+function ltRefresh(forceRefresh){
   if(ltLoading) return;
   ltLoading = true;
+
+  // Each refresh gets its own generation number.
+  // Older responses are ignored if a newer refresh has started.
+  var refreshSeq = ++ltRefreshSeq;
+  var refreshSym = ltSym;
+
+  // Manual refresh gets a unique cache_bust token.
+  // Strategy + AI receive the same token.
+  var refreshToken = forceRefresh ? String(Date.now()) : '';
+
+  var strategyUrl = '/api/strategy/recommend/' + ltSym;
+  var aiUrl = '/api/analysis/ai/' + ltSym;
+
+  if(refreshToken){
+    strategyUrl += '?cache_bust=' + encodeURIComponent(refreshToken);
+    aiUrl += '?cache_bust=' + encodeURIComponent(refreshToken);
+  }
+
   var btn = document.getElementById('lt-ref-btn');
   btn.textContent = '⏳';
   btn.classList.add('spinning');
 
   ltUpdateStatus();
+  ltRefreshAllSignals(forceRefresh);
+
+  var done ={
+    strategy: false,
+    ai: false
+  };
+
+  function finishRefresh(){
+    // Do not let an older refresh unlock or overwrite a newer refresh.
+    if(refreshSeq !== ltRefreshSeq) return;
+
+    if(done.strategy && done.ai){
+      ltLoading = false;
+      btn.textContent = '↻ Refresh';
+      btn.classList.remove('spinning');
+
+      // SYMBOL_SWITCH_QUEUE_FIX: the user may have switched symbols while
+      // the previous requests were still running. Refresh the newly
+      // selected symbol as soon as the old pair has fully finished.
+      if(refreshSym !== ltSym){
+        setTimeout(function(){ ltRefresh(false); }, 0);
+      }
+    }
+  }
 
   // Fetch strategy (primary — has strikes, levels, regime, confluence)
-  ltFetchJsonRetry('/api/strategy/recommend/' + ltSym)
+  ltFetchJsonRetry(strategyUrl)
     .then(function(d){
+      if(refreshSeq !== ltRefreshSeq || refreshSym !== ltSym) return;
+
       ltLastData = d;
       ltRenderSignal(d);
       ltRenderMetrics(d);
@@ -1266,35 +1663,43 @@ function ltRefresh(){
       ltRenderTimeframes(d);
       ltRenderWarnings(d);
       ltRenderDataHealth(d);
-      ltPosRender(d);   // Position monitor — latest strikes LTP update
-      document.getElementById('lt-updated').textContent = 'Updated: ' + ltNow();
+      ltPosRender(d);
+      document.getElementById('lt-updated').textContent =
+        'Updated: ' + ltNow();
     })
     .catch(function(e){
+      if(refreshSeq !== ltRefreshSeq) return;
       ltShowWarn('red', '⚠ Strategy data fetch failed: ' + e.message);
     })
     .finally(function(){
-      ltLoading = false;
-      btn.textContent = '↻ Refresh';
-      btn.classList.remove('spinning');
+      done.strategy = true;
+      finishRefresh();
     });
 
   // Fetch AI analysis — this is also the ONLY response that carries
   // technicals / multi_timeframe / oi_summary.atm_iv / futures_premium_value.
-  // BUG FIX: previously only .reason and reasons were kept and the rest of
-  // this payload was discarded, which is why Advanced Indicators, the
-  // 5min/15min/1hr boxes, and ATM IV were permanently blank on this page.
-  ltFetchJsonRetry('/api/analysis/ai/' + ltSym)
+  ltFetchJsonRetry(aiUrl)
     .then(function(d){
+      if(refreshSeq !== ltRefreshSeq || refreshSym !== ltSym) return;
+
       ltLastAI = d;
       ltRenderTamil(d);
       ltRenderReasons(d);
-      ltRenderAdvanced(d);      // re-render with the real technicals now available
+      ltRenderAdvanced(d);
       ltRenderTimeframes(d);
       ltRenderAtmIv(d);
-      if(ltLastData) ltRenderMetrics(ltLastData); // pick up futures_premium_value
-      if(ltLastData) ltRenderSR(ltLastData);       // pick up real support/resistance
+       if(ltLastData) ltRenderDataHealth(ltLastData);
+
+      if(ltLastData) ltRenderMetrics(ltLastData);
+      if(ltLastData) ltRenderSR(ltLastData);
     })
-    .catch(function(){});
+    .catch(function(){
+      // Keep the strategy response visible if AI is unavailable.
+    })
+    .finally(function(){
+      done.ai = true;
+      finishRefresh();
+    });
 }
 
 // ── ATM IV ──
@@ -1306,8 +1711,23 @@ function ltRenderAtmIv(d){
 }
 
 // ── Signal card ──
+// SAFETY UI GUARD:
+// Suppress fresh directional display when backend is hard-gated or the
+// market regime explicitly says NO_TRADE. Existing HOLD lifecycle is kept.
+function ltEffectiveStrategy(d){
+  var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
+  var blocked = !!d.hard_gated ||
+    !!(d.market_regime && d.market_regime.no_trade);
+
+  if(blocked && !lifecycle.startsWith('HOLD_')){
+    return 'WAIT';
+  }
+
+  return String(d.best_strategy || 'WAIT').toUpperCase();
+}
+
 function ltRenderSignal(d){
-  var best = (d.best_strategy || 'WAIT').toUpperCase();
+  var best = ltEffectiveStrategy(d);
   var card = document.getElementById('lt-sig-card');
   var icon = document.getElementById('lt-sig-icon');
   var label = document.getElementById('lt-sig-label');
@@ -1341,7 +1761,7 @@ function ltRenderSignal(d){
   }
 
   conf.textContent = (d.signal_strength || d.confidence || '--') + ' / 100';
-  var rl = (d.v2_risk && d.v2_risk.risk_level) || 'MEDIUM';
+  var rl = String(d.risk || (d.v2_risk && d.v2_risk.risk_level) || 'MEDIUM').toUpperCase();
   risk.textContent = rl;
   risk.style.color = rl==='LOW'?'var(--lt-green)':rl==='HIGH'||rl==='EXTREME'?'var(--lt-red)':'var(--lt-yellow)';
 
@@ -1374,37 +1794,82 @@ function ltRenderSignal(d){
     document.getElementById('lt-sl').textContent  = (firstStrike && firstStrike.sl)  ? '₹' + fmtN(firstStrike.sl, 1)  : (tl && tl.option_sl) ? '₹' + fmtN(tl.option_sl, 1) : '--';
     document.getElementById('lt-t1').textContent  = (firstStrike && firstStrike.t1)  ? '₹' + fmtN(firstStrike.t1, 1)  : (tl && tl.option_t1) ? '₹' + fmtN(tl.option_t1, 1) : '--';
     document.getElementById('lt-t2').textContent  = (firstStrike && firstStrike.t2)  ? '₹' + fmtN(firstStrike.t2, 1)  : (tl && tl.option_t2) ? '₹' + fmtN(tl.option_t2, 1) : '--';
+      document.getElementById('lt-t3').textContent  = (firstStrike && firstStrike.t3)  ? '₹' + fmtN(firstStrike.t3, 1)  : (tl && tl.option_t3) ? '₹' + fmtN(tl.option_t3, 1) : '--';
+      // DASHBOARD_T3_20260921
 
     // Quick-track button: signal suggestion → position monitor
     var trackBtn = document.getElementById('lt-track-btn');
+
     if(trackBtn && firstStrike && firstStrike.entry_price && firstStrike.sl && firstStrike.t1){
-      trackBtn.style.display = 'block';
+
+      // Final backend strategy/action is the source of truth.
+      // Lifecycle / preferred_side alone must not decide BUY vs SELL.
+      var rawAction = ltEffectiveStrategy(d);
+
+      var actionMap = {
+        'BUY CE': 'BUY',
+        'BUY PE': 'BUY',
+        'SELL CE': 'SELL',
+        'SELL PE': 'SELL'
+      };
+
+      // WAIT / NO TRADE / unknown action must NEVER become BUY.
+      var action = actionMap[rawAction] || null;
+
+      if(!action){
+        trackBtn.style.display = 'none';
+      } else {
+        trackBtn.style.display = 'block';
+      }
+
       trackBtn.onclick = function(){
+        if(!action){
+          return;
+        }
         var already = ltPosTrades.find(function(p){
-          return p.strike === firstStrike.strike && p.type === firstStrike.type;
+          return p.strike === firstStrike.strike &&
+                 p.type === firstStrike.type &&
+                 (String(p.action || 'BUY').toUpperCase() === action);
         });
-        if(already){ alert('இந்த strike ஏற்கனவே monitor-ல் இருக்கு'); return; }
-        var lotMap = {NIFTY:50, BANKNIFTY:15, FINNIFTY:40};
-        var qty = 1 * (lotMap[ltSym]||50);
+
+        if(already){
+          alert('இந்த strike / action ஏற்கனவே monitor-ல் இருக்கு');
+          return;
+        }
+
+          var lotSize = Number((d.strategy_detail && d.strategy_detail.lot_size) || d.lot_size || 0); if(!lotSize){ alert("Contract lot size unavailable"); return; }
+          var qty = lotSize;
+
         var t = {
           id: Date.now().toString(36),
           symbol: ltSym,
           strike: firstStrike.strike,
           type: firstStrike.type,
+          action: action,
           entry: firstStrike.entry_price,
           sl: firstStrike.sl,
           t1: firstStrike.t1,
           t2: firstStrike.t2 || 0,
-          lots: 1, qty: qty,
-          openedAt: new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit'}),
+          lots: 1,
+          qty: qty,
+          openedAt: new Date().toLocaleTimeString('en-IN',{
+            hour:'2-digit',
+            minute:'2-digit'
+          }),
           ltp: firstStrike.ltp || firstStrike.entry_price
         };
+
         ltPosTrades.push(t);
         localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+
         ltPosRender(d);
+
         trackBtn.textContent = '✓ Tracking!';
-        setTimeout(function(){ trackBtn.textContent = '📌 இந்த Trade Track பண்ணு'; }, 2000);
+        setTimeout(function(){
+          trackBtn.textContent = '📌 இந்த Trade Track பண்ணு';
+        }, 2000);
       };
+
     } else if(trackBtn){
       trackBtn.style.display = 'none';
     }
@@ -1423,6 +1888,13 @@ function ltRenderSignal(d){
       notrBox.style.display = '';
       var trigs = document.getElementById('lt-notrade-triggers');
       var spot = d.spot || 0;
+      var marketClosed = d.market_open === false;
+      var notrTitle = notrBox.querySelector('.lt-notrade-title');
+      if(notrTitle){
+        notrTitle.textContent = marketClosed
+          ? 'சந்தை மூடப்பட்டுள்ளது — புதிய Entry இல்லை'
+          : 'காத்திருக்கவும் — Entry confirmation தேவை';
+      }
       var sr = (d.market_regime && d.market_regime.reasons) ? d.market_regime.reasons : [];
       var waitR = d.wait_reasons || [];
       var lines = waitR.concat(sr).slice(0,4);
@@ -1452,9 +1924,12 @@ function ltRenderMetrics(d){
 
   setEl('m-mp', fmtN(d.max_pain,0));
 
-  // ATM from strikes
+  // ATM: prefer explicit backend ATM value; fall back to strikes, then spot.
   var strikes = d.strikes || [];
-  var atm = strikes.length ? strikes[0].strike : '--';
+  var atm = d.atm_strike || d.atm || (strikes.length ? strikes[0].strike : null);
+  if(atm == null && d.spot != null){
+    atm = Math.round(Number(d.spot) / 50) * 50;
+  }
   setEl('m-atm', fmtN(atm,0));
 
   // Futures
@@ -1464,9 +1939,16 @@ function ltRenderMetrics(d){
   // futures_premium_value, so read it from the cached AI fetch if we have
   // it yet; ltRenderMetrics also gets called again indirectly once that
   // fetch lands (see ltRenderAtmIv / the second .then in ltRefresh).
-  var futVal = (ltLastAI && ltLastAI.futures_premium_value != null) ? ltLastAI.futures_premium_value : null;
-  document.getElementById('m-fut').textContent = futVal ? (futVal > 0 ? '+' : '') + fmtN(futVal,1) : '--';
-  document.getElementById('m-fut-sub').textContent = futVal > 0 ? 'Premium' : futVal < 0 ? 'Discount' : '--';
+  var futAI = ltLastAI || {};
+  var futDQ = futAI.data_quality || {};
+  var futStatus = futDQ.futures_premium || 'unavail';
+  var futVal = futStatus === 'live' && futAI.futures_premium_value != null
+    ? Number(futAI.futures_premium_value)
+    : null;
+  document.getElementById('m-fut').textContent =
+    futVal != null ? (futVal > 0 ? '+' : '') + fmtN(futVal,1) : '--';
+  document.getElementById('m-fut-sub').textContent =
+    futVal != null ? (futVal > 0 ? 'Premium' : futVal < 0 ? 'Discount' : 'Flat') : '--';
 
   // ATM IV — see ltRenderAtmIv(), called once the AI fetch (which carries
   // oi_summary.atm_iv) resolves. Left as-is here for the first paint.
@@ -1474,7 +1956,7 @@ function ltRenderMetrics(d){
 
   // Market open badge + spot
   setEl('lt-price', d.spot ? fmtN(d.spot, 2) : '--');
-  var mktOpen = true; // default
+  var mktOpen = d.market_open !== false;
   var mktBadge = document.getElementById('lt-mkt-badge');
   mktBadge.className = 'lt-mkt-badge ' + (mktOpen ? 'open' : 'closed');
   mktBadge.textContent = mktOpen ? '● LIVE' : '● CLOSED';
@@ -1551,7 +2033,7 @@ function ltRenderSR(d){
 
 // ── CALL vs PUT compare ──
 function ltRenderCompare(d){
-  var best = (d.best_strategy || '').toUpperCase();
+  var best = ltEffectiveStrategy(d);
   var strikes = d.strikes || [];
   var ceSt = strikes.find(function(s){ return s.type === 'CE'; });
   var peSt = strikes.find(function(s){ return s.type === 'PE'; });
@@ -1565,25 +2047,26 @@ function ltRenderCompare(d){
   // CE column
   if(ceSt){
     document.getElementById('cmp-ce-strike').textContent = fmtN(ceSt.strike, 0) + ' CE';
-    document.getElementById('cmp-ce-ltp').textContent = '₹' + fmtN(ceSt.ltp, 1);
-    var ceActive = best === 'BUY CE';
-    document.getElementById('lt-call-col').className = 'lt-compare-col' + (ceActive ? ' active-call' : '');
-    var ceBiasEl = document.getElementById('cmp-ce-bias');
-    ceBiasEl.textContent = ceActive ? '🟢 BUY BIAS' : 'AVOID';
-    ceBiasEl.className = 'lt-comp-bias ' + (ceActive ? 'buy' : 'avoid');
+      var ceBuy = best === 'BUY CE';
+      var ceSell = best === 'SELL CE';
+      var ceActive = ceBuy || ceSell;
+      document.getElementById('lt-call-col').className = 'lt-compare-col' + (ceActive ? ' active-call' : '');
+      var ceBiasEl = document.getElementById('cmp-ce-bias');
+      ceBiasEl.textContent = ceBuy ? '🟢 BUY BIAS' : ceSell ? '🟡 SELL BIAS' : 'AVOID';
+      ceBiasEl.className = 'lt-comp-bias ' + (ceBuy ? 'buy' : ceSell ? 'sell' : 'avoid');
     document.getElementById('cmp-ce-conf').textContent = 'Confidence ' + bull + '%';
     document.getElementById('cmp-ce-tgt').textContent = ceSt.t1 ? 'Target ₹' + fmtN(ceSt.t1,1) : '';
   }
 
   // PE column
-  if(peSt){
-    document.getElementById('cmp-pe-strike').textContent = fmtN(peSt.strike, 0) + ' PE';
-    document.getElementById('cmp-pe-ltp').textContent = '₹' + fmtN(peSt.ltp, 1);
-    var peActive = best === 'BUY PE';
+    if(peSt){
+    var peBuy = best === 'BUY PE';
+    var peSell = best === 'SELL PE';
+    var peActive = peBuy || peSell;
     document.getElementById('lt-put-col').className = 'lt-compare-col' + (peActive ? ' active-put' : '');
     var peBiasEl = document.getElementById('cmp-pe-bias');
-    peBiasEl.textContent = peActive ? '🔴 BUY BIAS' : 'AVOID';
-    peBiasEl.className = 'lt-comp-bias ' + (peActive ? 'buy' : 'avoid');
+    peBiasEl.textContent = peBuy ? '🔴 BUY BIAS' : peSell ? '🟡 SELL BIAS' : 'AVOID';
+    peBiasEl.className = 'lt-comp-bias ' + (peBuy ? 'buy' : peSell ? 'sell' : 'avoid');
     document.getElementById('cmp-pe-conf').textContent = 'Confidence ' + bear + '%';
     document.getElementById('cmp-pe-tgt').textContent = peSt.t1 ? 'Target ₹' + fmtN(peSt.t1,1) : '';
   }
@@ -1666,7 +2149,7 @@ function ltRenderWarnings(d){
 
 // ── Data health ──
 function ltRenderDataHealth(d){
-  var dq = d.data_quality || {};
+  var dq = d.data_quality || ((ltLastAI && ltLastAI.data_quality) || {});
   var cf = d.confluence || {};
   var scores = {
     spot: 'live',
@@ -1677,9 +2160,10 @@ function ltRenderDataHealth(d){
     fii: dq.fii || 'unavail',
     global: dq.global_market || 'unavail',
   };
-  var keys = Object.values(scores);
-  var liveCount = keys.filter(function(v){ return v==='live'; }).length;
-  var pct = Math.round(liveCount / keys.length * 100);
+  var backendPct = Number(d.data_completeness_pct);
+  var pct = Number.isFinite(backendPct)
+    ? Math.max(0, Math.min(100, Math.round(backendPct)))
+    : Math.round(Object.values(scores).filter(function(v){ return v==='live'; }).length / Object.keys(scores).length * 100);
 
   var fill = document.getElementById('lt-health-fill');
   var pctEl = document.getElementById('lt-health-pct');
@@ -1758,12 +2242,28 @@ var LT_POS_KEY = 'niftyai_pos_v1';
 function ltPosLoad(){
   try {
     ltPosTrades = JSON.parse(localStorage.getItem(LT_POS_KEY) || '[]');
-  } catch(e){ ltPosTrades = []; }
+
+    // Backward compatibility:
+    // older monitored trades did not store action, so treat them as BUY.
+    ltPosTrades = (Array.isArray(ltPosTrades) ? ltPosTrades : []).map(function(p){
+      if(!p.action){
+        p.action = 'BUY';
+      } else {
+        p.action = String(p.action).toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+      }
+      return p;
+    });
+
+    localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
+  } catch(e){
+    ltPosTrades = [];
+  }
 }
 
 function ltPosSave(){
   var strike = parseFloat(document.getElementById('pf-strike').value);
   var type   = document.getElementById('pf-type').value;
+  var action = document.getElementById('pf-action').value;
   var entry  = parseFloat(document.getElementById('pf-entry').value);
   var sl     = parseFloat(document.getElementById('pf-sl').value);
   var t1     = parseFloat(document.getElementById('pf-t1').value);
@@ -1773,43 +2273,75 @@ function ltPosSave(){
   if(!strike || !entry || !sl || !t1){
     alert('Strike, Entry, SL, Target ஆகியவை தேவை'); return;
   }
-  if(sl >= entry){ alert('SL < Entry இருக்கணும்'); return; }
-  if(t1 <= entry){ alert('Target > Entry இருக்கணும்'); return; }
 
-  var lotMap = {NIFTY:50, BANKNIFTY:15, FINNIFTY:40};
-  var qty = lots * (lotMap[ltSym] || 50);
+  if(action === 'BUY'){
+    if(sl >= entry){
+      alert('BUY: SL < Entry இருக்கணும்'); return;
+    }
+    if(t1 <= entry){
+      alert('BUY: Target > Entry இருக்கணும்'); return;
+    }
+    if(t2 && t2 <= t1){
+      alert('BUY: Target 2 > Target 1 இருக்கணும்'); return;
+    }
+  } else {
+    if(sl <= entry){
+      alert('SELL: SL > Entry இருக்கணும்'); return;
+    }
+    if(t1 >= entry){
+      alert('SELL: Target < Entry இருக்கணும்'); return;
+    }
+    if(t2 && t2 >= t1){
+      alert('SELL: Target 2 < Target 1 இருக்கணும்'); return;
+    }
+  }
+
+    var lotSize = Number((ltLastData && ltLastData.strategy_detail && ltLastData.strategy_detail.lot_size) || (ltLastData && ltLastData.lot_size) || 0); if(!lotSize){ alert("Contract lot size unavailable"); return; }
+    var qty = lots * lotSize;
 
   var trade = {
     id: Date.now().toString(36),
     symbol: ltSym,
     strike: strike,
     type: type,
+    action: action,
     entry: entry,
     sl: sl,
     t1: t1,
     t2: t2 || 0,
     lots: lots,
     qty: qty,
-    openedAt: new Date().toLocaleTimeString('en-IN', {hour:'2-digit',minute:'2-digit'}),
-    ltp: entry   // initial LTP = entry
+    openedAt: new Date().toLocaleTimeString('en-IN', {
+      hour:'2-digit',
+      minute:'2-digit'
+    }),
+    ltp: entry
   };
+
   ltPosTrades.push(trade);
   localStorage.setItem(LT_POS_KEY, JSON.stringify(ltPosTrades));
 
-  // Paper trade API-க்கும் அனுப்பு (optional — fail-ஆனாலும் local monitor தொடரும்)
+  // Paper monitor API only — no real order placement.
   fetch('/api/paper-trade/open', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
-      symbol: ltSym, strike: strike, option_type: type,
-      entry_price: entry, stop_loss: sl, target_1: t1, target_2: t2||t1,
-      lots: lots, quantity: qty,
-      side: 'BUY'
+      symbol: ltSym,
+      strike: strike,
+      option_type: type,
+      entry_price: entry,
+      stop_loss: sl,
+      target_1: t1,
+      target_2: t2 || t1,
+      lots: lots,
+      quantity: qty,
+      side: action
     })
-  }).catch(function(){});  // silent — local monitor is independent
+  }).catch(function(){});
 
   // form reset
   document.getElementById('pf-strike').value = '';
+  document.getElementById('pf-action').value = 'BUY';
   document.getElementById('pf-entry').value  = '';
   document.getElementById('pf-sl').value     = '';
   document.getElementById('pf-t1').value     = '';
@@ -1818,10 +2350,10 @@ function ltPosSave(){
   document.getElementById('lt-pos-add-form').style.display = 'none';
   ltPosAddOpen = false;
 
-  ltPosRender(null);  // first render with no LTP yet
+  ltPosRender(null);
 }
 
-function ltPosToggleAdd(){
+  function ltPosToggleAdd(){
   ltPosAddOpen = !ltPosAddOpen;
   document.getElementById('lt-pos-add-form').style.display = ltPosAddOpen ? 'block' : 'none';
   // auto-fill strike from current suggestion
@@ -1866,42 +2398,53 @@ function ltPosRender(apiData){
 
   var html = '';
   ltPosTrades.forEach(function(t){
-    var ltp    = t.ltp || t.entry;
-    var pnl    = (ltp - t.entry) * t.qty;
-    var pnlPct = ((ltp - t.entry) / t.entry * 100);
+    var action = String(t.action || 'BUY').toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+    var ltp = t.ltp || t.entry;
+    var move = action === 'SELL' ? (t.entry - ltp) : (ltp - t.entry);
+    var pnl = move * t.qty;
+    var pnlPct = (move / t.entry * 100);
     var isProfit = pnl >= 0;
 
-    // Progress to target (0% = entry, 100% = T1)
-    var toT1 = t.t1 - t.entry;
-    var dist  = Math.max(0, Math.min(ltp - t.entry, toT1));
-    var prog  = toT1 > 0 ? Math.round(dist / toT1 * 100) : 0;
+    // Progress toward T1: BUY rises toward target, SELL falls toward target.
+    var toT1 = action === 'SELL' ? (t.entry - t.t1) : (t.t1 - t.entry);
+    var dist = Math.max(0, Math.min(move, toT1));
+    var prog = toT1 > 0 ? Math.round(dist / toT1 * 100) : 0;
+    prog = Math.max(0, Math.min(100, prog));
     var progColor = prog >= 80 ? 'var(--lt-green)' : prog >= 40 ? '#F59E0B' : 'var(--lt-red)';
+
+    // SL distance: 0% = SL, 100% = Entry.
+    var slPct = action === 'SELL'
+      ? ((t.sl - ltp) / (t.sl - t.entry) * 100)
+      : ((ltp - t.sl) / (t.entry - t.sl) * 100);
+
+    var hitSL = action === 'SELL' ? ltp >= t.sl : ltp <= t.sl;
+    var hitT2 = action === 'SELL' ? (t.t2 && ltp <= t.t2) : (t.t2 && ltp >= t.t2);
+    var hitT1 = action === 'SELL' ? ltp <= t.t1 : ltp >= t.t1;
 
     // Alert status
     var alertCls  = '';
     var alertMsg  = '';
     var cardExtra = '';
-    var slPct = ((ltp - t.sl) / (t.entry - t.sl) * 100);  // 0% = at SL, 100% = at entry
 
-    if(ltp <= t.sl){
+    if(hitSL){
       alertCls  = 'sl';
-      alertMsg  = '🔴 STOP LOSS அடைந்துவிட்டது! ₹' + fmtN(t.sl,1) + ' — உடனே Exit பண்ணவும்!';
+      alertMsg  = '🔴 STOP LOSS level reached: ₹' + fmtN(t.sl,1);
       cardExtra = 'pos-sl-warn';
-    } else if(t.t2 && ltp >= t.t2){
+    } else if(hitT2){
       alertCls  = 't2';
-      alertMsg  = '🎯 TARGET 2 அடைந்தது! ₹' + fmtN(t.t2,1) + ' — முழு Profit Book பண்ணலாம்!';
+      alertMsg  = '🎯 TARGET 2 level reached: ₹' + fmtN(t.t2,1);
       cardExtra = 'pos-tgt-hit';
-    } else if(ltp >= t.t1){
+    } else if(hitT1){
       alertCls  = 't1';
-      alertMsg  = '✅ TARGET 1 அடைந்தது! ₹' + fmtN(t.t1,1) + ' — பாதி Profit Book / SL ஐ Entry-க்கு Shift பண்ணவும்';
+      alertMsg  = '✅ TARGET 1 level reached: ₹' + fmtN(t.t1,1);
       cardExtra = 'pos-tgt-hit';
     } else if(slPct < 25){
       alertCls  = 'sl';
-      alertMsg  = '⚠️ SL அருகில் இருக்கு! ₹' + fmtN(ltp,1) + ' → SL: ₹' + fmtN(t.sl,1) + ' — கவனமாக இருங்கள்';
+      alertMsg  = '⚠️ SL proximity: ₹' + fmtN(ltp,1) + ' → SL: ₹' + fmtN(t.sl,1);
       cardExtra = '';
     } else if(prog >= 60){
       alertCls  = 'wait';
-      alertMsg  = '📈 T1-க்கு ' + prog + '% வந்துவிட்டோம் — Trail SL பண்ணலாம்';
+      alertMsg  = '📈 T1 progress: ' + prog + '%';
     }
 
     html += '<div class="lt-pos-card ' + (cardExtra||'') + ' ' + (isProfit?'pos-profit':'pos-loss') + '">';
@@ -1940,8 +2483,29 @@ function ltPosRender(apiData){
 ltPosLoad();
 ltPosRender(null);
 
+  // POSITION_FAST_REFRESH_10S
+  ltPosLiveRefresh();
+  ltPosLiveInterval = setInterval(function(){
+    ltPosLiveRefresh();
+  }, 10000);
+
 // ── Auto refresh every 60s (throttle load குறைக்க — 30s-ல் Angel One queue stack ஆகும்) ──
-ltAutoInterval = setInterval(function(){ ltRefresh(); }, 60000);
+  // ── Auto refresh every 60s, only during the NSE cash-market session.
+  // Keep the timer alive so it automatically resumes next session.
+  function ltIsNseMarketHoursNow(){
+    var now = new Date();
+    var ist = new Date(now.getTime() + (330 * 60000));
+    var day = ist.getUTCDay(); // 0=Sun, 6=Sat
+    if(day === 0 || day === 6) return false;
+
+    var mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    return mins >= (9 * 60 + 15) && mins < (15 * 60 + 30);
+  }
+
+  ltAutoInterval = setInterval(function(){
+    if(!ltIsNseMarketHoursNow()) return;
+    ltRefresh();
+  }, 15000);
 
 // ── Initial load ──
 ltRefresh();

@@ -6,11 +6,12 @@ from app.api.deps import get_analyzer, get_angel_session, get_ai_engine
 from app.services.angel_one import AngelOneSession
 from app.services.ai_engine import AIEngine
 from app.utils.helpers import is_market_hours_ist
+from app.schemas import DashboardStatusResponse, DashboardSummaryResponse
 
 router = APIRouter()
 
 
-@router.get("/status")
+@router.get("/status", response_model=DashboardStatusResponse)
 async def dashboard_status(
     angel: AngelOneSession = Depends(get_angel_session),
     ai: AIEngine = Depends(get_ai_engine),
@@ -35,18 +36,17 @@ async def dashboard_status(
     }
 
 
-@router.get("/summary")
+@router.get("/summary", response_model=DashboardSummaryResponse)
 async def dashboard_summary(analyzer: MarketAnalyzer = Depends(get_analyzer)):
-    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+    symbols = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
 
     async def _one(sym):
         try:
             data = await analyzer.get_full_market_overview(sym)
             dec  = data.get("decision", {})
-            await save_market_snapshot(data["spot"])
             return sym, {
                 "price":       data["spot"]["price"],
-                "change":      data["spot"]["change_percent"],
+                "change":      data["spot"].get("change_percent", 0),
                 "high":        data["spot"].get("high", 0),
                 "low":         data["spot"].get("low", 0),
                 "pcr":         data.get("pcr", 0),

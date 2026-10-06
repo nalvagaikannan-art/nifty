@@ -8,9 +8,18 @@ Angel One API Routes
 """
 
 from fastapi import APIRouter, HTTPException
+from app.schemas import AngelLoginResponse, AngelLogoutResponse
 from pydantic import BaseModel
 from typing import Optional
 from app.services.angel_one import angel_session, AngelOneAuthError, AngelOneError
+from app.services.angel_live_feed import angel_live_feed
+from app.schemas import (
+    AngelStatusResponse,
+    AngelLiveFeedResponse,
+    AngelLtpResponse,
+    AngelCandlesResponse,
+    AngelOptionChainResponse,
+)
 import logging
 
 router = APIRouter()
@@ -18,14 +27,24 @@ logger = logging.getLogger(__name__)
 
 
 # ── Status ─────────────────────────────────────────────────────────────────
-@router.get("/status")
+@router.get("/status", response_model=AngelStatusResponse)
 async def get_status():
     """Angel One session status + configured check."""
     return angel_session.get_status()
 
 
+# ── Live WebSocket Feed Diagnostic ───────────────────────────────────────────
+@router.get("/live-feed", response_model=AngelLiveFeedResponse)
+async def get_live_feed_status():
+    """Production Angel WebSocket connection and latest tick diagnostics."""
+    return {
+        "websocket": angel_live_feed.status(),
+        "ticks": angel_live_feed.get_snapshot(),
+    }
+
+
 # ── Login ──────────────────────────────────────────────────────────────────
-@router.post("/login")
+@router.post("/login", response_model=AngelLoginResponse)
 async def login():
     """Angel One-ல் login செய்யும். TOTP automatic-ஆக generate ஆகும்."""
     try:
@@ -38,14 +57,14 @@ async def login():
 
 
 # ── Logout ─────────────────────────────────────────────────────────────────
-@router.post("/logout")
+@router.post("/logout", response_model=AngelLogoutResponse)
 async def logout():
     """Session terminate செய்யும்."""
     return await angel_session.logout()
 
 
 # ── Live LTP ───────────────────────────────────────────────────────────────
-@router.get("/ltp/{symbol}")
+@router.get("/ltp/{symbol}", response_model=AngelLtpResponse)
 async def get_ltp(symbol: str):
     """Angel One-இல் இருந்து live LTP."""
     if not angel_session.is_configured:
@@ -62,7 +81,7 @@ async def get_ltp(symbol: str):
 
 
 # ── Candle Data ─────────────────────────────────────────────────────────────
-@router.get("/candles/{symbol}")
+@router.get("/candles/{symbol}", response_model=AngelCandlesResponse)
 async def get_candles(
     symbol: str,
     interval: str = "ONE_DAY",
@@ -86,7 +105,7 @@ async def get_candles(
 
 
 # ── Option Chain ────────────────────────────────────────────────────────────
-@router.get("/option-chain/{symbol}")
+@router.get("/option-chain/{symbol}", response_model=AngelOptionChainResponse)
 async def get_option_chain(symbol: str, expiry: Optional[str] = None):
     """Angel One option chain data."""
     if not angel_session.is_configured:

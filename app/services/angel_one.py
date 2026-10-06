@@ -16,16 +16,21 @@ FIXES (2026-08-20):
 """
 
 import asyncio
+from contextvars import ContextVar
 import json
 import logging
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from pathlib import Path
 from typing import Optional, Dict, List
 import httpx
 from app.config import settings
-from app.utils.helpers import safe_float
+from app.utils.helpers import safe_float, epoch_to_ist, now_ist
+from app.services.options_greeks import implied_volatility_from_price
+from app.utils.helpers import days_to_expiry
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +84,38 @@ class AngelOneAuthError(AngelOneError):
 # Angel One throttles at least one of them. A minimum gap between calls,
 # shared across the whole process via one lock, fixes this without needing
 # to change how dashboard.py fetches symbols.
-_MIN_CALL_INTERVAL = 3.0  # seconds between any two Angel One SmartAPI calls
+# Priority-aware broker scheduling.
+# HIGH       = live user-facing actions such as positions / EXIT
+# NORMAL     = browser strategy / AI requests
+# BACKGROUND = historical collector
+ANGEL_PRIORITY_HIGH = "high"
+ANGEL_PRIORITY_NORMAL = "normal"
+ANGEL_PRIORITY_BACKGROUND = "background"
+
+_angel_call_priority: ContextVar[str] = ContextVar(
+    "angel_call_priority",
+    default=ANGEL_PRIORITY_NORMAL,
+)
+
+def set_angel_call_priority(priority: str):
+    if priority not in (
+        ANGEL_PRIORITY_HIGH,
+        ANGEL_PRIORITY_NORMAL,
+        ANGEL_PRIORITY_BACKGROUND,
+    ):
+        raise ValueError(f"Unknown Angel One priority: {priority}")
+    return _angel_call_priority.set(priority)
+
+def reset_angel_call_priority(token) -> None:
+    _angel_call_priority.reset(token)
+
+
+def get_angel_call_priority() -> str:
+    """Return the current Angel One broker-call priority."""
+    return _angel_call_priority.get()
+
+
+_MIN_CALL_INTERVAL = 1.2  # seconds between any two Angel One SmartAPI calls
 
 
 class AngelOneSession:
@@ -106,6 +142,12 @@ class AngelOneSession:
         # see _MIN_CALL_INTERVAL comment above for why this exists.
         self._rate_lock = asyncio.Lock()
         self._last_call_ts: float = 0.0
+
+        # Waiting broker calls are ordered by priority, then FIFO.
+        # The actual SmartAPI call is still performed outside this gate.
+        self._priority_waiters: dict[int, tuple[int, str]] = {}
+        self._priority_seq: int = 0
+        self._priority_condition = asyncio.Condition(self._rate_lock)
         # BUG FIX (restored — was dropped without explanation and is not
         # covered by any comment elsewhere in this file, unlike every other
         # intentional behavior change here): when one concurrent call hits
@@ -118,25 +160,106 @@ class AngelOneSession:
         # see _last_call_ts and think they're clear.
         self._rate_limit_cooldown_until: float = 0.0
 
-    async def _throttle(self) -> None:
+        # HISTORICAL_API_SERIALIZATION_20260924
+        # getCandleData has its own broker-side rate limit. The global
+        # _throttle() spaces call START times but deliberately releases its
+        # gate before the blocking SDK request finishes. Therefore two
+        # historical requests can still be in-flight simultaneously.
+        # Serialize only historical SDK calls; keep other SmartAPI paths
+        # independent.
+        self._historical_api_lock = asyncio.Lock()
+
+    async def _throttle(
+        self,
+        priority: str | None = None,
+        call_name: str = "unknown",
+    ) -> None:
         """
-        Block until at least _MIN_CALL_INTERVAL seconds have passed since the
-        last Angel One API call, AND until any active rate-limit cooldown
-        (set by a sibling call that just got rate-limited) has cleared. Call
-        this immediately before every blocking SmartAPI SDK call (ltpData,
-        getCandleData, getMarketData, position, placeOrder, etc). Using one
-        lock across all methods means concurrent calls from asyncio.gather()
-        queue up and space themselves out instead of all firing at once.
+        Global Angel One rate gate with priority scheduling.
+
+        Keeps:
+          - 1.2s minimum spacing
+          - global rate-limit cooldown
+          - actual SmartAPI call outside the gate
+
+        Priority:
+          high       -> live user action
+          normal     -> browser strategy/AI
+          background -> history collector
         """
-        async with self._rate_lock:
-            now = time.time()
-            wait = max(
-                _MIN_CALL_INTERVAL - (now - self._last_call_ts),
-                self._rate_limit_cooldown_until - now,
-            )
-            if wait > 0:
-                await asyncio.sleep(wait)
-            self._last_call_ts = time.time()
+        if priority is None:
+            priority = _angel_call_priority.get()
+
+        rank = {
+            ANGEL_PRIORITY_HIGH: 0,
+            ANGEL_PRIORITY_NORMAL: 1,
+            ANGEL_PRIORITY_BACKGROUND: 2,
+        }.get(priority)
+
+        if rank is None:
+            raise ValueError(f"Unknown Angel One priority: {priority}")
+
+        async with self._priority_condition:
+            self._priority_seq += 1
+            seq = self._priority_seq
+            self._priority_waiters[seq] = (rank, priority)
+
+            wait_started = time.perf_counter()
+
+            try:
+                while True:
+                    best_seq = min(
+                        self._priority_waiters,
+                        key=lambda s: (
+                            self._priority_waiters[s][0],
+                            s,
+                        ),
+                    )
+
+                    now = time.time()
+
+                    interval_wait = max(
+                        0.0,
+                        _MIN_CALL_INTERVAL -
+                        (now - self._last_call_ts),
+                    )
+
+                    cooldown_wait = max(
+                        0.0,
+                        self._rate_limit_cooldown_until - now,
+                    )
+
+                    wait = max(interval_wait, cooldown_wait)
+
+                    if best_seq == seq and wait <= 0:
+                        self._priority_waiters.pop(seq, None)
+                        self._last_call_ts = time.time()
+                        self._priority_condition.notify_all()
+                        break
+
+                    try:
+                        await asyncio.wait_for(
+                            self._priority_condition.wait(),
+                            timeout=max(wait, 0.05),
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+
+            except BaseException:
+                self._priority_waiters.pop(seq, None)
+                self._priority_condition.notify_all()
+                raise
+
+            waited = time.perf_counter() - wait_started
+
+            if waited >= 0.5:
+                logger.info(
+                    "Angel throttle call=%s priority=%s waited=%.3fs queued=%d",
+                    call_name,
+                    priority,
+                    waited,
+                    len(self._priority_waiters),
+                )
 
     @property
     def is_configured(self) -> bool:
@@ -158,62 +281,70 @@ class AngelOneSession:
         import pyotp
         return pyotp.TOTP(settings.angel_totp_secret).now()
 
-    async def login(self) -> Dict:
-        """Angel One-ல் login செய்து auth/feed tokens return செய்யும்."""
+    async def _login_locked(self) -> Dict:
+        """Perform Angel One login while self._lock is already held."""
         if not self.is_configured:
             raise AngelOneAuthError(
                 "Angel One credentials not configured. "
                 ".env-ல் ANGEL_API_KEY, ANGEL_CLIENT_ID, ANGEL_PASSWORD, ANGEL_TOTP_SECRET சேர்க்கவும்."
             )
 
-        async with self._lock:
-            if self.is_logged_in:
-                return {"status": "already_logged_in", "client_id": settings.angel_client_id}
-
-            try:
-                from SmartApi import SmartConnect
-            except ImportError:
-                raise AngelOneError(
-                    "smartapi-python package இல்லை. "
-                    "`pip install smartapi-python pyotp` run செய்யவும்."
-                )
-
-            try:
-                self._obj = SmartConnect(api_key=settings.angel_api_key)
-                totp = self._get_totp()
-                # FIX (event-loop block): generateSession() is a blocking
-                # `requests` call under the hood — run it in a thread so it
-                # doesn't freeze the whole process (and the health check
-                # with it) for the duration of the HTTP round-trip.
-                data = await asyncio.to_thread(
-                    self._obj.generateSession,
-                    settings.angel_client_id,
-                    settings.angel_password,
-                    totp
-                )
-            except Exception as e:
-                raise AngelOneAuthError(f"Angel One login failed: {e}")
-
-            if not data or data.get("status") is False:
-                msg = data.get("message", "Unknown error") if data else "No response"
-                raise AngelOneAuthError(f"Angel One login error: {msg}")
-
-            tokens = data.get("data", {})
-            self._auth_token = tokens.get("jwtToken") or tokens.get("accessToken")
-            self._refresh_token = tokens.get("refreshToken")
-            self._feed_token = await asyncio.to_thread(self._obj.getfeedToken)
-            self._logged_in = True
-            self._login_ts = time.time()
-
-            logger.info(f"Angel One login successful — client: {settings.angel_client_id}")
+        if self.is_logged_in:
             return {
-                "status": "success",
+                "status": "already_logged_in",
                 "client_id": settings.angel_client_id,
-                "feed_token": self._feed_token,
-                "session_expiry": datetime.fromtimestamp(
-                    self._login_ts + self._session_ttl
-                ).strftime("%Y-%m-%d %H:%M:%S")
             }
+
+        try:
+            from SmartApi import SmartConnect
+        except ImportError:
+            raise AngelOneError(
+                "smartapi-python package இல்லை. "
+                "`pip install smartapi-python pyotp` run செய்யவும்."
+            )
+
+        try:
+            self._obj = SmartConnect(api_key=settings.angel_api_key)
+            totp = self._get_totp()
+
+            # generateSession() is blocking; keep it off the event loop.
+            data = await asyncio.to_thread(
+                self._obj.generateSession,
+                settings.angel_client_id,
+                settings.angel_password,
+                totp,
+            )
+        except Exception as e:
+            raise AngelOneAuthError(f"Angel One login failed: {e}")
+
+        if not data or data.get("status") is False:
+            msg = data.get("message", "Unknown error") if data else "No response"
+            raise AngelOneAuthError(f"Angel One login error: {msg}")
+
+        tokens = data.get("data", {})
+        self._auth_token = tokens.get("jwtToken") or tokens.get("accessToken")
+        self._refresh_token = tokens.get("refreshToken")
+        self._feed_token = await asyncio.to_thread(self._obj.getfeedToken)
+        self._logged_in = True
+        self._login_ts = time.time()
+
+        logger.info(
+            f"Angel One login successful — client: {settings.angel_client_id}"
+        )
+
+        return {
+            "status": "success",
+            "client_id": settings.angel_client_id,
+            "feed_token": self._feed_token,
+            "session_expiry": epoch_to_ist(
+                  self._login_ts + self._session_ttl
+              ).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    async def login(self) -> Dict:
+        """Angel One-ல் login செய்து auth/feed tokens return செய்யும்."""
+        async with self._lock:
+            return await self._login_locked()
 
     async def logout(self) -> Dict:
         """Session logout செய்யும்."""
@@ -241,6 +372,56 @@ class AngelOneSession:
         if not self.is_logged_in:
             await self.login()
 
+    def _invalidate_session_locked(self) -> None:
+        """Clear the Angel One session while self._lock is held."""
+        self._logged_in = False
+        self._auth_token = None
+        self._refresh_token = None
+        self._feed_token = None
+        self._obj = None
+
+    @staticmethod
+    def _is_invalid_token(value) -> bool:
+        """Return True for Angel One broker-side invalid-token responses."""
+        text = str(value).lower()
+        return (
+            "ag8001" in text
+            or "invalid token" in text
+        )
+
+    async def _recover_invalid_token(self, failed_obj=None) -> bool:
+        """
+        Recover one stale/invalid Angel One session safely.
+
+        If another coroutine has already replaced the failed session object,
+        keep that newer session instead of clearing it.
+        """
+        async with self._lock:
+            if (
+                failed_obj is not None
+                and self._obj is not failed_obj
+                and self.is_logged_in
+            ):
+                logger.info(
+                    "Angel One session already recovered by another coroutine"
+                )
+                return True
+
+            self._invalidate_session_locked()
+
+            try:
+                await self._login_locked()
+                logger.info(
+                    "Angel One session recovered after Invalid Token"
+                )
+                return True
+            except Exception as e:
+                logger.warning(
+                    "Angel One session recovery failed: %s",
+                    e,
+                )
+                return False
+
     def get_status(self) -> Dict:
         """தற்போதைய session status return செய்யும்."""
         configured = self.is_configured
@@ -253,39 +434,169 @@ class AngelOneSession:
 
     # ─── Market Data Methods ───────────────────────────────────────────────
 
-    # Symbol tokens for Angel One (NIFTY/BANKNIFTY/FINNIFTY NSE indices)
+    # Symbol tokens for Angel One index spot instruments.
+    # NIFTY/BANKNIFTY/FINNIFTY remain NSE; SENSEX is BSE.
     SYMBOL_TOKENS = {
         "NIFTY":     {"token": "99926000", "exchange": "NSE"},
         "BANKNIFTY": {"token": "99926009", "exchange": "NSE"},
         "FINNIFTY":  {"token": "99926037", "exchange": "NSE"},
+        "SENSEX":    {"token": "99919000", "exchange": "BSE"},
     }
 
-    # Option chain token map (NFO segment)
+    # Index option/future instrument-master name map.
     NFO_SYMBOL_MAP = {
         "NIFTY":     "NIFTY",
         "BANKNIFTY": "BANKNIFTY",
         "FINNIFTY":  "FINNIFTY",
+        "SENSEX":    "SENSEX",
+    }
+
+    # Angel instrument-master derivatives segment by index.
+    # Existing NSE/NFO symbols remain unchanged; SENSEX uses BFO.
+    DERIVATIVE_EXCHANGE_MAP = {
+        "NIFTY": "NFO",
+        "BANKNIFTY": "NFO",
+        "FINNIFTY": "NFO",
+        "SENSEX": "BFO",
     }
 
     async def get_ltp(self, symbol: str) -> Dict:
-        """Live LTP fetch — Angel One SmartAPI."""
+        """Live LTP fetch — Angel One SmartAPI with one invalid-token recovery."""
         await self.ensure_session()
         info = self.SYMBOL_TOKENS.get(symbol.upper())
         if not info:
             raise AngelOneError(f"Unknown symbol: {symbol}")
 
-        await self._throttle()
-        try:
-            # FIX (event-loop block): ltpData() is a blocking `requests`
-            # call — offload to a thread so it doesn't stall the loop.
-            data = await asyncio.to_thread(
-                self._obj.ltpData, info["exchange"], symbol.upper(), info["token"]
-            )
-        except Exception as e:
-            raise AngelOneError(f"LTP fetch failed for {symbol}: {e}")
+        symbol_upper = symbol.upper()
 
-        if not data or data.get("status") is False:
-            raise AngelOneError(f"LTP error: {data.get('message', 'Unknown')}")
+        async def _call_ltp():
+            await self._throttle(call_name=f"get_ltp:{symbol_upper}")
+            return await asyncio.to_thread(
+                self._obj.ltpData,
+                info["exchange"],
+                symbol_upper,
+                info["token"],
+            )
+
+        # Keep the session object that made the request. If another
+        # coroutine already recovered the session, recovery will reuse it.
+        failed_obj = self._obj
+
+        try:
+            data = await _call_ltp()
+        except Exception as e:
+            if self._is_invalid_token(e):
+                logger.warning(
+                    "Angel One Invalid Token on get_ltp:%s; attempting recovery",
+                    symbol_upper,
+                )
+
+                if not await self._recover_invalid_token(failed_obj=failed_obj):
+                    raise AngelOneError(
+                        f"LTP fetch failed for {symbol}: Invalid Token "
+                        f"and session recovery failed"
+                    )
+
+                # Retry exactly once after successful recovery.
+                try:
+                    data = await _call_ltp()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        f"LTP fetch failed after session recovery for "
+                        f"{symbol}: {retry_error}"
+                    )
+
+            else:
+                raise AngelOneError(f"LTP fetch failed for {symbol}: {e}")
+
+        # SmartApi may return a plain string for some HTTP/API errors
+        # (for example: "Invalid Token").  Never call .get() on a
+        # non-dict response.
+        if isinstance(data, str):
+            if self._is_invalid_token(data):
+                logger.warning(
+                    "Angel One Invalid Token string response on get_ltp:%s; "
+                    "attempting recovery",
+                    symbol_upper,
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        f"LTP error for {symbol}: Invalid Token "
+                        f"and session recovery failed"
+                    )
+
+                try:
+                    data = await _call_ltp()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        f"LTP fetch failed after session recovery for "
+                        f"{symbol}: {retry_error}"
+                    )
+
+                if isinstance(data, str):
+                    if self._is_invalid_token(data):
+                        raise AngelOneError(
+                            f"LTP error after session recovery for "
+                            f"{symbol}: Invalid Token"
+                        )
+                    raise AngelOneError(
+                        f"LTP error after session recovery for "
+                        f"{symbol}: {data}"
+                    )
+
+            else:
+                raise AngelOneError(
+                    f"LTP error for {symbol}: {data}"
+                )
+
+        if not isinstance(data, dict):
+            raise AngelOneError(
+                f"LTP error for {symbol}: unexpected response type "
+                f"{type(data).__name__}"
+            )
+
+        if not data or data.get("status") is False or data.get("success") is False:
+            message = data.get("message", "Unknown") if data else "No response"
+
+            if self._is_invalid_token(data):
+                logger.warning(
+                    "Angel One Invalid Token response on get_ltp:%s; "
+                    "attempting recovery",
+                    symbol_upper,
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        f"LTP error for {symbol}: Invalid Token "
+                        f"and session recovery failed"
+                    )
+
+                # Retry exactly once after broker-side invalid-token response.
+                try:
+                    data = await _call_ltp()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        f"LTP fetch failed after session recovery for "
+                        f"{symbol}: {retry_error}"
+                    )
+
+                if not data or data.get("status") is False or data.get("success") is False:
+                    retry_message = (
+                        data.get("message", "Unknown")
+                        if data
+                        else "No response"
+                    )
+                    raise AngelOneError(
+                        f"LTP error after session recovery for "
+                        f"{symbol}: {retry_message}"
+                    )
+            else:
+                raise AngelOneError(f"LTP error: {message}")
 
         ltp_data = data.get("data", {})
         return {
@@ -301,7 +612,7 @@ class AngelOneSession:
                 / max(float(ltp_data.get("close", 1)), 1) * 100, 2
             ),
             "source": "angel_one",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": now_ist().isoformat()
         }
 
     # India VIX token — kept separate from SYMBOL_TOKENS/get_ltp() above
@@ -313,24 +624,102 @@ class AngelOneSession:
     INDIA_VIX_TOKEN = "99926017"
 
     async def get_india_vix(self) -> float:
-        """India VIX LTP via Angel One — spec: 'Use Angel Data if available,
-        otherwise NSE Public Source' for VIX. Returns 0.0 on any failure so
-        the caller (DataFetcher.get_volatility) can fall back to NSE.
-        """
+        """India VIX LTP via Angel One with one invalid-token recovery."""
         await self.ensure_session()
-        await self._throttle()
-        try:
-            # FIX (event-loop block): offload blocking SDK call to a thread.
-            data = await asyncio.to_thread(
-                self._obj.ltpData, "NSE", "India VIX", self.INDIA_VIX_TOKEN
+
+        async def _call_vix():
+            await self._throttle(call_name="get_india_vix")
+            return await asyncio.to_thread(
+                self._obj.ltpData,
+                "NSE",
+                "India VIX",
+                self.INDIA_VIX_TOKEN,
             )
+
+        # Keep the session object that made the first request.
+        failed_obj = self._obj
+
+        try:
+            data = await _call_vix()
         except Exception as e:
-            raise AngelOneError(f"India VIX LTP fetch failed: {e}")
+            if self._is_invalid_token(e):
+                logger.warning(
+                    "Angel One Invalid Token on get_india_vix; attempting recovery"
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        "India VIX fetch failed: Invalid Token "
+                        "and session recovery failed"
+                    )
+
+                # Retry exactly once after recovery.
+                try:
+                    data = await _call_vix()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        "India VIX fetch failed after session recovery: "
+                        f"{retry_error}"
+                    )
+            else:
+                raise AngelOneError(
+                    f"India VIX LTP fetch failed: {e}"
+                )
+
         if not data or data.get("status") is False:
-            raise AngelOneError(f"India VIX LTP error: {data.get('message', 'Unknown')}")
-        val = float((data.get("data") or {}).get("ltp", 0) or 0)
+            message = (
+                data.get("message", "Unknown")
+                if data
+                else "No response"
+            )
+
+            if self._is_invalid_token(data):
+                logger.warning(
+                    "Angel One Invalid Token response on get_india_vix; "
+                    "attempting recovery"
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        "India VIX LTP error: Invalid Token "
+                        "and session recovery failed"
+                    )
+
+                # Retry exactly once after broker-side invalid-token response.
+                try:
+                    data = await _call_vix()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        "India VIX fetch failed after session recovery: "
+                        f"{retry_error}"
+                    )
+
+                if not data or data.get("status") is False:
+                    retry_message = (
+                        data.get("message", "Unknown")
+                        if data
+                        else "No response"
+                    )
+                    raise AngelOneError(
+                        "India VIX LTP error after session recovery: "
+                        f"{retry_message}"
+                    )
+            else:
+                raise AngelOneError(
+                    f"India VIX LTP error: {message}"
+                )
+
+        val = float(
+            (data.get("data") or {}).get("ltp", 0) or 0
+        )
+
         if val <= 0:
             raise AngelOneError("India VIX LTP returned 0")
+
         return val
 
     # ── Instrument master (needed to resolve option strike → token) ─────────
@@ -354,48 +743,94 @@ class AngelOneSession:
 
     # Instrument master is published once per trading day — cache well
     # under that so a whole trading session reuses one download.
-    _INSTRUMENT_MASTER_TTL = 12 * 3600  # 12 hours
+    _INSTRUMENT_MASTER_TTL = 24 * 3600  # hard upper bound; actual refresh is calendar-day based
+
+    # Persistent cache contains ONLY the filtered NFO rows actually needed by
+    # this application (~3k rows), not the 30-40MB raw Angel master.
+    # This prevents every service restart from re-downloading the full master.
+    _INSTRUMENT_CACHE_FILE = (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / "angel_instrument_master_filtered.json"
+    )
 
     async def _ensure_instruments(self) -> None:
         """
-        Downloads (or reuses a cached copy of) Angel One's instrument
-        master, needed to resolve option/future strike → token.
+        Ensure the filtered Angel One instrument master is available.
 
-        BUG FIX (2026-08-22): this used to unconditionally
-        `raise AngelOneError("Instrument master disabled on Render...")` —
-        it never called the chunked/whole download methods below at all,
-        even though both were already fully written (and tested) in this
-        same file. That's why option chain / futures premium / OI always
-        fell back to NSE (and then further to "unavailable" once NSE's
-        own endpoint also 404s) even when Angel One login succeeded.
-        The chunked downloader (~4MB Range-request pages) exists
-        specifically to make this safe on Render's memory/timeout limits,
-        so re-enabling it here is the actual fix rather than a permanent
-        disable. If it turns out to still be too slow/unreliable in a
-        given deployment, both download paths already retry with backoff
-        and raise a clear AngelOneError that callers already catch and
-        fall back to NSE for — so this can't newly break anything that
-        was working before.
+        Cache layers:
+          1. in-memory cache for normal requests;
+          2. same-day persistent disk cache across service restarts;
+          3. Angel One download only when the daily disk cache is missing,
+             stale, corrupt, or invalid.
+
+        The persistent cache stores only NIFTY/BANKNIFTY/FINNIFTY NFO
+        options/futures rows, so it remains small and avoids retaining the
+        full 150k+ raw instrument master in memory.
         """
         now = time.time()
+        today = now_ist().date()
+        cache_day = getattr(self, "_instruments_cache_day", None)
+
+        # Fast path: existing in-memory same-day cache.
         if (
             isinstance(self._instruments, list)
             and self._instruments
+            and cache_day == today
             and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
         ):
             return
 
         async with self._instruments_lock:
-            # Re-check after acquiring the lock — another concurrent
-            # caller may have just finished the download.
+            # Re-check after acquiring the lock.
             now = time.time()
+            today = now_ist().date()
+            cache_day = getattr(self, "_instruments_cache_day", None)
+
             if (
                 isinstance(self._instruments, list)
                 and self._instruments
+                and cache_day == today
                 and (now - self._instruments_ts) < self._INSTRUMENT_MASTER_TTL
             ):
                 return
 
+            # --------------------------------------------------------------
+            # Persistent same-day cache.
+            # --------------------------------------------------------------
+            cache_file = self._INSTRUMENT_CACHE_FILE
+
+            try:
+                if cache_file.is_file():
+                    cached = await asyncio.to_thread(
+                        self._load_persistent_instrument_cache,
+                        cache_file,
+                        today,
+                    )
+
+                    if cached:
+                        self._instruments = cached
+                        self._instruments_ts = time.time()
+                        self._instruments_cache_day = today
+
+                        logger.info(
+                            "Angel One instrument master loaded from disk cache "
+                            "— %d rows, cache_day=%s",
+                            len(cached),
+                            today,
+                        )
+                        return
+            except Exception as e:
+                # A bad cache must never prevent a fresh Angel master download.
+                logger.warning(
+                    "Angel One instrument disk cache unavailable; "
+                    "refreshing master: %s",
+                    e,
+                )
+
+            # --------------------------------------------------------------
+            # No valid same-day disk cache: download the raw master.
+            # --------------------------------------------------------------
             try:
                 loaded = await self._download_instrument_master_chunked()
             except Exception as e_chunked:
@@ -407,54 +842,144 @@ class AngelOneSession:
                     loaded = await self._download_instrument_master_whole()
                 except Exception as e_whole:
                     raise AngelOneError(
-                        f"Instrument master download failed (chunked: {e_chunked}; "
-                        f"whole: {e_whole})"
+                        f"Instrument master download failed "
+                        f"(chunked: {e_chunked}; whole: {e_whole})"
                     )
 
             if not isinstance(loaded, list) or not loaded:
                 raise AngelOneError("Instrument master download returned no rows")
 
-            # FIX (OOM restarts): the raw file has 150k+ rows across every
-            # NSE/BSE/NFO/MCX/CDS instrument — only ~150-300 of those (the
-            # NIFTY/BANKNIFTY/FINNIFTY index options+futures) are ever read
-            # (see get_option_chain / _resolve_futures_token below). Keeping
-            # all 150k+ dicts in memory was costing several hundred MB per
-            # process on top of FastAPI/uvicorn/httpx — on Render's free
-            # 512MB plan that's enough to get OOM-killed a couple of minutes
-            # after every restart (no traceback in app logs, since the OS
-            # kills the process directly — that's why this looked like a
-            # silent crash-loop). Filtering to just the rows this app
-            # actually queries cuts that memory footprint by ~99% while
-            # keeping every existing lookup (get_option_chain,
-            # _resolve_futures_token) working unchanged, since both only
-            # ever filter on these same fields.
+            # Keep only the instruments this application actually resolves.
             _wanted_names = set(self.NFO_SYMBOL_MAP.values())
+            _wanted_exchanges = set(self.DERIVATIVE_EXCHANGE_MAP.values())
 
             def _filter(rows):
                 return [
                     r for r in rows
                     if isinstance(r, dict)
-                    and r.get("exch_seg") == "NFO"
+                    and r.get("exch_seg") in _wanted_exchanges
                     and r.get("name") in _wanted_names
                     and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
                     and r.get("expiry")
                 ]
-            # FIX (health-check timeouts): also offload the 151k-row filter
-            # pass to the same thread as the json.loads() above — cheap
-            # individually, but no reason to bring it back onto the loop.
+
+            # Offload the 150k-row filter from the event loop.
             loaded = await asyncio.to_thread(_filter, loaded)
+
             if not loaded:
                 raise AngelOneError(
-                    "Instrument master download returned no matching NIFTY/"
-                    "BANKNIFTY/FINNIFTY rows after filtering"
+                    "Instrument master download returned no matching "
+                    "NIFTY/BANKNIFTY/FINNIFTY rows after filtering"
                 )
 
             self._instruments = loaded
             self._instruments_ts = time.time()
-            logger.info(f"Angel One instrument master cached — {len(loaded)} rows (filtered to NIFTY/BANKNIFTY/FINNIFTY)")
+            self._instruments_cache_day = today
+
+            # Persist ONLY the filtered rows. Failure to write the cache must
+            # not make an otherwise successful broker download fail.
+            try:
+                await asyncio.to_thread(
+                    self._save_persistent_instrument_cache,
+                    cache_file,
+                    today,
+                    loaded,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Angel One instrument disk cache write failed "
+                    "(memory cache remains valid): %s",
+                    e,
+                )
+
+            logger.info(
+                "Angel One instrument master cached — %d rows "
+                "(filtered to NIFTY/BANKNIFTY/FINNIFTY), "
+                "cache_day=%s",
+                len(loaded),
+                today,
+            )
+
+    @staticmethod
+    def _load_persistent_instrument_cache(
+        cache_file: Path,
+        today,
+    ) -> Optional[List[Dict]]:
+        """Load and validate the small same-day filtered instrument cache."""
+        with cache_file.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        if not isinstance(payload, dict):
+            return None
+
+        cached_day = payload.get("cache_day")
+        rows = payload.get("rows")
+
+        if cached_day != today.isoformat():
+            return None
+
+        if not isinstance(rows, list) or not rows:
+            return None
+
+        # Validate the shape enough to avoid treating arbitrary/stale JSON
+        # as a valid instrument master.
+        valid_rows = [
+            r for r in rows
+            if (
+                isinstance(r, dict)
+                and r.get("exch_seg") in ("NFO", "BFO")
+                and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+                and r.get("expiry")
+                and r.get("name")
+                and r.get("token")
+            )
+        ]
 
 
+        # Reject an older same-day cache that contains only NFO rows.
+        # The current instrument schema must include real SENSEX BFO
+        # derivatives so SENSEX can resolve without NSE/NFO substitution.
+        has_sensex_bfo = any(
+            isinstance(r, dict)
+            and r.get("name") == "SENSEX"
+            and r.get("exch_seg") == "BFO"
+            and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+            and r.get("expiry")
+            and r.get("token")
+            for r in valid_rows
+        )
 
+        if not has_sensex_bfo:
+            return None
+        return valid_rows or None
+
+    @staticmethod
+    def _save_persistent_instrument_cache(
+        cache_file: Path,
+        today,
+        rows: List[Dict],
+    ) -> None:
+        """Atomically save the filtered daily instrument cache."""
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+
+        payload = {
+            "cache_day": today.isoformat(),
+            "rows": rows,
+        }
+
+        tmp_file = cache_file.with_name(
+            cache_file.name + ".tmp"
+        )
+
+        with tmp_file.open("w", encoding="utf-8") as f:
+            json.dump(
+                payload,
+                f,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+
+        tmp_file.replace(cache_file)
 
     async def _download_instrument_master_chunked(self):
         """
@@ -593,7 +1118,13 @@ class AngelOneSession:
                 continue
         return datetime.max
 
-    async def get_option_chain(self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 10) -> Dict:
+    async def get_option_chain(
+        self,
+        symbol: str,
+        expiry: Optional[str] = None,
+        strikes_each_side: Optional[int] = 10,
+        spot_price: Optional[float] = None,
+    ) -> Dict:
         """
         Composes an option chain for `symbol` from the instrument master +
         live quotes. Angel One has no single "get option chain" endpoint
@@ -619,12 +1150,15 @@ class AngelOneSession:
             raise AngelOneError("Instrument master not available")
 
         sym = self.NFO_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
+        derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
+            symbol.upper(), "NFO"
+        )
         rows = [
             r for r in self._instruments
             if isinstance(r, dict)
             and r.get("name") == sym
             and r.get("instrumenttype") == "OPTIDX"
-            and r.get("exch_seg") == "NFO"
+            and r.get("exch_seg") == derivative_exchange
             and r.get("expiry")
         ]
         if not rows:
@@ -633,33 +1167,86 @@ class AngelOneSession:
         expiries = sorted({r["expiry"] for r in rows}, key=self._expiry_sort_key)
 
         # '01SEP2026' while the UI/caller sends '01-Sep-2026' or '2026-09-01'.
-        # Exact string match fails silently and returns zero rows.
-        # Solution: normalize BOTH sides to 'YYYY-MM-DD' before comparing.
+        # Normalize BOTH sides to 'YYYY-MM-DD' before comparing.
+        #
+        # Important:
+        # Angel's instrument master can retain expired contracts at the front
+        # of the sorted expiry list. Never use expiries[0] blindly because an
+        # expired contract can make getMarketData return AB4030 / zero quotes.
+
+        from datetime import date
+
+        today = date.today()
+
+        valid_expiries = []
+        for e in expiries:
+            try:
+                e_norm = _normalize_expiry(e)
+                if not e_norm:
+                    continue
+                e_date = date.fromisoformat(e_norm)
+                if e_date >= today:
+                    valid_expiries.append(e)
+            except Exception:
+                logger.debug(
+                    "Angel One: unable to parse expiry %r while filtering expired contracts",
+                    e,
+                )
+
+        if not valid_expiries:
+            raise AngelOneError(
+                f"No current/future option expiries found for {sym}"
+            )
+
         if expiry:
             norm_requested = _normalize_expiry(expiry)
-            # Find the raw master expiry string that maps to the same date
+
+            # Exact normalized expiry match, but only if it is current/future.
             matched = next(
-                (e for e in expiries if _normalize_expiry(e) == norm_requested),
+                (
+                    e for e in valid_expiries
+                    if _normalize_expiry(e) == norm_requested
+                ),
                 None,
             )
+
             if matched:
                 chosen_expiry = matched
             else:
                 logger.warning(
-                    "Requested expiry %r (normalized: %s) not found in master expiries %s "
-                    "— falling back to nearest expiry %r",
-                    expiry, norm_requested, expiries[:5], expiries[0],
+                    "Requested expiry %r (normalized: %s) is expired/unavailable "
+                    "— falling back to nearest valid expiry %r",
+                    expiry,
+                    norm_requested,
+                    valid_expiries[0],
                 )
-                chosen_expiry = expiries[0]
+                chosen_expiry = valid_expiries[0]
         else:
-            chosen_expiry = expiries[0]
+            # No expiry supplied: always use nearest current/future expiry.
+            chosen_expiry = valid_expiries[0]
+
+        logger.info(
+            "Angel One option chain expiry selected: %s "
+            "(requested=%r, valid_expiries=%s)",
+            chosen_expiry,
+            expiry,
+            valid_expiries[:5],
+        )
 
         rows = [r for r in rows if r.get("expiry") == chosen_expiry]
         if not rows:
             raise AngelOneError(f"No option rows for {sym} expiry {chosen_expiry}")
 
-        spot_info = await self.get_ltp(symbol)
-        spot = spot_info["price"]
+        if spot_price is not None and float(spot_price) > 0:
+            spot = float(spot_price)
+            logger.debug(
+                "Angel One option chain: reusing supplied spot=%s for %s",
+                spot,
+                symbol,
+            )
+        else:
+            spot_info = await self.get_ltp(symbol)
+            spot = spot_info["price"]
 
         def _strike(r: Dict) -> float:
             # Angel stores strike as price * 100, e.g. "2450000.000000"
@@ -673,14 +1260,29 @@ class AngelOneSession:
             raise AngelOneError(f"No valid strikes parsed for {sym} {chosen_expiry}")
 
         atm_idx = min(range(len(all_strikes)), key=lambda i: abs(all_strikes[i] - spot))
-        lo = max(0, atm_idx - strikes_each_side)
-        hi = min(len(all_strikes), atm_idx + strikes_each_side + 1)
-        selected_strikes = set(all_strikes[lo:hi])
+        if strikes_each_side is None:
+            selected_strikes = set(all_strikes)
+        else:
+            lo = max(0, atm_idx - strikes_each_side)
+            hi = min(len(all_strikes), atm_idx + strikes_each_side + 1)
+            selected_strikes = set(all_strikes[lo:hi])
 
         selected_rows = [r for r in rows if _strike(r) in selected_strikes]
         tokens = [str(r["token"]) for r in selected_rows if r.get("token")]  # FIX: str() normalize
         if not tokens:
             raise AngelOneError(f"No tokens resolved for {sym} {chosen_expiry}")
+
+        futures_token = None
+        futures_info = None
+        try:
+            futures_info = await self._resolve_futures_token(sym)
+            if futures_info and futures_info.get("token") and len(tokens) < 50:
+                candidate_futures_token = str(futures_info["token"])
+                if candidate_futures_token not in tokens:
+                    tokens.append(candidate_futures_token)
+                futures_token = candidate_futures_token
+        except Exception as e:
+            logger.debug("Bundled futures token unavailable for %s: %s", sym, e)
 
         # FIX (2026-08-20): use_sdk check-க்கு INFO log சேர்த்தோம்.
         # "use_sdk=False" வந்தா SmartAPI SDK-ல் getMarketData இல்லை —
@@ -703,7 +1305,7 @@ class AngelOneSession:
             for i in range(0, len(tokens), 50):  # FULL mode limit: 50 tokens/call
                 batch = tokens[i:i + 50]
 
-                await self._throttle()
+                await self._throttle(call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}")
                 if use_sdk:
                     # Prefer the SDK's own getMarketData() over a hand-rolled
                     # REST call — get_ltp() above already proves this
@@ -712,13 +1314,47 @@ class AngelOneSession:
                     # got "Invalid Token" from the raw REST endpoint. Letting
                     # the SDK manage its own auth avoids that mismatch.
                     try:
-                        # FIX (event-loop block): offload blocking SDK call.
+                        # Keep the original SmartConnect object so recovery can detect
+                        # whether another coroutine already recovered the session.
+                        failed_obj = self._obj
                         body = await asyncio.to_thread(
                             self._obj.getMarketData,
-                            mode="FULL", exchangeTokens={"NFO": batch}
+                            mode="FULL", exchangeTokens={derivative_exchange: batch}
                         )
                     except Exception as e:
-                        raise AngelOneError(f"SDK getMarketData failed: {e}")
+                        if not self._is_invalid_token(e):
+                            raise AngelOneError(
+                                f"SDK getMarketData failed: {e}"
+                            )
+
+                        logger.warning(
+                            "Angel One Invalid Token on option-chain batch %s "
+                            "for %s; recovering session",
+                            i // 50 + 1,
+                            sym,
+                        )
+
+                        if not await self._recover_invalid_token(
+                            failed_obj=failed_obj
+                        ):
+                            raise AngelOneError(
+                                "Option-chain quote fetch failed: "
+                                "Invalid Token and session recovery failed"
+                            )
+
+                        try:
+                            await self._throttle(
+                                call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
+                            )
+                            body = await asyncio.to_thread(
+                                self._obj.getMarketData,
+                                mode="FULL", exchangeTokens={derivative_exchange: batch}
+                            )
+                        except Exception as retry_error:
+                            raise AngelOneError(
+                                "Option-chain quote fetch failed after "
+                                f"session recovery: {retry_error}"
+                            )
                 else:
                     # FIX (2026-08-20): REST fallback-ல் explicit WARNING —
                     # இது "Invalid Token" error-உடன் fail ஆகும்.
@@ -731,7 +1367,7 @@ class AngelOneSession:
                     resp = await client.post(
                         self.QUOTE_URL,
                         headers=self._quote_headers(),
-                        json={"mode": "FULL", "exchangeTokens": {"NFO": batch}},
+                        json={"mode": "FULL", "exchangeTokens": {derivative_exchange: batch}},
                     )
                     body = resp.json() if resp.content else {}
                     # REST response log — exact error visible in logs
@@ -743,13 +1379,72 @@ class AngelOneSession:
                             f"errorcode={body.get('errorcode')!r}"
                         )
 
-                if not isinstance(body, dict) or not body or body.get("status") is False:
-                    msg = (
-                        body.get("message", "Unknown") if isinstance(body, dict) and body
-                        else f"body-type={type(body).__name__}, body={str(body)[:200]}"
+                if not isinstance(body, dict) or not body:
+                    raise AngelOneError(
+                        "Quote fetch error: "
+                        f"body-type={type(body).__name__}, body={str(body)[:200]}"
                     )
-                    raise AngelOneError(f"Quote fetch error: {msg}")
 
+                # Angel One can return AG8001 as a normal JSON response.
+                # Recover the stale session and retry this batch exactly once.
+                if body.get("status") is False:
+                    error_text = (
+                        body.get("errorcode")
+                        or body.get("message")
+                        or body.get("error")
+                        or ""
+                    )
+
+                    if self._is_invalid_token(error_text):
+                        logger.warning(
+                            "Angel One Invalid Token response on option-chain batch %s "
+                            "for %s; recovering session",
+                            i // 50 + 1,
+                            sym,
+                        )
+
+                        failed_obj = self._obj
+                        if not await self._recover_invalid_token(
+                            failed_obj=failed_obj
+                        ):
+                            raise AngelOneError(
+                                "Option-chain quote fetch failed: "
+                                "Invalid Token and session recovery failed"
+                            )
+
+                        try:
+                            await self._throttle(
+                                call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
+                            )
+                            body = await asyncio.to_thread(
+                                self._obj.getMarketData,
+                                mode="FULL", exchangeTokens={derivative_exchange: batch}
+                            )
+                        except Exception as retry_error:
+                            raise AngelOneError(
+                                "Option-chain quote fetch failed after "
+                                f"session recovery: {retry_error}"
+                            )
+
+                        if not isinstance(body, dict) or not body:
+                            raise AngelOneError(
+                                "Option-chain quote fetch returned invalid response "
+                                "after session recovery"
+                            )
+
+                        if body.get("status") is False:
+                            retry_text = (
+                                body.get("errorcode")
+                                or body.get("message")
+                                or "Unknown"
+                            )
+                            raise AngelOneError(
+                                "Option-chain quote fetch failed after session "
+                                f"recovery: {retry_text}"
+                            )
+                    else:
+                        msg = body.get("message", "Unknown")
+                        raise AngelOneError(f"Quote fetch error: {msg}")
                 data_block = body.get("data")
                 if isinstance(data_block, dict):
                     fetched = data_block.get("fetched", [])
@@ -775,6 +1470,17 @@ class AngelOneSession:
                     token = str(item.get("symbolToken") or item.get("symboltoken") or "")
                     if token:
                         quotes[token] = item
+                        if futures_token and token == futures_token:
+                            try:
+                                ltp = safe_float(item.get("ltp", 0))
+                                if ltp > 0:
+                                    cache = getattr(self, "_bundled_futures_quote_cache", None)
+                                    if cache is None:
+                                        cache = {}
+                                        self._bundled_futures_quote_cache = cache
+                                    cache[sym] = {"token": token, "ltp": ltp, "expiry": futures_info.get("expiry", "") if futures_info else "", "tradingsymbol": futures_info.get("tradingsymbol", "") if futures_info else "", "ts": time.monotonic()}
+                            except Exception:
+                                pass
 
         logger.info(f"Angel One option chain quotes fetched: {len(quotes)} tokens matched out of {len(tokens)}")
 
@@ -789,14 +1495,66 @@ class AngelOneSession:
             opt_type = "CE" if tsym.endswith("CE") else "PE" if tsym.endswith("PE") else None
             if not opt_type:
                 continue
+            # CHAIN_IV_DERIVATION_FROM_LTP_20260925
+            chain_iv = 0.0
+            try:
+                dte = days_to_expiry(chosen_expiry)
+                option_ltp = safe_float(q.get("ltp", 0))
+                if (
+                    dte is not None
+                    and dte > 0
+                    and spot > 0
+                    and strike > 0
+                    and option_ltp > 0
+                ):
+                    derived_iv = implied_volatility_from_price(
+                        spot=spot,
+                        strike=strike,
+                        days_to_expiry=dte,
+                        option_price=option_ltp,
+                        option_type=opt_type,
+                    )
+                    if derived_iv is not None and derived_iv > 0:
+                        chain_iv = derived_iv
+            except Exception:
+                chain_iv = 0.0
+
+            depth = q.get("depth") or {}
+            buy_depth = depth.get("buy") or []
+            sell_depth = depth.get("sell") or []
+
+            best_bid = None
+            best_ask = None
+
+            if isinstance(buy_depth, list) and buy_depth:
+                first_buy = buy_depth[0]
+                if isinstance(first_buy, dict):
+                    best_bid = first_buy.get("price")
+
+            if isinstance(sell_depth, list) and sell_depth:
+                first_sell = sell_depth[0]
+                if isinstance(first_sell, dict):
+                    best_ask = first_sell.get("price")
+
             leg = {
                 "strikePrice":          strike,
                 "expiryDate":           chosen_expiry,
+                "token":                token,
+                "tradingsymbol":        tsym,
+                "optionType":           opt_type,
+                "bidprice":            safe_float(best_bid or 0),
+                "askPrice":            safe_float(best_ask or 0),
+                "bid":                 safe_float(best_bid or 0),
+                "ask":                 safe_float(best_ask or 0),
+                "totalBuyQuantity":    safe_float(q.get("totBuyQuan", 0)),
+                "totalSellQuantity":   safe_float(q.get("totSellQuan", 0)),
+                "exchangeFeedTime":    q.get("exchFeedTime"),
+                "exchangeTradeTime":   q.get("exchTradeTime"),
                 "openInterest":         safe_float(q.get("opnInterest", q.get("openInterest", 0))),
                 "changeinOpenInterest": safe_float(q.get("opnInterestChange", 0)),
                 "lastPrice":            safe_float(q.get("ltp", 0)),
                 "change":               safe_float(q.get("netChange", 0)),
-                "impliedVolatility":    0,  # Angel's quote API doesn't return IV
+                "impliedVolatility":    chain_iv,
                 "totalTradedVolume":    safe_float(q.get("tradeVolume", 0)),
             }
             row = strike_map.setdefault(strike, {"strikePrice": strike, "expiryDate": chosen_expiry})
@@ -806,12 +1564,30 @@ class AngelOneSession:
         if not chain_rows:
             raise AngelOneError("Quote batch returned no matchable rows")
 
-        logger.info(f"Angel One option chain built: {len(chain_rows)} strikes for {sym} {chosen_expiry}")
+        # LOT_SIZE_SOURCE_OF_TRUTH_20260925
+        # Authoritative contract size from the selected Angel
+        # instrument-master rows for this exact symbol/expiry.
+        lot_sizes = set()
+        for _r in selected_rows:
+            try:
+                _lot = int(float(_r.get("lotsize") or 0))
+            except (TypeError, ValueError):
+                _lot = 0
+            if _lot > 0:
+                lot_sizes.add(_lot)
+
+        lot_size = next(iter(lot_sizes)) if len(lot_sizes) == 1 else 0
+
+        logger.info(
+            f"Angel One option chain built: {len(chain_rows)} strikes "
+            f"for {sym} {chosen_expiry}, lot_size={lot_size}"
+        )
         return {
             "symbol":           sym,
             "expiry":           chosen_expiry,
             "all_expiries":     expiries,
             "underlying_price": spot,
+            "lot_size":         lot_size,
             "data":             chain_rows,
             "data_source":      "angel_one_composed",
         }
@@ -822,6 +1598,7 @@ class AngelOneSession:
         interval: str = "ONE_DAY",
         from_date: str = "",
         to_date: str = "",
+        fail_fast_rate_limit: bool = False,
     ) -> List[Dict]:
         """
         Historical OHLCV candle data for the index itself.
@@ -839,7 +1616,13 @@ class AngelOneSession:
         if not info:
             raise AngelOneError(f"Unknown symbol: {symbol}")
         return await self._fetch_candles(
-            info["exchange"], info["token"], interval, from_date, to_date, label=symbol.upper()
+            info["exchange"],
+            info["token"],
+            interval,
+            from_date,
+            to_date,
+            label=symbol.upper(),
+            fail_fast_rate_limit=fail_fast_rate_limit,
         )
 
     async def get_futures_candle_data(
@@ -879,12 +1662,15 @@ class AngelOneSession:
             return None
 
         sym = self.NFO_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
+        derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
+            symbol.upper(), "NFO"
+        )
         rows = [
             r for r in self._instruments
             if isinstance(r, dict)
             and r.get("name") == sym
             and r.get("instrumenttype") == "FUTIDX"
-            and r.get("exch_seg") == "NFO"
+            and r.get("exch_seg") == derivative_exchange
             and r.get("expiry")
         ]
         if not rows:
@@ -906,87 +1692,342 @@ class AngelOneSession:
         if not token:
             return None
         return {
-            "token": token, "exchange": "NFO", "expiry": nearest.get("expiry"),
+            "token": token, "exchange": self.DERIVATIVE_EXCHANGE_MAP.get(symbol.upper(), "NFO"), "expiry": nearest.get("expiry"),
             "tradingsymbol": nearest.get("symbol", ""),
         }
 
     async def get_futures_ltp(self, symbol: str) -> Optional[Dict]:
         """
-        Front-month NFO futures LTP for `symbol` — used to compute the real
-        futures premium/discount (futures LTP - spot) instead of the
-        hardcoded 0.0 placeholder. Returns None (not raises) when Angel One
-        isn't configured or the futures token/quote can't be resolved, so
-        callers can fall back to an explicit "unavailable" status rather
-        than a fabricated number.
+        Front-month NFO futures LTP for `symbol`.
 
-        FIX (2026-08-26): AB4046 "Symbol token not found in scrip master
-        cache" — this happened because ltpData() was called with the
-        instrument-master token string directly, but Angel One's scrip-
-        master cache is keyed on a DIFFERENT token format than what the
-        instrument-master file uses for the same contract (especially
-        around expiry rollover). Fix: use getMarketData (same path that
-        works for option-chain quotes) instead of ltpData, since
-        getMarketData uses the NFO token from _instruments and that
-        IS the correct key for the batch-quote endpoint. Falls back
-        to ltpData only when getMarketData is unavailable.
+        Uses Angel One getMarketData() first because the instrument-master
+        NFO token belongs to the batch-quote namespace used by this endpoint.
+        If Angel One returns AG8001 / Invalid Token, recover the session once
+        and retry the same request once before falling back.
+
+        Returns None when the quote cannot be obtained. Never fabricates
+        a futures price.
         """
         if not self.is_configured:
             return None
+
         info = await self._resolve_futures_token(symbol)
         if not info or not info.get("token"):
             return None
 
         token = str(info["token"])
-        await self._throttle()
-
-        # Prefer getMarketData (batch-quote path) — same token namespace
-        # as option chain, avoids AB4046 scrip-master mismatch with ltpData
+        sym = symbol.upper()
+        derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
+            symbol.upper(), "NFO"
+        )
+        bundled_cache = getattr(self, "_bundled_futures_quote_cache", {})
+        bundled = bundled_cache.get(sym)
+        if isinstance(bundled, dict) and str(bundled.get("token", "")) == token:
+            age = time.monotonic() - float(bundled.get("ts", 0) or 0)
+            ltp = safe_float(bundled.get("ltp", 0))
+            if ltp > 0 and age <= 15.0:
+                logger.info("Angel One futures LTP reused from bundled option-chain quote: %s age=%.2fs", sym, age)
+                return {"ltp": ltp, "expiry": bundled.get("expiry", info.get("expiry", "")), "tradingsymbol": bundled.get("tradingsymbol", info.get("tradingsymbol", ""))}
         use_sdk = hasattr(self._obj, "getMarketData")
+
+        # ------------------------------------------------------------
+        # Primary path: SDK getMarketData()
+        # ------------------------------------------------------------
         if use_sdk:
+            failed_obj = self._obj
+
             try:
-                # FIX (event-loop block): offload blocking SDK call.
+                await self._throttle(call_name=f"futures_ltp:{sym}")
+
                 body = await asyncio.to_thread(
                     self._obj.getMarketData,
-                    mode="LTP", exchangeTokens={"NFO": [token]}
+                    mode="LTP",
+                    exchangeTokens={derivative_exchange: [token]},
                 )
-                if isinstance(body, dict) and body.get("status") is not False:
-                    data_block = body.get("data", {})
-                    fetched = (data_block.get("fetched", [])
-                               if isinstance(data_block, dict) else
-                               data_block if isinstance(data_block, list) else [])
-                    for item in fetched:
-                        if isinstance(item, dict):
-                            ltp = safe_float(item.get("ltp", 0))
-                            if ltp > 0:
-                                return {
-                                    "ltp": ltp,
-                                    "expiry": info.get("expiry", ""),
-                                    "tradingsymbol": info.get("tradingsymbol", ""),
-                                }
-            except Exception as e:
-                logger.debug(f"getMarketData futures LTP failed for {symbol}, trying ltpData: {e}")
 
-        # Fallback: ltpData (may hit AB4046 on some contracts — logged at debug)
+            except Exception as e:
+                if self._is_invalid_token(e):
+                    logger.warning(
+                        "Angel One Invalid Token on futures LTP for %s; "
+                        "recovering session",
+                        sym,
+                    )
+
+                    recovered = await self._recover_invalid_token(
+                        failed_obj=failed_obj
+                    )
+
+                    if recovered:
+                        try:
+                            await self._throttle(
+                                call_name=f"futures_ltp:{sym}:retry"
+                            )
+                            body = await asyncio.to_thread(
+                                self._obj.getMarketData,
+                                mode="LTP",
+                                exchangeTokens={derivative_exchange: [token]},
+                            )
+                        except Exception as retry_error:
+                            if self._is_invalid_token(retry_error):
+                                logger.warning(
+                                    "Futures LTP retry still has Invalid Token "
+                                    "for %s; falling back",
+                                    sym,
+                                )
+                            else:
+                                logger.debug(
+                                    "Futures LTP retry failed for %s: %s",
+                                    sym,
+                                    retry_error,
+                                )
+                            body = None
+                    else:
+                        body = None
+                else:
+                    logger.debug(
+                        "getMarketData futures LTP failed for %s: %s",
+                        sym,
+                        e,
+                    )
+                    body = None
+
+            # --------------------------------------------------------
+            # Normal successful response
+            # --------------------------------------------------------
+            if isinstance(body, dict) and body.get("status") is not False:
+                data_block = body.get("data", {})
+                fetched = (
+                    data_block.get("fetched", [])
+                    if isinstance(data_block, dict)
+                    else data_block
+                    if isinstance(data_block, list)
+                    else []
+                )
+
+                for item in fetched:
+                    if isinstance(item, dict):
+                        ltp = safe_float(item.get("ltp", 0))
+                        if ltp > 0:
+                            return {
+                                "ltp": ltp,
+                                "expiry": info.get("expiry", ""),
+                                "tradingsymbol": info.get(
+                                    "tradingsymbol", ""
+                                ),
+                            }
+
+            # --------------------------------------------------------
+            # Angel One may return AG8001 as JSON status=False instead
+            # of raising an exception.
+            # --------------------------------------------------------
+            if isinstance(body, dict) and body.get("status") is False:
+                error_text = (
+                    body.get("errorcode")
+                    or body.get("message")
+                    or body.get("error")
+                    or ""
+                )
+
+                if self._is_invalid_token(error_text):
+                    logger.warning(
+                        "Angel One Invalid Token response on futures LTP "
+                        "for %s; recovering session",
+                        sym,
+                    )
+
+                    failed_obj = self._obj
+
+                    if await self._recover_invalid_token(
+                        failed_obj=failed_obj
+                    ):
+                        try:
+                            await self._throttle(
+                                call_name=f"futures_ltp:{sym}:retry"
+                            )
+
+                            retry_body = await asyncio.to_thread(
+                                self._obj.getMarketData,
+                                mode="LTP",
+                                exchangeTokens={derivative_exchange: [token]},
+                            )
+
+                            if (
+                                isinstance(retry_body, dict)
+                                and retry_body.get("status") is not False
+                            ):
+                                data_block = retry_body.get("data", {})
+                                fetched = (
+                                    data_block.get("fetched", [])
+                                    if isinstance(data_block, dict)
+                                    else data_block
+                                    if isinstance(data_block, list)
+                                    else []
+                                )
+
+                                for item in fetched:
+                                    if isinstance(item, dict):
+                                        ltp = safe_float(
+                                            item.get("ltp", 0)
+                                        )
+                                        if ltp > 0:
+                                            return {
+                                                "ltp": ltp,
+                                                "expiry": info.get(
+                                                    "expiry", ""
+                                                ),
+                                                "tradingsymbol": info.get(
+                                                    "tradingsymbol", ""
+                                                ),
+                                            }
+
+                        except Exception as retry_error:
+                            logger.debug(
+                                "Futures LTP retry failed for %s: %s",
+                                sym,
+                                retry_error,
+                            )
+
+                else:
+                    logger.debug(
+                        "getMarketData futures LTP returned error for %s: %s",
+                        sym,
+                        error_text,
+                    )
+
+        # ------------------------------------------------------------
+        # Fallback: ltpData()
+        # ------------------------------------------------------------
         if not info.get("tradingsymbol"):
             return None
+
+        failed_obj = self._obj
+
         try:
-            # FIX (event-loop block): offload blocking SDK call.
-            data = await asyncio.to_thread(
-                self._obj.ltpData, info["exchange"], info["tradingsymbol"], token
+            await self._throttle(
+                call_name=f"futures_ltp_fallback:{sym}"
             )
+
+            data = await asyncio.to_thread(
+                self._obj.ltpData,
+                info["exchange"],
+                info["tradingsymbol"],
+                token,
+            )
+
         except Exception as e:
-            logger.debug(f"Futures ltpData failed for {symbol}: {e}")
+            if self._is_invalid_token(e):
+                logger.warning(
+                    "Angel One Invalid Token on futures ltpData fallback "
+                    "for %s; recovering session",
+                    sym,
+                )
+
+                if await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    try:
+                        await self._throttle(
+                            call_name=f"futures_ltp_fallback:{sym}:retry"
+                        )
+
+                        data = await asyncio.to_thread(
+                            self._obj.ltpData,
+                            info["exchange"],
+                            info["tradingsymbol"],
+                            token,
+                        )
+
+                    except Exception as retry_error:
+                        logger.debug(
+                            "Futures ltpData retry failed for %s: %s",
+                            sym,
+                            retry_error,
+                        )
+                        return None
+                else:
+                    return None
+            else:
+                logger.debug(
+                    "Futures ltpData failed for %s: %s",
+                    sym,
+                    e,
+                )
+                return None
+
+        if not isinstance(data, dict):
             return None
-        if not data or data.get("status") is False:
-            err = (data or {}).get("errorcode", "")
-            if err:
-                logger.debug(f"Futures LTP errorcode {err} for {symbol} — token={token}")
-            return None
+
+        if data.get("status") is False:
+            error_text = (
+                data.get("errorcode")
+                or data.get("message")
+                or data.get("error")
+                or ""
+            )
+
+            if self._is_invalid_token(error_text):
+                logger.warning(
+                    "Angel One Invalid Token response on futures "
+                    "ltpData fallback for %s; recovering session",
+                    sym,
+                )
+
+                failed_obj = self._obj
+
+                if await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    try:
+                        await self._throttle(
+                            call_name=f"futures_ltp_fallback:{sym}:retry"
+                        )
+
+                        retry_data = await asyncio.to_thread(
+                            self._obj.ltpData,
+                            info["exchange"],
+                            info["tradingsymbol"],
+                            token,
+                        )
+
+                        if (
+                            isinstance(retry_data, dict)
+                            and retry_data.get("status") is not False
+                        ):
+                            data = retry_data
+                        else:
+                            return None
+
+                    except Exception as retry_error:
+                        logger.debug(
+                            "Futures ltpData response retry failed "
+                            "for %s: %s",
+                            sym,
+                            retry_error,
+                        )
+                        return None
+                else:
+                    return None
+            else:
+                logger.debug(
+                    "Futures LTP error for %s: %s",
+                    sym,
+                    error_text,
+                )
+                return None
+
         ltp_data = data.get("data", {})
+        if not isinstance(ltp_data, dict):
+            return None
+
         ltp = safe_float(ltp_data.get("ltp", 0))
         if ltp <= 0:
             return None
-        return {"ltp": ltp, "expiry": info.get("expiry", ""), "tradingsymbol": info["tradingsymbol"]}
+
+        return {
+            "ltp": ltp,
+            "expiry": info.get("expiry", ""),
+            "tradingsymbol": info["tradingsymbol"],
+        }
 
     async def _fetch_candles(
         self,
@@ -996,6 +2037,7 @@ class AngelOneSession:
         from_date: str,
         to_date: str,
         label: str = "",
+        fail_fast_rate_limit: bool = False,
     ) -> List[Dict]:
         """
         Shared low-level candle fetch used by get_candle_data() (index) and
@@ -1003,13 +2045,20 @@ class AngelOneSession:
         through the same rate limiter and rate-limit retry so callers don't
         have to duplicate throttling logic.
         """
-        from datetime import timedelta
-        if not from_date:
-            from_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d 09:15")
-        if not to_date:
-            to_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+        # FIX 2026-09-11:
+        # Use IST for Angel One candle fallback/default dates.
+        # This prevents UTC/IST mismatch from creating an invalid
+        # candle range where fromdate is later than todate.
+        current_ist = now_ist()
 
-        await self._throttle()
+        if not from_date:
+            from_date = (
+                current_ist - timedelta(days=60)
+            ).strftime("%Y-%m-%d 09:15")
+
+        if not to_date:
+            to_date = current_ist.strftime("%Y-%m-%d %H:%M")
+
         params = {
             "exchange": exchange,
             "symboltoken": token,
@@ -1017,33 +2066,244 @@ class AngelOneSession:
             "fromdate": from_date,
             "todate": to_date,
         }
-        try:
-            # FIX (event-loop block): getCandleData() is a blocking
-            # `requests` call — offload to a thread so retries/backoff
-            # below don't freeze the whole process (incl. health checks).
-            resp = await asyncio.to_thread(self._obj.getCandleData, params)
-        except Exception as e:
-            # "Access denied because of exceeding access rate" can still slip
-            # through even with the throttle above (e.g. another request beat
-            # this one to the lock right at the boundary). One retry after a
-            # slightly longer wait clears it in practice without adding much
-            # latency to the caller.
-            if "exceeding access rate" in str(e).lower() or "access denied" in str(e).lower():
-                logger.warning(f"Angel One rate limit hit for {label or token}, retrying once after backoff")
-                # Broadcast the cooldown to every other concurrent caller
-                # (see _rate_limit_cooldown_until above) before sleeping.
-                self._rate_limit_cooldown_until = time.time() + 8.0
-                await asyncio.sleep(8.0 + random.uniform(0.0, 1.0))
-                await self._throttle()
-                try:
-                    resp = await asyncio.to_thread(self._obj.getCandleData, params)
-                except Exception as e2:
-                    raise AngelOneError(f"Candle data fetch failed: {e2}")
-            else:
-                raise AngelOneError(f"Candle data fetch failed: {e}")
 
-        if not resp or resp.get("status") is False:
-            raise AngelOneError(f"Candle data error: {resp.get('message', 'Unknown') if resp else 'No response'}")
+        def _is_rate_limit(value) -> bool:
+            text = str(value).lower()
+            return any(marker in text for marker in (
+                "ab1021",
+                "too many requests",
+                "rate limit",
+                "access rate",
+                "exceeding access rate",
+                "access denied",
+            ))
+
+        async def _call_candle_api():
+            # Serialize the complete historical broker transaction.
+            # _throttle() alone only reserves a start slot; it does not
+            # prevent another historical request from starting while this
+            # SDK call is still in-flight.
+            async with self._historical_api_lock:
+                await self._throttle(call_name=f"candle:{label}:{interval}")
+                # FIX (event-loop block): getCandleData() is a blocking
+                # `requests` call — offload it to a thread.
+                return await asyncio.to_thread(
+                    self._obj.getCandleData,
+                    params,
+                )
+
+        # First attempt.
+        # AG8001 Invalid Token must be recovered separately from the
+        # normal AB1021/rate-limit retry path.
+        failed_obj = self._obj
+
+        try:
+            resp = await _call_candle_api()
+
+        except Exception as e:
+            if self._is_invalid_token(e):
+                logger.warning(
+                    "Angel One Invalid Token on candle:%s:%s; "
+                    "attempting session recovery",
+                    label or token,
+                    interval,
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        f"Candle data fetch failed for {label or token}: "
+                        "Invalid Token and session recovery failed"
+                    )
+
+                # Retry exactly once after successful session recovery.
+                try:
+                    resp = await _call_candle_api()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        f"Candle data fetch failed after session recovery "
+                        f"for {label or token}: {retry_error}"
+                    )
+
+            elif not _is_rate_limit(e):
+                raise AngelOneError(
+                    f"Candle data fetch failed: {e}"
+                )
+
+            else:
+                priority = get_angel_call_priority()
+
+                # Background history collection must never poison the
+                # foreground broker path with a global cooldown.
+                if priority == ANGEL_PRIORITY_BACKGROUND:
+                    logger.warning(
+                        "Angel One background rate limit hit for %s — "
+                        "skipping retry/cooldown",
+                        label or token,
+                    )
+                    raise AngelOneError(
+                        f"Background Angel One rate limit for "
+                        f"{label or token}"
+                    )
+
+                if fail_fast_rate_limit:
+                    # Even on fail-fast fallback, pause OTHER foreground
+                    # Angel calls sharing this session. Otherwise concurrent
+                    # calls can immediately walk into the same broker limit.
+                    self._rate_limit_cooldown_until = max(
+                        self._rate_limit_cooldown_until,
+                        time.time() + 8.0,
+                    )
+                    logger.warning(
+                        "Angel One rate limit hit for %s — "
+                        "shared 8s cooldown + fail-fast fallback",
+                        label or token,
+                    )
+                    raise AngelOneError(
+                        f"Angel One rate limit for {label or token}"
+                    )
+
+
+                logger.warning(
+                    "Angel One rate limit hit for %s — "
+                    "retrying once after backoff",
+                    label or token,
+                )
+                self._rate_limit_cooldown_until = time.time() + 8.0
+                await asyncio.sleep(
+                    8.0 + random.uniform(0.0, 1.0)
+                )
+
+                try:
+                    resp = await _call_candle_api()
+                except Exception as e2:
+                    raise AngelOneError(
+                        f"Candle data fetch failed after retry: {e2}"
+                    )
+
+        # SmartAPI can report either AG8001 or a rate-limit failure
+        # as a normal response instead of raising an exception.
+        if not resp:
+            raise AngelOneError("Candle data error: No response")
+
+        if resp.get("status") is False:
+            message = str(resp.get("message", "Unknown"))
+            errorcode = str(resp.get("errorcode", ""))
+            error_text = f"{errorcode} {message}"
+
+            # AG8001: recover the stale broker session first.
+            if self._is_invalid_token(error_text):
+                logger.warning(
+                    "Angel One Invalid Token response on candle:%s:%s; "
+                    "attempting session recovery",
+                    label or token,
+                    interval,
+                )
+
+                if not await self._recover_invalid_token(
+                    failed_obj=failed_obj
+                ):
+                    raise AngelOneError(
+                        f"Candle data error for {label or token}: "
+                        "Invalid Token and session recovery failed"
+                    )
+
+                # Retry exactly once after session recovery.
+                try:
+                    resp = await _call_candle_api()
+                except Exception as retry_error:
+                    raise AngelOneError(
+                        f"Candle data fetch failed after session recovery "
+                        f"for {label or token}: {retry_error}"
+                    )
+
+                if not resp:
+                    raise AngelOneError(
+                        "Candle data error after session recovery: "
+                        "No response"
+                    )
+
+                if resp.get("status") is False:
+                    retry_errorcode = str(
+                        resp.get("errorcode", "")
+                    )
+                    retry_message = str(
+                        resp.get("message", "Unknown")
+                    )
+                    raise AngelOneError(
+                        "Candle data error after session recovery: "
+                        f"{retry_errorcode} {retry_message}".strip()
+                    )
+
+            # AB1021 / rate-limit response.
+            elif _is_rate_limit(error_text):
+                priority = get_angel_call_priority()
+
+                if priority == ANGEL_PRIORITY_BACKGROUND:
+                    logger.warning(
+                        "Angel One background rate limit response for %s — "
+                        "skipping retry/cooldown",
+                        label or token,
+                    )
+                    raise AngelOneError(
+                        f"Background Angel One rate limit for "
+                        f"{label or token}: {message}"
+                    )
+
+                if fail_fast_rate_limit:
+                    # SmartAPI may return rate-limit as a normal JSON
+                    # response. Keep the shared cooldown consistent
+                    # with the exception-based rate-limit path.
+                    self._rate_limit_cooldown_until = max(
+                        self._rate_limit_cooldown_until,
+                        time.time() + 8.0,
+                    )
+                    logger.warning(
+                        "Angel One rate limit response for %s — "
+                        "shared 8s cooldown + fail-fast fallback",
+                        label or token,
+                    )
+                    raise AngelOneError(
+                        f"Angel One rate limit for {label or token}"
+                    )
+
+
+                logger.warning(
+                    "Angel One rate limit response for %s — "
+                    "retrying once after backoff",
+                    label or token,
+                )
+                self._rate_limit_cooldown_until = time.time() + 8.0
+                await asyncio.sleep(
+                    8.0 + random.uniform(0.0, 1.0)
+                )
+
+                try:
+                    resp = await _call_candle_api()
+                except Exception as e2:
+                    raise AngelOneError(
+                        f"Candle data fetch failed after retry: {e2}"
+                    )
+
+                if not resp:
+                    raise AngelOneError(
+                        "Candle data error after retry: No response"
+                    )
+
+                if resp.get("status") is False:
+                    retry_message = str(
+                        resp.get("message", "Unknown")
+                    )
+                    raise AngelOneError(
+                        f"Candle data error after retry: "
+                        f"{retry_message}"
+                    )
+
+            else:
+                raise AngelOneError(
+                    f"Candle data error: {message}"
+                )
 
         rows = resp.get("data", [])
         # Format: [timestamp, open, high, low, close, volume]
@@ -1065,19 +2325,31 @@ class AngelOneSession:
     async def get_positions(self) -> List[Dict]:
         """
         SmartAPI-லிருந்து live open positions fetch பண்ணும்.
-
-        ⚠️ NOT verified against a live account — field names (netqty,
-        avgnetprice, ltp போன்றவை) Angel's public docs-ல் இருந்து எடுத்தது,
-        get_option_chain() docstring-ல் இருக்கும் அதே caution இங்கேயும்
-        applicable. முதல் live run-ல் logs பார்த்து confirm பண்ணிக்கொள்ளவும்.
         """
+        import time
+        _t0 = time.perf_counter()
+
         await self.ensure_session()
-        await self._throttle()
+        _t_session = time.perf_counter()
+
+        await self._throttle(priority=ANGEL_PRIORITY_HIGH, call_name="positions")
+        _t_throttle = time.perf_counter()
+
         try:
             # FIX (event-loop block): offload blocking SDK call.
             resp = await asyncio.to_thread(self._obj.position)
         except Exception as e:
             raise AngelOneError(f"Positions fetch failed: {e}")
+
+        _t_position = time.perf_counter()
+
+        logger.info(
+            "get_positions timing: session=%.3fs throttle=%.3fs angel_position=%.3fs total=%.3fs",
+            _t_session - _t0,
+            _t_throttle - _t_session,
+            _t_position - _t_throttle,
+            _t_position - _t0,
+        )
 
         if not resp or resp.get("status") is False:
             raise AngelOneError(
@@ -1088,17 +2360,19 @@ class AngelOneSession:
         for r in resp.get("data") or []:
             netqty = int(safe_float(r.get("netqty", 0)))
             if netqty == 0:
-                continue  # closed / flat position, skip
+                continue
+
             positions.append({
                 "tradingsymbol":    r.get("tradingsymbol", "--"),
                 "symboltoken":      r.get("symboltoken", ""),
                 "exchange":         r.get("exchange", "NFO"),
                 "producttype":      r.get("producttype", "INTRADAY"),
                 "netqty":           abs(netqty),
-                "averageprice":     safe_float(r.get("avgnetprice") or r.get("netprice", 0)),
+                "averageprice":     safe_float(r.get("avgnetprice", 0)) or safe_float(r.get("netprice", 0)),
                 "lasttradedprice":  safe_float(r.get("ltp", 0)),
                 "buysell":          "BUY" if netqty > 0 else "SELL",
             })
+
         return positions
 
     # NOTE: square_off_position() (which called self._obj.placeOrder() to

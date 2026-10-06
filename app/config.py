@@ -93,7 +93,7 @@ class Settings(BaseSettings):
     # page-view-triggered-only behaviour.
     history_collector_interval_minutes: int = Field(5, alias="HISTORY_COLLECTOR_INTERVAL_MINUTES")
     history_collector_symbols_raw: str = Field(
-        "NIFTY,BANKNIFTY,FINNIFTY", alias="HISTORY_COLLECTOR_SYMBOLS"
+        "NIFTY,BANKNIFTY,FINNIFTY,SENSEX", alias="HISTORY_COLLECTOR_SYMBOLS"
     )
 
     # Logging

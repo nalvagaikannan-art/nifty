@@ -6,9 +6,17 @@ Confluence, Market Regime, Trade Levels, Risk Engine
 
 import pytest
 from app.services.confluence_engine import run_confluence_engine
-from app.services.market_regime import classify_market_regime
+from app.services.market_regime import classify_market_regime, _time_session
 from app.services.trade_levels import calculate_trade_levels
 from app.services.risk_engine import assess_risk
+
+
+@pytest.fixture(autouse=True)
+def fixed_market_session(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._time_session",
+        lambda: "MID",
+    )
 
 
 # ── Sample market data builders ───────────────────────────────────────────
@@ -121,6 +129,37 @@ class TestConfluenceEngine:
 # ── Market Regime Tests ───────────────────────────────────────────────────
 
 class TestMarketRegime:
+    def test_time_session_boundaries(self, monkeypatch):
+        import app.services.market_regime as mr
+
+        class FixedDateTime:
+            @classmethod
+            def now(cls, tz=None):
+                from datetime import datetime
+                return datetime(2026, 9, 3, 9, 14, tzinfo=tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
+        assert _time_session() == "PRE_MARKET"
+
+        for hour, minute, expected in [
+            (9, 15, "OPENING"),
+            (9, 44, "OPENING"),
+            (9, 45, "MID"),
+            (14, 59, "MID"),
+            (15, 0, "CLOSING"),
+            (15, 30, "CLOSING"),
+            (15, 31, "POST_MARKET"),
+        ]:
+            class FixedDateTime:
+                @classmethod
+                def now(cls, tz=None):
+                    from datetime import datetime
+                    return datetime(2026, 9, 3, hour, minute, tzinfo=tz)
+
+            monkeypatch.setattr(mr, "datetime", FixedDateTime)
+            assert _time_session() == expected
+
+
 
     def test_trend_up(self):
         data   = make_market_data(adx=28, di_plus=26, di_minus=14)
@@ -179,7 +218,7 @@ class TestTradeLevels:
         data   = make_market_data()
         result = calculate_trade_levels(data, "bullish", spot=24000, option_ltp=150)
         assert result["direction"] == "bullish"
-        assert result["stop_loss_spot"] < 24000
+        assert result["stop_loss_spot"] < result["trigger"]
         assert result["target_1_spot"] > 24000
         assert result["target_2_spot"] > result["target_1_spot"]
         assert result["trigger"] > 0
@@ -232,6 +271,7 @@ class TestRiskEngine:
             entry_price=150,
             stop_loss_price=100,
             rr_ratio=2.0,
+            option_rr_ratio=2.0,
             market_regime="TREND_UP",
             vix=14,
             days_to_expiry=7,
@@ -288,7 +328,7 @@ class TestRiskEngine:
         assert result["allowed"] is False
 
     def test_low_rr_rejected(self):
-        result = assess_risk(**self._good_params(rr_ratio=1.0))
+        result = assess_risk(**self._good_params(rr_ratio=1.0, option_rr_ratio=1.0))
         assert result["allowed"] is False
 
     def test_signal_strength_does_not_increase_position(self):

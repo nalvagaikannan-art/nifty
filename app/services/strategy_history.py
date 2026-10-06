@@ -5,10 +5,12 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import threading
 import logging
+import json
 
 from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
-from app.models import SignalState, SignalHistory
+from app.models import SignalState, SignalHistory, DailySignalLedger
+from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ MAX_HISTORY = 20
 
 
 def _now_utc() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return now_utc_naive()
 
 
 def _to_signal_dict(row: SignalHistory) -> dict:
@@ -96,6 +98,38 @@ async def save_signal_state(state: dict) -> None:
             if row is None:
                 row = SignalState(symbol=symbol)
                 db.add(row)
+            else:
+                # ATOMIC_LIFECYCLE_FIX_20260923
+                # Do not allow a genuinely older in-flight request to
+                # overwrite a newer lifecycle evaluation.
+                incoming_eval = state.get("last_evaluation_at")
+                stored_eval = row.last_evaluation_at
+
+                if incoming_eval is not None and stored_eval is not None:
+                    try:
+                        inc = incoming_eval
+                        st = stored_eval
+
+                        if getattr(inc, "tzinfo", None) is not None:
+                            inc = inc.astimezone(timezone.utc).replace(tzinfo=None)
+
+                        if getattr(st, "tzinfo", None) is not None:
+                            st = st.astimezone(timezone.utc).replace(tzinfo=None)
+
+                        if inc < st:
+                            logger.warning(
+                                "Ignoring stale signal state for %s: "
+                                "incoming_eval=%s < stored_eval=%s",
+                                symbol, incoming_eval, stored_eval
+                            )
+                            await db.rollback()
+                            return
+                    except Exception as exc:
+                        logger.warning(
+                            "Signal-state timestamp comparison failed for %s: %s",
+                            symbol, exc
+                        )
+
             row.active_side = state.get("active_side", "NONE")
             row.candidate_side = state.get("candidate_side", "NONE")
             row.confirmations = int(state.get("confirmations", 0) or 0)
@@ -146,6 +180,184 @@ async def record_signal_persistent(symbol: str, strategy: str, score: int,
     except Exception as exc:
         logger.warning("Persistent signal history write failed for %s: %s", symbol, exc)
         return record_signal(symbol, strategy, score, market_state, confidence, spot, pcr, vix, reasons)
+
+
+
+ACTIONABLE_LEDGER_ACTIONS = {"BUY CE", "BUY PE", "SELL CE", "SELL PE"}
+
+
+def _ledger_json_safe(value):
+    """Return a JSON-serializable copy without changing source data."""
+    try:
+        return json.loads(json.dumps(value, default=str))
+    except Exception:
+        return {"value": str(value)}
+
+
+def _ledger_timestamp(value):
+    """Parse an incoming ISO timestamp into a naive UTC datetime."""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if getattr(dt, "tzinfo", None) is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    return dt
+
+
+async def record_daily_signal_ledger(
+    *,
+    symbol: str,
+    action: str,
+    option_type: str,
+    strike: float,
+    expiry: str = "",
+    spot: float = 0.0,
+    option_ltp_snapshot: float = None,
+    entry_price: float = None,
+    signal_strength: float = 0.0,
+    confidence: float = 0.0,
+    lifecycle: str = "UNKNOWN",
+    confirmations: int = 0,
+    market_snapshot_timestamp=None,
+    technical_data_source: str = None,
+    confluence=None,
+    mtf_freshness=None,
+    entry_snapshot=None,
+    lifecycle_confirmation_at=None,
+):
+    """
+    Permanently capture one actionable signal episode.
+
+    Duplicate polling of the same lifecycle confirmation/market snapshot
+    must not create another ledger row. WAIT is intentionally excluded.
+    Outcome remains NULL for the evidence-collection phase.
+    """
+    symbol = str(symbol or "").upper()
+    action = str(action or "").upper().strip()
+    option_type = str(option_type or "").upper().strip()
+
+    if action not in ACTIONABLE_LEDGER_ACTIONS:
+        return None
+
+    # Prefer the lifecycle confirmation timestamp as the episode anchor.
+    # When unavailable, use the market snapshot timestamp so repeated
+    # requests against the exact same snapshot deduplicate.
+    anchor_dt = (
+        _ledger_timestamp(lifecycle_confirmation_at)
+        or _ledger_timestamp(market_snapshot_timestamp)
+        or _now_utc()
+    )
+
+    event_dt = (
+        _ledger_timestamp(market_snapshot_timestamp)
+        or anchor_dt
+    )
+
+    anchor_iso = anchor_dt.isoformat()
+    session_date = event_dt.date().isoformat()
+
+    ledger_key = "|".join([
+        symbol,
+        action,
+        option_type,
+        str(float(strike or 0)),
+        str(expiry or ""),
+        session_date,
+        anchor_iso,
+    ])
+
+    try:
+        async with AsyncSessionLocal() as db:
+            existing = await db.execute(
+                select(DailySignalLedger)
+                .where(DailySignalLedger.ledger_key == ledger_key)
+                .limit(1)
+            )
+            row = existing.scalar_one_or_none()
+
+            if row is not None:
+                return {
+                    "id": row.id,
+                    "ledger_key": row.ledger_key,
+                    "duplicate": True,
+                }
+
+            row = DailySignalLedger(
+                timestamp=event_dt,
+                symbol=symbol,
+                action=action,
+                option_type=option_type,
+                strike=float(strike or 0),
+                expiry=str(expiry or ""),
+                spot=float(spot or 0),
+                option_ltp_snapshot=(
+                    float(option_ltp_snapshot)
+                    if option_ltp_snapshot is not None else None
+                ),
+                entry_price=(
+                    float(entry_price)
+                    if entry_price is not None else None
+                ),
+                signal_strength=float(signal_strength or 0),
+                confidence=float(confidence or 0),
+                lifecycle=str(lifecycle or "UNKNOWN"),
+                confirmations=int(confirmations or 0),
+                market_snapshot_timestamp=(
+                    str(market_snapshot_timestamp)
+                    if market_snapshot_timestamp is not None else None
+                ),
+                technical_data_source=(
+                    str(technical_data_source)
+                    if technical_data_source is not None else None
+                ),
+                confluence=_ledger_json_safe(confluence or {}),
+                mtf_freshness=_ledger_json_safe(mtf_freshness or {}),
+                entry_snapshot=_ledger_json_safe(entry_snapshot or {}),
+                outcome=None,
+                ledger_key=ledger_key,
+            )
+
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+
+            logger.info(
+                "DAILY_SIGNAL_LEDGER_CAPTURED symbol=%s action=%s "
+                "option_type=%s strike=%s lifecycle=%s key=%s",
+                symbol,
+                action,
+                option_type,
+                strike,
+                lifecycle,
+                ledger_key,
+            )
+
+            return {
+                "id": row.id,
+                "ledger_key": row.ledger_key,
+                "duplicate": False,
+            }
+
+    except Exception as exc:
+        logger.warning(
+            "Daily signal ledger write failed for %s %s: %s",
+            symbol,
+            action,
+            exc,
+        )
+        return None
 
 
 async def get_history_persistent(symbol: str) -> List[dict]:
