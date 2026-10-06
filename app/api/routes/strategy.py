@@ -1550,6 +1550,7 @@ async def strike_recommendation(
         "spot":            round(spot, 2),
         "expiry":          expiry,
         "all_expiries":    chain.get("all_expiries", []),
+        "lot_size":        _contract_lot_size,
         "bull_score":      dec.get("bull_score", 0),
         "bear_score":      dec.get("bear_score", 0),
         "confidence":      dec.get("confidence", 0),
