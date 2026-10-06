@@ -1534,6 +1534,28 @@ class MarketAnalyzer:
                     "historical_replay": closed_replay,
                 }
 
+            logger.info(
+                "MTF OBSERVE: %s market_open=%s replay=%s | "
+                "5m fresh=%s age=%s source=%s reason=%s | "
+                "15m fresh=%s age=%s source=%s reason=%s | "
+                "1hr fresh=%s age=%s source=%s reason=%s",
+                str(symbol).upper(),
+                nse_market_open,
+                closed_replay,
+                out.get("5min", {}).get("fresh"),
+                out.get("5min", {}).get("freshness_minutes"),
+                out.get("5min", {}).get("data_source"),
+                out.get("5min", {}).get("freshness_reason"),
+                out.get("15min", {}).get("fresh"),
+                out.get("15min", {}).get("freshness_minutes"),
+                out.get("15min", {}).get("data_source"),
+                out.get("15min", {}).get("freshness_reason"),
+                out.get("1hr", {}).get("fresh"),
+                out.get("1hr", {}).get("freshness_minutes"),
+                out.get("1hr", {}).get("data_source"),
+                out.get("1hr", {}).get("freshness_reason"),
+            )
+
             return out
 
         except Exception as e:
