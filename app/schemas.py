@@ -514,6 +514,17 @@ class AccuracyLedgerPerformanceResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class SessionStudyResponse(BaseModel):
+    symbol: str
+    days: int
+    basis: str
+    market_days: int
+    opening_profile: Dict
+    closing_window: Dict
+    late_session: Dict
+    model_config = {"extra": "allow"}
+
+
 class ConfidenceCalibrationResponse(BaseModel):
     actionable_episodes_total: int
     calibration_basis: str

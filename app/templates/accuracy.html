@@ -115,6 +115,58 @@
     </div>
     <div id="ledger-status" class="card glass acc-block">Loading ledger performance...</div>
 
+    <div class="card glass acc-block" id="session-study-block">
+        <h3>📈 Session Study — Opening / Closing / 14:40 Evidence</h3>
+        <div class="sub" style="margin-bottom:.75rem;">
+            Read-only session evidence. This does not change strategy scores, gates, lifecycle, or signals.
+        </div>
+
+        <div class="dashboard-grid" id="session-study-grid">
+            <div class="card glass">
+                <h3>Opening Gap</h3>
+                <div class="price" id="ss-gap">--</div>
+                <div class="sub" id="ss-gap-n">--</div>
+            </div>
+            <div class="card glass">
+                <h3>09:15 → 09:30</h3>
+                <div class="price" id="ss-boundary">--</div>
+                <div class="sub">Opening boundary move</div>
+            </div>
+            <div class="card glass">
+                <h3>Continuation / Reversal</h3>
+                <div class="price" id="ss-cont-rev">--</div>
+                <div class="sub">Opening behaviour</div>
+            </div>
+            <div class="card glass">
+                <h3>15:20 → 15:30</h3>
+                <div class="price" id="ss-close">--</div>
+                <div class="sub" id="ss-close-n">--</div>
+            </div>
+        </div>
+
+        <div class="dashboard-grid" style="margin-top:.75rem;">
+            <div class="card glass">
+                <h3>14:40 Actionable Calls</h3>
+                <div class="price" id="ss-calls">--</div>
+                <div class="sub">Dedicated late-session bucket</div>
+            </div>
+            <div class="card glass">
+                <h3>Spot Outcome</h3>
+                <div class="price" id="ss-spot">--</div>
+                <div class="sub">Session-close outcome</div>
+            </div>
+            <div class="card glass">
+                <h3>Premium Outcome</h3>
+                <div class="price" id="ss-premium">--</div>
+                <div class="sub">15:40 outcome when available</div>
+            </div>
+        </div>
+
+        <div id="session-study-status" class="sub" style="margin-top:.75rem;">
+            Loading Session Study...
+        </div>
+    </div>
+
     <div class="card glass acc-block" id="horizon-block" style="display:none;">
         <h3>Spot Direction Accuracy by Horizon — Actionable Episodes (5 / 10 / 15 / 30 / 60 min)</h3>
         <table class="acc-table" id="horizon-table">
@@ -280,6 +332,8 @@ function loadAll() {
         .then(function() { return loadPremiumAccuracy(); })
         .catch(function() {})
         .then(function() { return loadLedgerPerformance(); })
+        .catch(function() {})
+        .then(function() { return loadSessionStudy(); })
         .catch(function() {})
         .then(function() { return loadCalibration(); })
         .catch(function() {});
@@ -729,6 +783,85 @@ function renderMfeMae(mfeMae) {
                 <td>${m.sample_size}</td>
             </tr>`);
         }
+    });
+}
+
+function loadSessionStudy() {
+    return $.getJSON(
+        '/api/accuracy/session-study/' +
+        encodeURIComponent(currentSymbol) +
+        '?days=' + encodeURIComponent(currentDays)
+    ).done(function(d) {
+        var op = d.opening_profile || {};
+        var gap = op.gap || {};
+        var boundary = op.open_boundary_09_15_to_09_30 || {};
+        var close = d.closing_window || {};
+        var late = d.late_session || {};
+        var spot = late.spot_session_close || {};
+        var premium = late.option_1540 || {};
+
+        $('#ss-gap').text(
+            gap.average_pct != null ? Number(gap.average_pct).toFixed(2) + '%' : '--'
+        );
+        $('#ss-gap-n').text(
+            (op.valid_gap_days || 0) + '/' +
+            (op.days || d.market_days || 0) + ' valid days'
+        );
+        $('#ss-boundary').text(
+            boundary.average_pct != null
+                ? Number(boundary.average_pct).toFixed(2) + '%'
+                : '--'
+        );
+        $('#ss-cont-rev').text(
+            (op.continuation || 0) + ' / ' + (op.reversal || 0)
+        );
+        $('#ss-close').text(
+            close.move_average_pct != null
+                ? Number(close.move_average_pct).toFixed(2) + '%'
+                : '--'
+        );
+        $('#ss-close-n').text(
+            (close.valid_days || 0) + '/' +
+            (d.market_days || 0) + ' valid days'
+        );
+
+        var calls = Number(late.actionable_call_count || 0);
+        $('#ss-calls').text(calls);
+
+        $('#ss-spot').text(
+            (spot.favourable || 0) + ' favourable / ' +
+            (spot.adverse || 0) + ' adverse'
+        );
+        $('#ss-premium').text(
+            (premium.favourable || 0) + ' favourable / ' +
+            (premium.adverse || 0) + ' adverse'
+        );
+
+        if (calls === 0) {
+            $('#session-study-status').text(
+                'Insufficient evidence: no actionable 14:40 calls in this period.'
+            );
+        } else if (calls < 5) {
+            $('#session-study-status').text(
+                'Evidence is still limited: only ' + calls +
+                ' actionable 14:40 call' + (calls === 1 ? '' : 's') +
+                '. Do not treat this as a strategy accuracy rate.'
+            );
+        } else {
+            $('#session-study-status').text(
+                calls + ' actionable 14:40 calls observed. ' +
+                'Use sample size and coverage before drawing conclusions.'
+            );
+        }
+    }).fail(function(xhr) {
+        var detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
+            (xhr.status === 0
+                ? 'Connection lost — try again shortly.'
+                : 'Data unavailable (HTTP ' + xhr.status + ').');
+
+        $('#session-study-status').text(
+            '⚠️ Session Study could not be loaded: ' + detail
+        );
     });
 }
 

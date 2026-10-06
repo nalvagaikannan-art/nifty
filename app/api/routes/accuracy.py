@@ -25,11 +25,13 @@ from app.services.signal_accuracy import (
 )
 from app.services.error_log import record_error, recent_errors
 from app.services.ledger_performance import compute_ledger_performance
+from app.services.session_study import compute_session_study
 from app.schemas import (
     AccuracyIndicatorsResponse,
     AccuracySignalsResponse,
     AccuracyPremiumResponse,
     AccuracyLedgerPerformanceResponse,
+    SessionStudyResponse,
     ConfidenceCalibrationResponse,
     AccuracyStatusResponse,
 )
@@ -137,6 +139,30 @@ async def ledger_performance(
         sym=sym,
         timeout_detail=f"Ledger performance for {days} days is taking too long ? try a smaller range (7 days).",
         error_detail="Ledger performance computation failed",
+    )
+
+
+@router.get("/session-study/{symbol}", response_model=SessionStudyResponse)
+async def session_study(
+    symbol: str,
+    days: int = Query(30, ge=1, le=90),
+):
+    """Read-only intraday Session Study.
+
+    Reports opening behaviour, closing-window coverage, and the dedicated
+    14:40 IST late-session actionable-signal bucket without changing strategy
+    scores, gates, lifecycle state, or the production DailySignalLedger.
+    """
+    sym = _check_symbol(symbol)
+    return await _run_with_timeout(
+        compute_session_study(sym, days=days),
+        endpoint="session-study",
+        sym=sym,
+        timeout_detail=(
+            f"Session Study for {days} days is taking too long — "
+            "try a smaller range (7 days)."
+        ),
+        error_detail="Session Study computation failed",
     )
 
 
