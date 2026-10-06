@@ -432,6 +432,7 @@
 $(function() {
 var curSym   = 'NIFTY';
 var apiCache = {};
+var analysisLoadSeq = 0;
 
 function esc(s){ return $('<div>').text(s==null?'':String(s)).html(); }
 
@@ -534,6 +535,9 @@ function populateExpirySelect(allExpiries, resolvedExpiry){
   }
 
 function loadAll(sym, force, expiry){
+  var loadSeq = ++analysisLoadSeq;
+  var loadSym = sym;
+
   if(expiry === undefined) expiry = curExpiry;
   curExpiry = expiry || '';
   var qs = curExpiry ? ('?expiry=' + encodeURIComponent(curExpiry)) : '';
@@ -555,14 +559,28 @@ function loadAll(sym, force, expiry){
 
   $('#ai-reason').html('<span class="spinner"></span> Analyzing...');
   $.get('/api/analysis/ai/'+sym+cacheQs)
-    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].ai=d; renderAnalysis(d); populateExpirySelect(d.all_expiries, d.expiry); analysisLivePositionSignalData=d; analysisLivePositionRefresh(); })
+    .done(function(d){
+      if(loadSeq !== analysisLoadSeq || loadSym !== curSym) return;
+      apiCache[key]=apiCache[key]||{};
+      apiCache[key].ai=d;
+      renderAnalysis(d);
+      populateExpirySelect(d.all_expiries, d.expiry);
+      analysisLivePositionSignalData=d;
+      analysisLivePositionRefresh();
+    })
     .fail(function(x){ var m='Analysis failed'; try{m=JSON.parse(x.responseText).detail;}catch(e){} $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>'); })
     .always(function(){ done.ai=true; chk(); });
 
   $('#strikes-loading').text('Loading...').show();
   $('#strikes-grid,#strikes-wait,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
   $.get('/api/strategy/recommend/'+sym+cacheQs)
-    .done(function(d){ apiCache[key]=apiCache[key]||{}; apiCache[key].strat=d; renderStrikes(d); populateExpirySelect(d.all_expiries, d.expiry); })
+    .done(function(d){
+      if(loadSeq !== analysisLoadSeq || loadSym !== curSym) return;
+      apiCache[key]=apiCache[key]||{};
+      apiCache[key].strat=d;
+      renderStrikes(d);
+      populateExpirySelect(d.all_expiries, d.expiry);
+    })
     .fail(function(){ $('#strikes-loading').text('Strategy data unavailable.'); })
     .always(function(){ done.strat=true; chk(); });
 }
@@ -807,6 +825,25 @@ var rk = d.v2_risk || {};
 
     if(freshSetupBlocked){
       $('#v2-trade-row').hide();
+    } else if(!hasV2Levels && !hasSellLevels){
+      // Clear stale V2 values when the current response has no trade levels.
+      $('#v2-trade-row').hide();
+      $('#v2-setup').text('--');
+      $('#v2-trigger').text('--');
+      $('#v2-trigger-note').text('');
+      $('#v2-entry').text('--');
+      $('#v2-rr').text('--');
+      $('#v2-option-rr').text('--');
+      $('#v2-sl-row').hide();
+      $('#v2-sl').text('--');
+      $('#v2-t1').text('--');
+      $('#v2-t2').text('--');
+      $('#v2-t3').text('--');
+      $('#v2-risk').text('--');
+      $('#v2-risk-row').hide();
+      $('#v2-lots').text('--');
+      $('#v2-maxloss').text('--');
+      $('#v2-risklevel').text('--');
     }
 
 // Risk sizing

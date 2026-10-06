@@ -261,7 +261,9 @@ async def build_ai_analysis(
                 - (dec.get("bear_score", 0) or 0),
             ),
             "confidence":          dec.get("confidence", 0),
-            "forecast":            dec.get("forecast", "Neutral"),
+            "rule_confidence":      dec.get("confidence", 0),
+            "rule_market_bias":     dec.get("market_bias", "Sideways"),
+            "forecast":             dec.get("forecast", "Neutral"),
             "ai_agrees":           None,
             "_provider":           "rule_engine_only",
             "disclaimer":          "Informational analysis only — not investment advice.",
@@ -270,6 +272,10 @@ async def build_ai_analysis(
     # Full reasons list + strategy/price-level detail சேர்க்க
     dec = market_data.get("decision", {})
     result["all_reasons"]        = dec.get("reasons", [])
+    # AIAnalysisRouteResponse requires these fields for every response,
+    # including normal AI-success responses and rule-engine fallback.
+    result["rule_confidence"]    = dec.get("confidence", 0)
+    result["rule_market_bias"]   = dec.get("market_bias", "Sideways")
     # Authoritative rule-engine margin; AI is only a validator/explainer.
     result["margin"]             = dec.get(
         "margin",
