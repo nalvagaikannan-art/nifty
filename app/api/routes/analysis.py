@@ -521,11 +521,13 @@ async def ai_analysis(
         cache_bust=cache_bust,
     )
 
-    # Read-only lifecycle overlay for the HTTP Analysis/Live/Terminal views.
-    # IMPORTANT: do not progress or save confirmations here.
-    persisted_state = await load_signal_state(symbol.upper())
-    result = _overlay_persisted_lifecycle(result, persisted_state)
-
+    # build_ai_analysis() already loaded the authoritative lifecycle snapshot,
+    # applied the read-only overlay, and computed best_strategy/signal_action
+    # from that same snapshot. Re-reading persistent state here could race with
+    # a concurrent lifecycle update and produce mixed fields such as
+    # BUY CE + WAIT. Keep this HTTP response on the single snapshot used to
+    # construct the result.
+    
     # Do not expose a raw-direction option recommendation while the
     # persistent lifecycle is only WATCH/WAIT.
     lifecycle = str(result.get("signal_lifecycle", "WAIT") or "WAIT").upper()
