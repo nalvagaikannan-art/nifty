@@ -90,6 +90,31 @@
     </div>
     <div id="premium-status" class="card glass acc-block">Loading premium accuracy...</div>
 
+    <h3 style="margin:1.5rem 0 0.75rem;">📊 Ledger Performance — Actual Return vs Option Premium (60min)</h3>
+    <div class="dashboard-grid" id="ledger-performance" style="margin-bottom:0.5rem; display:none;">
+        <div class="card glass">
+            <h3>Index Direction</h3>
+            <div class="price" id="ledger-spot-return">--</div>
+            <div class="sub" id="ledger-spot-n">Action-adjusted average return</div>
+        </div>
+        <div class="card glass">
+            <h3>Option Premium</h3>
+            <div class="price" id="ledger-premium-return">--</div>
+            <div class="sub" id="ledger-premium-n">Action-adjusted average return</div>
+        </div>
+        <div class="card glass">
+            <h3>Premium Net of Est. Costs</h3>
+            <div class="price" id="ledger-premium-net">--</div>
+            <div class="sub" id="ledger-premium-net-n">After estimated 2% round-trip cost</div>
+        </div>
+        <div class="card glass">
+            <h3>₹ P&amp;L Coverage</h3>
+            <div class="price" id="ledger-pnl-coverage">--</div>
+            <div class="sub" id="ledger-pnl-n">Frozen historical lot size only</div>
+        </div>
+    </div>
+    <div id="ledger-status" class="card glass acc-block">Loading ledger performance...</div>
+
     <div class="card glass acc-block" id="horizon-block" style="display:none;">
         <h3>Spot Direction Accuracy by Horizon — Actionable Episodes (5 / 10 / 15 / 30 / 60 min)</h3>
         <table class="acc-table" id="horizon-table">
@@ -253,6 +278,10 @@ function loadAll() {
         .then(function() { return loadSignalAccuracy(); })
         .catch(function() {})
         .then(function() { return loadPremiumAccuracy(); })
+        .catch(function() {})
+        .then(function() { return loadLedgerPerformance(); })
+        .catch(function() {})
+        .then(function() { return loadCalibration(); })
         .catch(function() {});
 }
 
@@ -587,12 +616,80 @@ function loadPremiumAccuracy() {
                 (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#premium-status').addClass('error').text('⚠️ Premium accuracy could not be loaded: ' + detail);
         })
-        // Bug fix: loadCalibration() used to fire here unconditionally and
-        // in parallel with everything else on the page — a 5th simultaneous
-        // heavy computation. Chaining it AFTER premium accuracy finishes
-        // (success or fail) keeps it in the same one-at-a-time sequence as
-        // the rest of loadAll(), instead of adding to the pile-up.
-        .always(function() { loadCalibration(); });
+}
+
+function loadLedgerPerformance() {
+    $('#ledger-status').removeClass('error')
+        .text('Loading ledger performance for ' + currentSymbol + '...')
+        .show();
+    $('#ledger-performance').hide();
+
+    return $.get('/api/accuracy/ledger/' + currentSymbol + '?days=' + currentDays)
+        .done(function(d) {
+            const spot = d.spot_direction || {};
+            const premium = d.option_premium || {};
+            const pnl = d.pnl || {};
+
+            const spotAvg = spot.action_adjusted_return_pct &&
+                spot.action_adjusted_return_pct.average_pct;
+            const premiumAvg = premium.action_adjusted_return_pct &&
+                premium.action_adjusted_return_pct.average_pct;
+            const premiumNetAvg = premium.estimated_net_return_pct &&
+                premium.estimated_net_return_pct.average_pct;
+
+            function pct(v) {
+                if (v === null || v === undefined) return '--';
+                const n = Number(v);
+                return (n >= 0 ? '+' : '') + n.toFixed(2) + '%';
+            }
+
+            $('#ledger-spot-return').text(pct(spotAvg))
+                .removeClass('rate-good rate-mid rate-bad')
+                .addClass(
+                    spotAvg === null || spotAvg === undefined
+                        ? ''
+                        : rateClass(spotAvg > 0 ? 100 : 0)
+                );
+            $('#ledger-premium-return').text(pct(premiumAvg));
+            $('#ledger-premium-net').text(pct(premiumNetAvg));
+
+            const coverage = Number(pnl.coverage_rows || 0);
+            const optionRows = Number(d.option_data_available || 0);
+            const missingLot = Number(d.missing_lot_size || 0);
+
+            $('#ledger-pnl-coverage').text(
+                coverage > 0 ? '₹ available' : 'Not ready'
+            );
+
+            $('#ledger-spot-n').text(
+                (d.spot_data_available || 0) + ' matured index observations'
+            );
+            $('#ledger-premium-n').text(
+                optionRows + ' matured option observations'
+            );
+            $('#ledger-premium-net-n').text(
+                'Est. ' +
+                (premium.estimated_round_trip_cost_pct || 2) +
+                '% round-trip cost subtracted'
+            );
+            $('#ledger-pnl-n').text(
+                coverage > 0
+                    ? coverage + ' rows with frozen lot size'
+                    : missingLot + ' rows without frozen historical lot size'
+            );
+
+            $('#ledger-performance').show();
+            $('#ledger-status').hide();
+            window.__ledgerPerformance = d;
+        })
+        .fail(function(xhr) {
+            let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
+                (xhr.status === 0
+                    ? 'Connection lost — server busy/restarting.'
+                    : 'Data unavailable (HTTP ' + xhr.status + ').');
+            $('#ledger-status').addClass('error')
+                .text('⚠️ Ledger performance could not be loaded: ' + detail);
+        });
 }
 
 function renderMoneyness(byStrike) {
