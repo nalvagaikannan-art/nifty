@@ -494,6 +494,26 @@ class AccuracyPremiumResponse(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class AccuracyLedgerPerformanceResponse(BaseModel):
+    symbol: str
+    days: int
+    horizon_minutes: int
+    basis: str
+    ledger_rows: int
+    matured_rows: int
+    pending_rows: int
+    invalid_rows: int
+    spot_data_available: int
+    option_data_available: int
+    full_pnl_ready: int
+    missing_lot_size: int
+    spot_direction: Dict
+    option_premium: Dict
+    pnl: Dict
+    episodes: List[Dict]
+    model_config = {"extra": "allow"}
+
+
 class ConfidenceCalibrationResponse(BaseModel):
     actionable_episodes_total: int
     calibration_basis: str

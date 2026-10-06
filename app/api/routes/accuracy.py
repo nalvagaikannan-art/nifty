@@ -24,10 +24,12 @@ from app.services.signal_accuracy import (
     compute_signal_accuracy, compute_premium_accuracy, calibrate_confidence, HORIZONS_MINUTES,
 )
 from app.services.error_log import record_error, recent_errors
+from app.services.ledger_performance import compute_ledger_performance
 from app.schemas import (
     AccuracyIndicatorsResponse,
     AccuracySignalsResponse,
     AccuracyPremiumResponse,
+    AccuracyLedgerPerformanceResponse,
     ConfidenceCalibrationResponse,
     AccuracyStatusResponse,
 )
@@ -109,6 +111,32 @@ async def premium_accuracy(
         endpoint="premium", sym=sym,
         timeout_detail=f"Premium accuracy for {days} days is taking too long — try a smaller range (7 days).",
         error_detail="Accuracy computation failed",
+    )
+
+
+@router.get("/ledger/{symbol}", response_model=AccuracyLedgerPerformanceResponse)
+async def ledger_performance(
+    symbol: str,
+    days: int = Query(15, ge=1, le=60),
+    horizon_minutes: int = Query(60, description=f"one of {HORIZONS_MINUTES}"),
+):
+    """Read-only DailySignalLedger replay.
+
+    Separates underlying/index-direction returns from selected-option
+    premium returns and reports exact rupee P&L only when the entry ledger
+    snapshot contains the frozen historical lot size.
+    """
+    sym = _check_symbol(symbol)
+    return await _run_with_timeout(
+        compute_ledger_performance(
+            sym,
+            days=days,
+            horizon_minutes=horizon_minutes,
+        ),
+        endpoint="ledger",
+        sym=sym,
+        timeout_detail=f"Ledger performance for {days} days is taking too long ? try a smaller range (7 days).",
+        error_detail="Ledger performance computation failed",
     )
 
 
