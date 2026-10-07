@@ -1266,13 +1266,29 @@ class MarketAnalyzer:
                     "timestamps": out_t,
                 }
 
-            # Use only the latest trading session for 5-minute indicators.
-            # Do not mix the tail of a previous session into today's 5-minute frame.
+            # Use only the latest regular NSE session for 5-minute indicators.
+            # Do not mix the tail of a previous session or pre-open candles
+            # into today's 5-minute frame.
             latest_session_date = rows[-1][0].date()
+            latest_session_start = rows[-1][0].replace(
+                hour=9,
+                minute=15,
+                second=0,
+                microsecond=0,
+            )
+            latest_session_end = rows[-1][0].replace(
+                hour=15,
+                minute=30,
+                second=0,
+                microsecond=0,
+            )
 
             session_rows = [
                 r for r in rows
-                if r[0].date() == latest_session_date
+                if (
+                    r[0].date() == latest_session_date
+                    and latest_session_start <= r[0] < latest_session_end
+                )
             ]
 
             recent_rows = session_rows[-100:]
