@@ -16,6 +16,14 @@ from app.services.signal_accuracy import (
 from app.utils.helpers import now_utc_naive
 
 LEDGER_TOLERANCE_MIN = 10
+EPISODE_GAP_MIN = 10
+
+_ACTION_TO_SIDE = {
+    "CALL_BUY": "CALL",
+    "PUT_SELL": "CALL",
+    "PUT_BUY": "PUT",
+    "CALL_SELL": "PUT",
+}
 
 
 def _event_ts(row) -> Optional[datetime]:
@@ -39,6 +47,56 @@ def _action(action: str) -> str:
         "SELL CE": "CALL_SELL",
         "SELL PE": "PUT_SELL",
     }.get(str(action or "").upper().strip(), str(action or "").upper().replace(" ", "_"))
+
+
+def _episode_side(row) -> Optional[str]:
+    action_side = _ACTION_TO_SIDE.get(_action(row.action))
+    lifecycle = str(row.lifecycle or "").upper().strip()
+
+    if action_side is None:
+        return None
+
+    if not lifecycle.startswith(("CONFIRMED_", "HOLD_")):
+        return None
+
+    if lifecycle.endswith("_CALL"):
+        lifecycle_side = "CALL"
+    elif lifecycle.endswith("_PUT"):
+        lifecycle_side = "PUT"
+    else:
+        return None
+
+    if lifecycle_side != action_side:
+        return None
+
+    return action_side
+
+
+def _independent_episode_rows(rows):
+    episodes = []
+    last_side = None
+    last_ts = None
+
+    for row in rows:
+        ts = _event_ts(row)
+        side = _episode_side(row)
+
+        if ts is None or side is None:
+            continue
+
+        is_new_episode = (
+            last_side != side
+            or last_ts is None
+            or (ts - last_ts).total_seconds() > EPISODE_GAP_MIN * 60
+        )
+
+        if is_new_episode:
+            episodes.append(row)
+
+        last_side = side
+        last_ts = ts
+
+    return episodes
 
 
 def _trade_return(action: str, raw_pct: float) -> float:
@@ -104,6 +162,9 @@ async def compute_ledger_performance(
                 .order_by(DailySignalLedger.timestamp.asc())
             )
         ).scalars().all()
+
+        raw_ledger_rows = len(ledger)
+        ledger = _independent_episode_rows(ledger)
 
         market = (
             await session.execute(
@@ -317,8 +378,13 @@ async def compute_ledger_performance(
         "symbol": symbol,
         "days": days,
         "horizon_minutes": horizon_minutes,
-        "basis": "DailySignalLedger read-only replay; no future snapshot is used.",
-        "ledger_rows": len(ledger),
+        "basis": (
+            "DailySignalLedger read-only replay on independent actionable "
+            "episodes; 10-minute same-side rows are one episode and only "
+            "the first row is graded. No future snapshot is used."
+        ),
+        "ledger_rows": raw_ledger_rows,
+        "actionable_episodes": len(ledger),
         "matured_rows": matured,
         "pending_rows": pending,
         "invalid_rows": invalid,
