@@ -1,4 +1,4 @@
-from app.api.routes.strategy import _score_candidates, _time_filter
+from app.api.routes.strategy import _score_candidates, _time_filter, _v3_entry_gate
 
 
 def _market_data(bull, bear, margin, preferred="NONE", confidence=40):
@@ -282,3 +282,40 @@ def test_strategy_route_persists_symbol_in_lifecycle_state(monkeypatch):
     result = asyncio.run(strategy.strike_recommendation(symbol="SENSEX", analyzer=FakeAnalyzer(), ai=object()))
     assert result["symbol"] == "SENSEX"
     assert saved["symbol"] == "SENSEX"
+
+
+
+def test_v3_gate_blocks_weak_confirmed_sell_entry():
+    result = _v3_entry_gate(
+        dec={"signal_strength": 34, "confidence": 34},
+        confluence={
+            "direction": "BULLISH",
+            "confluence_score": 19,
+            "agreement_count": 5,
+        },
+        expiry_info={"days_left": 99},
+        market_data={"technicals": {"adx": 18.9}},
+        lifecycle_state="CONFIRMED_CALL",
+        lifecycle_active="CALL",
+    )
+
+    assert result["allowed"] is False
+    assert "Signal strength 34" in result["reason"]
+
+
+def test_v3_gate_preserves_existing_hold_sell_state():
+    result = _v3_entry_gate(
+        dec={"signal_strength": 34, "confidence": 34},
+        confluence={
+            "direction": "BULLISH",
+            "confluence_score": 19,
+            "agreement_count": 5,
+        },
+        expiry_info={"days_left": 99},
+        market_data={"technicals": {"adx": 18.9}},
+        lifecycle_state="HOLD_CALL",
+        lifecycle_active="CALL",
+    )
+
+    assert result["allowed"] is True
+    assert "HOLD" in result["reason"]

@@ -917,7 +917,7 @@ async def resolve_final_strategy_action(
     )
 
     if (
-        best in ("BUY CE", "BUY PE")
+        best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
         and not v3_gate["allowed"]
         and not lifecycle_state.startswith("HOLD_")
     ):
@@ -1063,7 +1063,7 @@ async def strike_recommendation(
         dec, confluence, expiry_info, market_data,
         lifecycle_state, lifecycle_active,
     )
-    if best in ("BUY CE", "BUY PE") and not v3_gate["allowed"] and not lifecycle_state.startswith("HOLD_"):
+    if best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE") and not v3_gate["allowed"] and not lifecycle_state.startswith("HOLD_"):
         best = "WAIT"
         best_score = candidates.get("WAIT", 0)
 
