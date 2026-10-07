@@ -2507,7 +2507,61 @@ ltPosRender(null);
     ltRefresh();
   }, 15000);
 
-// ── Initial load ──
+// DASHBOARD_FAST_SPOT_WS_20261007
+// Display-only fast market-price path.
+// Does NOT trigger Strategy / AI / MTF / option-chain analysis.
+var ltFastSpotInterval = null;
+var ltFastSpotSeq = 0;
+
+function ltFastSpotRefresh(){
+  var seq = ++ltFastSpotSeq;
+
+  fetch('/api/angel/live-feed?cache_bust=' + Date.now(), {
+    cache: 'no-store'
+  })
+  .then(function(r){
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  })
+  .then(function(data){
+    if(seq !== ltFastSpotSeq) return;
+
+    var ws = (data && data.websocket) || {};
+    var ticks = (data && data.ticks) || {};
+    var sym = String(ltSym || '').toUpperCase();
+    var tick = ticks[sym];
+
+    if(!tick || tick.ltp == null || !isFinite(Number(tick.ltp))) return;
+
+    var ageMap = ws.exchange_age_sec || {};
+    var age = Number(ageMap[sym]);
+
+    // Exchange timestamp is the freshness authority.
+    if(!isFinite(age) || age > 3) return;
+
+    var price = Number(tick.ltp);
+    var priceText = fmtN(price, 2);
+
+    setEl('lt-price', priceText);
+    setEl('hd-spot', priceText);
+    setEl('lt-spot-sr', priceText);
+
+    var badge = document.getElementById('lt-mkt-badge');
+    if(badge){
+      var isOpen = ws.market_open !== false;
+      badge.className = 'lt-mkt-badge ' + (isOpen ? 'open' : 'closed');
+      badge.textContent = isOpen ? '? LIVE' : '? CLOSED';
+    }
+  })
+  .catch(function(){
+    // Keep existing strategy snapshot visible if fast price fetch fails.
+  });
+}
+
+ltFastSpotRefresh();
+ltFastSpotInterval = setInterval(ltFastSpotRefresh, 1000);
+
+// ?? Initial load ??
 ltRefresh();
 </script>
 
