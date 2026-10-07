@@ -51,6 +51,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 logger.warning(f"Redis client init failed ({e}) — rate limiting falls back to in-memory.")
 
     async def dispatch(self, request: Request, call_next):
+        # DASHBOARD_FAST_SPOT_RATE_LIMIT_EXEMPT_20261007
+        # /api/angel/live-feed only returns the already-buffered in-memory
+        # WebSocket snapshot. It performs no broker/NSE/AI call, so it should
+        # not consume the general /api rate-limit budget used to protect
+        # expensive upstream operations.
+        if request.url.path == "/api/angel/live-feed":
+            return await call_next(request)
+
         if not request.url.path.startswith(self.applies_to_prefix):
             return await call_next(request)
 

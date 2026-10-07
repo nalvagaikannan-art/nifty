@@ -1427,9 +1427,10 @@ function ltRefreshAllSignals(forceRefresh){
       });
   });
 
-  Promise.all(requests).then(function(results){
-    if(seq !== ltAllSignalSeq) return;
+  return Promise.all(requests).then(function(results){
+    if(seq !== ltAllSignalSeq) return results;
     ltRenderAllSignalBoard(results);
+    return results;
   });
 }
 
@@ -1611,11 +1612,9 @@ function ltRefresh(forceRefresh){
   // Strategy + AI receive the same token.
   var refreshToken = forceRefresh ? String(Date.now()) : '';
 
-  var strategyUrl = '/api/strategy/recommend/' + ltSym;
   var aiUrl = '/api/analysis/ai/' + ltSym;
 
   if(refreshToken){
-    strategyUrl += '?cache_bust=' + encodeURIComponent(refreshToken);
     aiUrl += '?cache_bust=' + encodeURIComponent(refreshToken);
   }
 
@@ -1624,7 +1623,7 @@ function ltRefresh(forceRefresh){
   btn.classList.add('spinning');
 
   ltUpdateStatus();
-  ltRefreshAllSignals(forceRefresh);
+  var allSignalsPromise = ltRefreshAllSignals(forceRefresh);
 
   var done ={
     strategy: false,
@@ -1649,11 +1648,29 @@ function ltRefresh(forceRefresh){
     }
   }
 
-  // Fetch strategy (primary — has strikes, levels, regime, confluence)
-  ltFetchJsonRetry(strategyUrl)
-    .then(function(d){
+  // Strategy data is already fetched by ltRefreshAllSignals().
+  // Reuse the selected symbol result instead of making a 5th request.
+  allSignalsPromise
+    .then(function(results){
       if(refreshSeq !== ltRefreshSeq || refreshSym !== ltSym) return;
 
+      var selected = null;
+      results.forEach(function(item){
+        if(item && String(item.symbol || '').toUpperCase() ===
+           String(ltSym || '').toUpperCase()){
+          selected = item;
+        }
+      });
+
+      if(!selected || selected.error || !selected.data){
+        throw new Error(
+          selected && selected.error
+            ? selected.error
+            : 'Selected strategy data unavailable'
+        );
+      }
+
+      var d = selected.data;
       ltLastData = d;
       ltRenderSignal(d);
       ltRenderMetrics(d);
@@ -1669,7 +1686,7 @@ function ltRefresh(forceRefresh){
     })
     .catch(function(e){
       if(refreshSeq !== ltRefreshSeq) return;
-      ltShowWarn('red', '⚠ Strategy data fetch failed: ' + e.message);
+      ltShowWarn('red', '? Strategy data fetch failed: ' + e.message);
     })
     .finally(function(){
       done.strategy = true;
@@ -2561,7 +2578,7 @@ function ltFastSpotRefresh(){
 ltFastSpotRefresh();
 ltFastSpotInterval = setInterval(ltFastSpotRefresh, 1000);
 
-// ?? Initial load ??
+// Initial load
 ltRefresh();
 </script>
 
