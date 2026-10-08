@@ -1142,6 +1142,39 @@ class MarketAnalyzer:
                     ws_merge_exc,
                 )
 
+            # LIVE_COMPLETED_5M_FILTER_20261008
+            # Angel REST may include the currently-forming 5-minute candle.
+            # Only live broker/replay-fallback rows are filtered here.
+            # Closed-market replay is preserved exactly as supplied.
+            if persisted_rows is None and rows:
+                now_ist = current_ist()
+                current_bucket_start = now_ist.replace(
+                    minute=(now_ist.minute // 5) * 5,
+                    second=0,
+                    microsecond=0,
+                )
+
+                before_count = len(rows)
+                rows = [
+                    row
+                    for row in rows
+                    if row[0] < current_bucket_start
+                ]
+
+                filtered_count = before_count - len(rows)
+
+                if filtered_count:
+                    logger.info(
+                        "MTF 5M CURRENT BUCKET FILTER: %s "
+                        "removed=%d current/future rows bucket=%s",
+                        symbol,
+                        filtered_count,
+                        current_bucket_start.isoformat(),
+                    )
+
+                if not rows:
+                    return unavailable
+
             # Persist the completed real 5-minute stream only in live mode.
             # Closed-market replay must never write synthetic/stale data back.
             # DB_MTF_LINEAGE_FIX_20260930
