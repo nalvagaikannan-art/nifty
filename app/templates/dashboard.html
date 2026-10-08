@@ -1972,7 +1972,7 @@ function ltRenderMetrics(d){
   if(!ltLastAI){ document.getElementById('m-iv').textContent = '--'; }
 
   // Market open badge + spot
-  setEl('lt-price', d.spot ? fmtN(d.spot, 2) : '--');
+  // LIVE_PRICE_OWNER_20261008: lt-price is updated only by the 1s Angel WS fast path.
   var mktOpen = d.market_open !== false;
   var mktBadge = document.getElementById('lt-mkt-badge');
   mktBadge.className = 'lt-mkt-badge ' + (mktOpen ? 'open' : 'closed');
