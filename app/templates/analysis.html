@@ -1402,6 +1402,42 @@ function renderDataQuality(dq){
       loadAll(curSym,false,curExpiry);
     },15000);
 
+  // ANALYSIS_FAST_SPOT_WS_20261008
+  // Display-only live spot path. It does not trigger analysis/strategy calls.
+  function analysisFastSpotRefresh(){
+    fetch('/api/angel/live-feed?cache_bust=' + Date.now(), {
+      cache: 'no-store'
+    })
+    .then(function(r){
+      if(!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function(data){
+      var ws = (data && data.websocket) || {};
+      var ticks = (data && data.ticks) || {};
+      var sym = String(curSym || '').toUpperCase();
+      var tick = ticks[sym];
+
+      if(!tick || tick.ltp == null || !isFinite(Number(tick.ltp))) return;
+
+      var ageMap = ws.exchange_age_sec || {};
+      var age = Number(ageMap[sym]);
+
+      // Exchange timestamp is the freshness authority.
+      if(!isFinite(age) || age > 3) return;
+
+      $('#v2-symbol-spot').text(
+        sym + ' · ' + fmtN(Number(tick.ltp), 2)
+      );
+    })
+    .catch(function(){
+      // Keep the last analysis snapshot visible if the fast tick fetch fails.
+    });
+  }
+
+  analysisFastSpotRefresh();
+  var analysisFastSpotTimer = setInterval(analysisFastSpotRefresh, 1000);
+
   // Start initial analysis after timers are registered.
   setTimeout(function(){
     loadAll(curSym);
