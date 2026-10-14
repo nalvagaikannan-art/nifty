@@ -32,6 +32,58 @@ _MARKET_CONTEXT_TTL = 120
 _market_context_refresh_tasks: dict[str, asyncio.Task] = {}
 
 
+# POSITIONS_API_SHORT_CACHE:
+# Share fresh broker snapshots between dashboard tabs and concurrent requests.
+# The short TTL bounds staleness; failed broker responses are never cached.
+_POSITIONS_CACHE_TTL_SECONDS = 5.0
+_positions_cache: tuple[float, list[dict]] | None = None
+_positions_refresh_task: asyncio.Task | None = None
+
+
+async def _refresh_positions_snapshot(angel: AngelOneSession) -> list[dict]:
+    """Fetch one live broker snapshot and cache it only after success."""
+    global _positions_cache
+
+    raw_positions = await angel.get_positions()
+    snapshot = [dict(pos) for pos in (raw_positions or [])]
+    _positions_cache = (time.monotonic(), snapshot)
+    logger.info("POSITIONS_CACHE_REFRESH_OK count=%d", len(snapshot))
+    return snapshot
+
+
+async def _get_positions_snapshot(angel: AngelOneSession) -> list[dict]:
+    """Return a short-lived snapshot or join the current broker refresh."""
+    global _positions_refresh_task
+
+    now = time.monotonic()
+    cached = _positions_cache
+    if cached is not None:
+        age = max(0.0, now - cached[0])
+        if age < _POSITIONS_CACHE_TTL_SECONDS:
+            logger.info("POSITIONS_CACHE_HIT age=%.2fs", age)
+            return [dict(pos) for pos in cached[1]]
+
+    task = _positions_refresh_task
+    if task is None or task.done():
+        task = asyncio.create_task(_refresh_positions_snapshot(angel))
+        _positions_refresh_task = task
+
+        def _clear_positions_refresh(done_task: asyncio.Task) -> None:
+            global _positions_refresh_task
+            if _positions_refresh_task is done_task:
+                _positions_refresh_task = None
+
+        task.add_done_callback(_clear_positions_refresh)
+        logger.info("POSITIONS_CACHE_REFRESH_START")
+    else:
+        logger.info("POSITIONS_CACHE_REFRESH_JOIN")
+
+    # A disconnected/cancelled HTTP request must not cancel a fetch shared
+    # by other callers.
+    snapshot = await asyncio.shield(task)
+    return [dict(pos) for pos in snapshot]
+
+
 async def _refresh_market_context(analyzer: MarketAnalyzer, root: str) -> dict:
     """Fetch and cache market context without blocking the positions response."""
     try:
@@ -255,7 +307,7 @@ async def get_positions(
     analyzer: MarketAnalyzer = Depends(get_analyzer),
 ):
     try:
-        raw_positions = await angel.get_positions()
+        raw_positions = await _get_positions_snapshot(angel)
     except AngelOneError as e:
         logger.error(f"get_positions failed: {e}")
         raise HTTPException(502, detail=f"Positions fetch failed: {e}")
