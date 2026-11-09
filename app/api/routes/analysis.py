@@ -32,8 +32,8 @@ def _overlay_persisted_lifecycle(decision: dict, persisted_state: dict | None) -
         or "NONE"
     ).upper()
 
-    hard_gated = bool(decision.get("hard_gated", False)) or not bool(
-        decision.get("market_open", True)
+    hard_gated = bool(decision.get("hard_gated", False)) or (
+        decision.get("market_open") is not True
     )
 
     # Current safety gate always wins over an old persisted signal.
@@ -126,7 +126,9 @@ def _pick_recommended_option(market_data: dict, dec: dict, action: str = "") -> 
     if not chain.get("data") or spot <= 0:
         return {"available": False, "reason": "Option chain unavailable"}
 
-    from app.api.routes.strategy import _pick_strikes  # local import — see module docstring on _pick_recommended_option
+    from app.api.routes.strategy import _pick_strikes  # shared contract selector
+    from app.utils.helpers import intraday_hold_days_to_close
+
     atr = safe_float((market_data.get("technicals") or {}).get("atr", 0))
     picks = _pick_strikes(
         chain,
@@ -134,6 +136,9 @@ def _pick_recommended_option(market_data: dict, dec: dict, action: str = "") -> 
         spot=spot,
         atr=atr,
         action=option_action,
+        assumed_hold_days=intraday_hold_days_to_close(
+            market_data.get("timestamp")
+        ),
     )
     if not picks:
         return {"available": False, "reason": "No liquid strike found near ATM"}
@@ -144,6 +149,7 @@ def _pick_recommended_option(market_data: dict, dec: dict, action: str = "") -> 
     chosen = picks[0]
     return {
         "available":    True,
+        "symbol":       chosen.get("symbol"),
         "strike":       chosen["strike"],
         "type":         chosen["type"],
         "expiry":       chosen["expiry"],
@@ -180,7 +186,237 @@ def _pick_recommended_option(market_data: dict, dec: dict, action: str = "") -> 
         "theta_pct_of_entry": chosen.get("theta_pct_of_entry"),
         "vega":         chosen.get("vega"),
         "spread_pct":   chosen.get("spread_pct"),
+        "oi":           chosen.get("oi"),
+        "volume":       chosen.get("volume"),
+        "price_source": chosen.get("price_source"),
+        "live_ws":      chosen.get("live_ws", False),
+        "live_ws_source": chosen.get("live_ws_source"),
         "liquidity_note": chosen.get("note"),
+    }
+
+
+
+async def _apply_entry_risk_authority(result: dict, market_data: dict) -> dict:
+    """Apply the same V2 risk authority used by the Strategy route.
+
+    The resolver supplies a candidate, not risk approval. Only a validated
+    BUY CE/BUY PE assessment can authorize a fresh Analysis entry.
+    """
+    from app.services.entry_risk_authority import (
+        build_entry_risk_authority,
+        is_entry_risk_approved,
+    )
+    from app.services.entry_risk_service import assess_entry_risk_authority
+
+    action = str(
+        result.get("signal_action") or result.get("best_strategy") or "WAIT"
+    ).strip().upper()
+    lifecycle = str(result.get("signal_lifecycle") or "WAIT").strip().upper()
+
+    gate = result.get("entry_gate") or result.get("v3_gate") or {}
+    gate = dict(gate) if isinstance(gate, dict) else {}
+
+    regime = result.get("market_regime")
+    regime_blocked = bool(result.get("market_regime_no_trade")) or bool(
+        isinstance(regime, dict)
+        and (
+            regime.get("hard_no_trade") is True
+            or regime.get("no_trade") is True
+        )
+    )
+
+    candidate_is_fresh = (
+        action in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
+        and lifecycle in ("CONFIRMED_CALL", "CONFIRMED_PUT")
+        and result.get("fresh_entry_allowed") is True
+        and gate.get("allowed") is True
+        and gate.get("fresh_entry_allowed") is True
+        and not bool(result.get("hard_gated", False))
+        and not regime_blocked
+    )
+
+    risk_assessment = None
+    trade_levels = None
+
+    if not candidate_is_fresh:
+        authority = build_entry_risk_authority(action=action)
+        risk_approved = False
+    else:
+        selected = result.get("recommended_option")
+        selected_contract = (
+            dict(selected)
+            if isinstance(selected, dict) and selected.get("available") is True
+            else None
+        )
+
+        try:
+            if action in ("BUY CE", "BUY PE") and selected_contract:
+                from app.services.contract_specs import resolve_lot_size
+                from app.services.trade_levels import calculate_trade_levels
+                from app.utils.helpers import intraday_hold_days_to_close
+
+                spot_data = market_data.get("spot")
+                spot_data = spot_data if isinstance(spot_data, dict) else {}
+                spot = safe_float(spot_data.get("price"))
+
+                chain = market_data.get("option_chain")
+                chain = chain if isinstance(chain, dict) else {}
+
+                lot_size = resolve_lot_size(
+                    result.get("symbol") or market_data.get("symbol"),
+                    chain,
+                )
+
+                trade_levels = calculate_trade_levels(
+                    market_data,
+                    "bullish" if action == "BUY CE" else "bearish",
+                    spot,
+                    safe_float(selected_contract.get("entry_price")),
+                    lot_size=lot_size,
+                    delta=selected_contract.get("delta"),
+                    theta_per_day=selected_contract.get("theta_per_day"),
+                    assumed_hold_days=intraday_hold_days_to_close(
+                        market_data.get("timestamp")
+                    ),
+                    regime=(
+                        regime.get("regime", "UNKNOWN")
+                        if isinstance(regime, dict)
+                        else str(regime or "UNKNOWN")
+                    ),
+                )
+
+                selected_contract.update({
+                    "entry_price": trade_levels.get("option_entry"),
+                    "sl": trade_levels.get("option_sl"),
+                    "expiry": (
+                        selected_contract.get("expiry")
+                        or chain.get("expiry")
+                    ),
+                })
+            else:
+                lot_size = None
+
+            assessment = await assess_entry_risk_authority(
+                action=action,
+                symbol=result.get("symbol") or market_data.get("symbol") or "",
+                market_data=market_data,
+                confluence=result.get("confluence") or {},
+                regime=regime if isinstance(regime, dict) else {},
+                signal_strength=result.get(
+                    "signal_strength", result.get("confidence", 0)
+                ),
+                selected_contract=selected_contract,
+                trade_levels=trade_levels,
+                lot_size=lot_size,
+            )
+
+            risk_assessment = assessment.get("risk_assessment")
+            authority = assessment.get("entry_risk_authority")
+            risk_approved = (
+                assessment.get("risk_approved") is True
+                and is_entry_risk_approved(authority)
+                and authority.get("action") == action
+            )
+        except Exception as exc:
+            logger.warning(
+                "Analysis entry risk assessment failed for %s: %s",
+                result.get("symbol"),
+                exc,
+            )
+            authority = build_entry_risk_authority(
+                action=action,
+                assessment_error=exc,
+                selected_contract=selected_contract,
+                trade_levels=trade_levels,
+                lot_size=lot_size if "lot_size" in locals() else None,
+            )
+            risk_approved = False
+
+    result["metadata_version"] = 2
+    result["entry_risk_authority"] = authority
+    result["fresh_entry_allowed"] = bool(risk_approved)
+    result["v2_risk"] = risk_assessment if risk_approved else None
+    result["v2_trade_levels"] = trade_levels if risk_approved else None
+
+    gate["entry_risk_authority"] = authority
+    gate["risk_allowed"] = bool(risk_approved)
+    gate["fresh_entry_allowed"] = bool(risk_approved)
+    result["v3_gate"] = gate
+    result["entry_gate"] = gate
+
+    if risk_approved and isinstance(selected_contract, dict):
+        selected_contract["entry_price"] = trade_levels.get("option_entry")
+        selected_contract["sl"] = trade_levels.get("option_sl")
+        selected_contract["t1"] = trade_levels.get("option_t1")
+        selected_contract["t2"] = trade_levels.get("option_t2")
+        selected_contract["t3"] = trade_levels.get("option_t3")
+        result["recommended_option"] = selected_contract
+    elif lifecycle in ("CONFIRMED_CALL", "CONFIRMED_PUT") and action in (
+        "BUY CE", "BUY PE", "SELL CE", "SELL PE"
+    ):
+        result["signal_action"] = "WAIT"
+
+    return result
+
+
+def _metric_quality_fields(market_data: dict) -> dict:
+    """Consistent, additive quality metadata for the analysis API."""
+    md = market_data if isinstance(market_data, dict) else {}
+    chain = md.get("option_chain") or {}
+    chain_valid = bool(
+        md.get("option_chain_valid", bool(chain.get("data")))
+    )
+
+    try:
+        vix = float(md.get("vix") or 0)
+    except (TypeError, ValueError):
+        vix = 0.0
+
+    vix_quality = md.get("vix_quality")
+    if isinstance(vix_quality, dict):
+        vix_quality = dict(vix_quality)
+    else:
+        vix_quality = {
+            "available": vix > 0,
+            "source": "legacy_unverified" if vix > 0 else "unavailable",
+            "fetched_at": None,
+            "observed_at": None,
+            "reason": (
+                "Provider metadata unavailable" if vix > 0
+                else "VIX unavailable"
+            ),
+        }
+    vix_quality["available"] = bool(
+        vix_quality.get("available") and vix > 0
+    )
+
+    try:
+        pcr = float(md.get("pcr") or 0)
+    except (TypeError, ValueError):
+        pcr = 0.0
+
+    pcr_quality = md.get("pcr_quality")
+    if isinstance(pcr_quality, dict):
+        pcr_quality = dict(pcr_quality)
+    else:
+        pcr_quality = {
+            "available": chain_valid and pcr > 0,
+            "source": str(chain.get("data_source") or "unknown"),
+            "fetched_at": None,
+            "observed_at": None,
+            "reason": (
+                None if chain_valid and pcr > 0
+                else "Option-chain/PCR evidence unavailable"
+            ),
+        }
+    pcr_quality["available"] = bool(
+        pcr_quality.get("available") and chain_valid and pcr > 0
+    )
+
+    return {
+        "vix_quality": vix_quality,
+        "pcr_quality": pcr_quality,
+        "option_chain_valid": chain_valid,
     }
 
 
@@ -190,6 +426,10 @@ async def build_ai_analysis(
     ai: AIEngine,
     expiry: str = None,
     cache_bust: str = "",
+    market_data_override: dict = None,
+    ai_result_override: dict = None,
+    persisted_state_override: dict = None,
+    ai_unavailable: bool = False,
 ) -> dict:
     """Builds the exact same result shape /api/analysis/ai/{symbol} returns —
     factored out so both the HTTP route AND the background history collector
@@ -199,27 +439,26 @@ async def build_ai_analysis(
     only got written when a human happened to have the Analysis page open —
     the background collector calls this function on its own schedule so
     history keeps accumulating even with zero browser tabs open."""
-    try:
-        market_data = await analyzer.get_full_market_overview(
-            symbol,
-            expiry=expiry,
-            cache_bust=cache_bust,
-        )
-    except MarketDataError as e:
-        raise HTTPException(502, detail=f"Market data unavailable: {e}")
+    if market_data_override is not None:
+        market_data = market_data_override
+    else:
+        try:
+            market_data = await analyzer.get_full_market_overview(
+                symbol,
+                expiry=expiry,
+                cache_bust=cache_bust,
+            )
+        except MarketDataError as e:
+            raise HTTPException(502, detail=f"Market data unavailable: {e}")
 
     try:
-        # Shared with /api/strategy/recommend — see app/utils/ai_result_cache.py.
-        # Both routes requesting the same symbol's AI explanation within the
-        # cache window now reuse one LLM call instead of firing two.
-        # Use the RESOLVED expiry (not the raw, often-omitted request param)
-        # as the cache key so this matches /api/strategy/recommend's key for
-        # the common "no expiry specified -> nearest expiry" case — otherwise
-        # the two routes would compute different cache keys and never
-        # actually share the LLM call.
-        resolved_expiry = market_data.get("option_chain", {}).get("expiry", "")
-        result = await get_ai_analysis(ai, symbol, resolved_expiry, market_data)
-
+        if ai_unavailable:
+            raise AIProviderError("AI result unavailable; use rule-engine fallback")
+        if ai_result_override is not None:
+            result = dict(ai_result_override)
+        else:
+            resolved_expiry = market_data.get("option_chain", {}).get("expiry", "")
+            result = await get_ai_analysis(ai, symbol, resolved_expiry, market_data)
     except AIProviderError as e:
         # AI fail ஆனாலும் rule-engine result return செய் — analysis only,
         # no buy/sell instruction anywhere in this fallback either.
@@ -252,6 +491,7 @@ async def build_ai_analysis(
             "resistance":          market_data.get("support_resistance", {}).get("resistance", []),
             "risk":                dec.get("risk", "Medium"),
             "vix":                 market_data.get("vix", 0),
+            **_metric_quality_fields(market_data),
             "pcr":                 market_data.get("pcr", 0),
             "bull_score":          dec.get("bull_score", 0),
             "bear_score":          dec.get("bear_score", 0),
@@ -324,8 +564,13 @@ async def build_ai_analysis(
     result["timeframe_trend"] = real_tf
     # Single source of truth: Strategy and Analysis use the same final
     # machine action after scoring, lifecycle, confluence, regime and gates.
-    persisted_state = await load_signal_state(symbol.upper())
-    dec = _overlay_persisted_lifecycle(dec, persisted_state)
+    if persisted_state_override is None:
+        persisted_state = await load_signal_state(symbol.upper())
+        dec = _overlay_persisted_lifecycle(dec, persisted_state)
+    else:
+        # Reuse lifecycle state already applied by the Strategy request.
+        persisted_state = persisted_state_override
+        dec = market_data.get("decision", dec)
     market_data["decision"] = dec
 
     # HISTORY_LIFECYCLE_PERSIST_FIX_20261002
@@ -362,6 +607,11 @@ async def build_ai_analysis(
     result["confluence"] = final_action.get("confluence", {})
     # V3_GATE_HISTORY_PERSIST_20260923
     result["v3_gate"] = final_action.get("v3_gate", {})
+    result["fresh_entry_allowed"] = (
+        final_action.get("fresh_entry_allowed") is True
+    )
+    if isinstance(final_action.get("regime"), dict):
+        result["market_regime"] = final_action["regime"]
 
     result["multi_timeframe"] = multi_tf
 
@@ -395,11 +645,14 @@ async def build_ai_analysis(
     result["volatility_label"]       = dec.get("volatility_label", "")
     result["oi_change_tracked"]      = market_data.get("oi_change_tracked", {"available": False})
     result["support_resistance"]     = market_data.get("support_resistance", {})
-    result["market_open"]            = market_data.get("market_open", True)
+    result["market_open"]            = market_data.get("market_open") is True
     result["expiry_risk"]            = market_data.get("expiry_risk", {})
     # Review #1: the actual option-premium tracking target for this signal
     # — see _pick_recommended_option docstring.
-    result["recommended_option"] = _pick_recommended_option(market_data, dec, result.get("signal_action", ""))
+    result["recommended_option"] = _pick_recommended_option(
+        market_data, dec, result.get("signal_action", "")
+    )
+    result = await _apply_entry_risk_authority(result, market_data)
 
     # Review #4/#45/#46:
     # "Signal Strength 85% ≠ 85% win probability."
@@ -481,6 +734,7 @@ async def build_ai_analysis(
     # not be used as the market-snapshot identity.
     result["market_snapshot_timestamp"] = market_data.get("timestamp")
     result["symbol"] = symbol
+    result.update(_metric_quality_fields(market_data))
     result["data_quality"] = {
         "futures_premium": market_data.get("futures_premium_status", "unavailable"),
         "global_market":   market_data.get("global_status", "unavailable"),
@@ -500,6 +754,87 @@ async def build_ai_analysis(
     # save_analysis_result(); its 5-minute throttle prevents duplicate rows.
     # history_collector.py remains responsible for scheduled collection
     # outside market hours.
+    return _finalize_ai_analysis_result(result)
+
+
+def _finalize_ai_analysis_result(result: dict) -> dict:
+    """Expose directional contract details only for a fresh authorized entry."""
+    lifecycle = str(
+        result.get("signal_lifecycle", "WAIT") or "WAIT"
+    ).upper()
+    action = str(
+        result.get("signal_action", result.get("action", "WAIT")) or "WAIT"
+    ).strip().upper()
+
+    gate = result.get("entry_gate") or result.get("v3_gate") or {}
+    if not isinstance(gate, dict):
+        gate = {}
+
+    regime = result.get("market_regime")
+    regime_blocked = bool(result.get("market_regime_no_trade")) or bool(
+        isinstance(regime, dict)
+        and (
+            regime.get("hard_no_trade", False)
+            or regime.get("no_trade", False)
+        )
+    )
+
+    from app.services.entry_risk_authority import is_entry_risk_approved
+
+    authority = result.get("entry_risk_authority")
+    risk_authorized = (
+        action in ("BUY CE", "BUY PE")
+        and result.get("fresh_entry_allowed") is True
+        and is_entry_risk_approved(authority)
+        and authority.get("action") == action
+    )
+
+    fresh_entry_allowed = (
+        risk_authorized
+        and lifecycle in ("CONFIRMED_CALL", "CONFIRMED_PUT")
+        and gate.get("allowed") is True
+        and gate.get("fresh_entry_allowed") is True
+        and not bool(result.get("hard_gated", False))
+        and not regime_blocked
+    )
+    result["fresh_entry_allowed"] = bool(fresh_entry_allowed)
+
+    # Preserve only the explicitly supported neutral Iron Condor context.
+    # It is not a directional CALL/PUT entry recommendation.
+    detail = result.get("strategy_detail")
+    detail_name = ""
+    if isinstance(detail, dict):
+        detail_name = str(
+            detail.get("name") or detail.get("strategy") or ""
+        ).strip().casefold()
+
+    regime_name = ""
+    if isinstance(regime, dict):
+        regime_name = str(
+            regime.get("regime") or regime.get("name") or ""
+        ).strip().upper()
+    elif regime is not None:
+        regime_name = str(regime).strip().upper()
+
+    preserve_neutral_combo = (
+        action == "WAIT"
+        and (
+            lifecycle == "WAIT"
+            or lifecycle.startswith("WATCH_")
+        )
+        and detail_name == "iron condor"
+        and regime_name in ("RANGE", "LOW_VOLATILITY")
+        and not regime_blocked
+        and not bool(result.get("hard_gated", False))
+    )
+
+    if not fresh_entry_allowed:
+        result["recommended_option"] = None
+        result["recommended_strike"] = "NONE"
+        result["price_levels"] = None
+        if not preserve_neutral_combo:
+            result["strategy_detail"] = None
+
     return result
 
 
@@ -582,6 +917,9 @@ async def rule_decision(symbol: str, analyzer: MarketAnalyzer = Depends(get_anal
             "pcr":                  data.get("pcr", 0),
             "max_pain":             data.get("max_pain", 0),
             "vix":                  data.get("vix", 0),
+            "pcr_quality":          data.get("pcr_quality", {}),
+            "vix_quality":          data.get("vix_quality", {}),
+            "option_chain_valid":   data.get("option_chain_valid", False),
             "rsi":                  data.get("rsi", 50),
             "macd":                 data.get("macd", {}),
             "technicals":           data.get("technicals", {}),
@@ -591,7 +929,7 @@ async def rule_decision(symbol: str, analyzer: MarketAnalyzer = Depends(get_anal
             "support_resistance":   data.get("support_resistance", {}),
             "tamil_indicators":     data.get("tamil_indicators", []),
             "option_volume":        data.get("option_volume", {}),
-            "market_open":          data.get("market_open", True),
+            "market_open":          data.get("market_open") is True,
             "expiry_risk":          data.get("expiry_risk", {}),
             "data_quality": {
                 "futures_premium": data.get("futures_premium_status", "unavailable"),

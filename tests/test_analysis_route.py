@@ -139,3 +139,330 @@ def test_ai_analysis_does_not_mix_final_action_with_newer_wait_lifecycle(monkeyp
         "Analysis HTTP route must use the same lifecycle snapshot as "
         "build_ai_analysis(); a second DB read can reintroduce action/lifecycle races."
     )
+
+
+def _approved_analysis_authority(action="BUY CE"):
+    from app.services.entry_risk_authority import build_entry_risk_authority
+
+    lot_size = 65
+    entry = 100.0
+    stop = 80.0
+    risk_per_lot = (entry - stop) * lot_size
+    return build_entry_risk_authority(
+        action=action,
+        risk_assessment={
+            "allowed": True,
+            "lots": 1,
+            "quantity": lot_size,
+            "max_loss": risk_per_lot,
+            "max_risk_amount": risk_per_lot,
+            "risk_per_lot": risk_per_lot,
+            "no_trade_reasons": [],
+            "reasons": ["Controlled test approval"],
+            "warnings": [],
+        },
+        selected_contract={
+            "symbol": "NIFTY",
+            "strike": 25000,
+            "type": action.split()[1],
+            "expiry": "15DEC2026",
+            "entry_price": entry,
+            "sl": stop,
+        },
+        trade_levels={
+            "option_entry": entry,
+            "option_sl": stop,
+            "option_rr_ratio": 2.0,
+        },
+        lot_size=lot_size,
+    )
+
+
+def test_analysis_finalizer_rejects_missing_risk_authority():
+    from app.api.routes.analysis import _finalize_ai_analysis_result
+
+    result = {
+        "signal_action": "BUY CE",
+        "best_strategy": "BUY CE",
+        "signal_lifecycle": "CONFIRMED_CALL",
+        "fresh_entry_allowed": True,
+        "hard_gated": False,
+        "market_regime": {"regime": "TREND_UP", "no_trade": False},
+        "v3_gate": {"allowed": True, "fresh_entry_allowed": True},
+        "recommended_option": {"available": True, "strike": 25000},
+        "recommended_strike": "ATM",
+        "price_levels": {"entry": 100},
+        "strategy_detail": {"name": "Directional Call"},
+    }
+
+    result = _finalize_ai_analysis_result(result)
+
+    assert result["fresh_entry_allowed"] is False
+    assert result["recommended_option"] is None
+    assert result["recommended_strike"] == "NONE"
+    assert result["price_levels"] is None
+    assert result["strategy_detail"] is None
+
+
+def test_analysis_finalizer_accepts_only_matching_approved_buy_authority():
+    from app.api.routes.analysis import _finalize_ai_analysis_result
+
+    result = {
+        "signal_action": "BUY CE",
+        "best_strategy": "BUY CE",
+        "signal_lifecycle": "CONFIRMED_CALL",
+        "fresh_entry_allowed": True,
+        "hard_gated": False,
+        "market_regime": {"regime": "TREND_UP", "no_trade": False},
+        "v3_gate": {"allowed": True, "fresh_entry_allowed": True},
+        "entry_risk_authority": _approved_analysis_authority("BUY CE"),
+        "recommended_option": {"available": True, "strike": 25000},
+    }
+
+    result = _finalize_ai_analysis_result(result)
+
+    assert result["fresh_entry_allowed"] is True
+    assert result["recommended_option"]["strike"] == 25000
+
+
+def test_analysis_finalizer_rejects_authority_action_mismatch():
+    from app.api.routes.analysis import _finalize_ai_analysis_result
+
+    result = {
+        "signal_action": "BUY PE",
+        "best_strategy": "BUY PE",
+        "signal_lifecycle": "CONFIRMED_PUT",
+        "fresh_entry_allowed": True,
+        "hard_gated": False,
+        "market_regime": {"regime": "TREND_DOWN", "no_trade": False},
+        "v3_gate": {"allowed": True, "fresh_entry_allowed": True},
+        "entry_risk_authority": _approved_analysis_authority("BUY CE"),
+        "recommended_option": {"available": True, "strike": 25000},
+    }
+
+    result = _finalize_ai_analysis_result(result)
+
+    assert result["fresh_entry_allowed"] is False
+    assert result["recommended_option"] is None
+
+
+def test_analysis_shared_risk_uses_canonical_levels_and_liquidity(monkeypatch):
+    import asyncio
+    import app.api.routes.analysis as analysis
+    import app.services.contract_specs as contract_specs
+    import app.services.trade_levels as trade_levels_module
+    import app.utils.helpers as helpers
+    import app.services.entry_risk_service as risk_service
+    from app.services.entry_risk_authority import (
+        build_entry_risk_authority,
+        is_entry_risk_approved,
+    )
+
+    calls = {}
+
+    monkeypatch.setattr(
+        contract_specs, "resolve_lot_size", lambda symbol, chain: 65
+    )
+    monkeypatch.setattr(
+        helpers, "intraday_hold_days_to_close", lambda timestamp: 0.25
+    )
+
+    def fake_levels(md, direction, spot, premium, **kwargs):
+        calls["levels"] = {
+            "direction": direction,
+            "spot": spot,
+            "premium": premium,
+            **kwargs,
+        }
+        return {
+            "option_entry": 100.0,
+            "option_sl": 80.0,
+            "option_t1": 120.0,
+            "option_t2": 140.0,
+            "option_t3": 150.0,
+            "rr_ratio": 2.0,
+            "option_rr_ratio": 2.0,
+        }
+
+    monkeypatch.setattr(
+        trade_levels_module, "calculate_trade_levels", fake_levels
+    )
+
+    async def fake_service(**kwargs):
+        calls["service"] = kwargs
+        contract = kwargs["selected_contract"]
+        levels = kwargs["trade_levels"]
+        size = kwargs["lot_size"]
+        risk_per_lot = (
+            levels["option_entry"] - levels["option_sl"]
+        ) * size
+        verdict = {
+            "allowed": True,
+            "lots": 1,
+            "quantity": size,
+            "max_loss": risk_per_lot,
+            "max_risk_amount": risk_per_lot,
+            "risk_per_lot": risk_per_lot,
+            "no_trade_reasons": [],
+            "reasons": ["Controlled service approval"],
+            "warnings": [],
+        }
+        authority = build_entry_risk_authority(
+            action=kwargs["action"],
+            risk_assessment=verdict,
+            selected_contract=contract,
+            trade_levels=levels,
+            lot_size=size,
+        )
+        return {
+            "risk_assessment": verdict,
+            "entry_risk_authority": authority,
+            "risk_approved": is_entry_risk_approved(authority),
+        }
+
+    monkeypatch.setattr(
+        risk_service, "assess_entry_risk_authority", fake_service
+    )
+
+    result = {
+        "symbol": "NIFTY",
+        "signal_action": "BUY CE",
+        "best_strategy": "BUY CE",
+        "fresh_entry_allowed": True,
+        "signal_lifecycle": "CONFIRMED_CALL",
+        "hard_gated": False,
+        "signal_strength": 70,
+        "confluence": {"quality": "HIGH"},
+        "market_regime": {"regime": "TREND_UP", "no_trade": False},
+        "v3_gate": {"allowed": True, "fresh_entry_allowed": True},
+        "recommended_option": {
+            "available": True,
+            "symbol": "NIFTY",
+            "strike": 25000,
+            "type": "CE",
+            "expiry": "15DEC2026",
+            "entry_price": 101.0,
+            "sl": 81.0,
+            "delta": 0.5,
+            "theta_per_day": -2.0,
+            "oi": 1200,
+            "volume": 2400,
+        },
+    }
+    market_data = {
+        "symbol": "NIFTY",
+        "timestamp": "2026-11-06T10:00:00+05:30",
+        "spot": {"price": 25000.0},
+        "option_chain": {"symbol": "NIFTY", "expiry": "15DEC2026"},
+        "vix": 14.0,
+    }
+
+    result = asyncio.run(
+        analysis._apply_entry_risk_authority(result, market_data)
+    )
+
+    assert result["fresh_entry_allowed"] is True
+    assert result["entry_risk_authority"]["status"] == "APPROVED"
+    assert result["v2_risk"]["allowed"] is True
+    assert result["v2_trade_levels"]["option_entry"] == 100.0
+    assert result["recommended_option"]["entry_price"] == 100.0
+    assert calls["service"]["selected_contract"]["symbol"] == "NIFTY"
+    assert calls["service"]["selected_contract"]["oi"] == 1200
+    assert calls["service"]["selected_contract"]["volume"] == 2400
+    assert calls["service"]["trade_levels"]["option_sl"] == 80.0
+    assert calls["levels"]["direction"] == "bullish"
+    assert calls["levels"]["lot_size"] == 65
+
+
+def test_analysis_sell_candidate_cannot_use_buy_risk_authority():
+    import asyncio
+    import app.api.routes.analysis as analysis
+
+    result = {
+        "symbol": "NIFTY",
+        "signal_action": "SELL CE",
+        "best_strategy": "SELL CE",
+        "fresh_entry_allowed": True,
+        "signal_lifecycle": "CONFIRMED_PUT",
+        "hard_gated": False,
+        "signal_strength": 70,
+        "confluence": {"quality": "HIGH"},
+        "market_regime": {"regime": "TREND_DOWN", "no_trade": False},
+        "v3_gate": {"allowed": True, "fresh_entry_allowed": True},
+        "recommended_option": {
+            "available": True,
+            "strike": 25000,
+            "type": "CE",
+            "expiry": "15DEC2026",
+            "entry_price": 100.0,
+            "oi": 1200,
+            "volume": 2400,
+        },
+    }
+
+    result = asyncio.run(
+        analysis._apply_entry_risk_authority(
+            result,
+            {
+                "symbol": "NIFTY",
+                "spot": {"price": 25000.0},
+                "option_chain": {"expiry": "15DEC2026"},
+            },
+        )
+    )
+
+    assert result["fresh_entry_allowed"] is False
+    assert result["entry_risk_authority"]["status"] == "UNASSESSED"
+    assert result["signal_action"] == "WAIT"
+    assert result["v2_risk"] is None
+    assert result["v2_trade_levels"] is None
+
+
+def test_analysis_dashboard_requires_matching_risk_authority():
+    from pathlib import Path
+
+    source = Path("app/templates/analysis.html").read_text()
+    assert "function analysisRiskApproved(d)" in source
+    assert source.count("analysisRiskApproved(d)") >= 4
+
+def test_analysis_recommendation_preserves_chain_symbol(monkeypatch):
+    import app.api.routes.analysis as analysis
+    import app.api.routes.strategy as strategy
+    import app.utils.helpers as helpers
+
+    monkeypatch.setattr(
+        helpers, "intraday_hold_days_to_close", lambda timestamp: 0.25
+    )
+    monkeypatch.setattr(
+        strategy,
+        "_pick_strikes",
+        lambda chain_data, *args, **kwargs: [{
+            "symbol": chain_data.get("symbol"),
+            "strike": 50000,
+            "type": "CE",
+            "expiry": chain_data.get("expiry"),
+            "entry_price": 100.0,
+            "ltp": 101.0,
+        }],
+    )
+
+    market_data = {
+        "symbol": "BANKNIFTY",
+        "timestamp": "2026-11-06T10:00:00+05:30",
+        "spot": {"price": 50000.0},
+        "technicals": {"atr": 100.0},
+        "option_chain": {
+            "symbol": "BANKNIFTY",
+            "expiry": "15DEC2026",
+            "data": [{"strikePrice": 50000}],
+        },
+    }
+
+    recommendation = analysis._pick_recommended_option(
+        market_data,
+        {},
+        "BUY CE",
+    )
+
+    assert recommendation["available"] is True
+    assert recommendation["symbol"] == "BANKNIFTY"

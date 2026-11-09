@@ -129,11 +129,12 @@ def assess_risk(
             f"{NO_TRADE_CONDITIONS['extreme_vix']} (VIX {vix:.1f} > 30)"
         )
 
-    # Regime: NO_TRADE / HIGH_VOLATILITY
-    if market_regime in ("NO_TRADE", "HIGH_VOLATILITY"):
+    # NO_TRADE remains a hard stop; HIGH_VOLATILITY is soft risk context.
+    if market_regime == "NO_TRADE":
         no_trade_reasons.append(
             f"{NO_TRADE_CONDITIONS['no_regime_clarity']} — regime: {market_regime}"
         )
+    # HIGH_VOLATILITY warning is added once in the risk-level classification below.
 
     # Expiry gamma risk for buyers
     if market_regime == "EXPIRY_HIGH_GAMMA" or days_to_expiry <= 1:
@@ -197,8 +198,30 @@ def assess_risk(
             "warnings":         warnings,
         }
 
-    lots = int(max_risk_amount / risk_per_lot)
-    lots = max(1, min(lots, 5))   # Floor: 1 lot, ceiling: 5 lots (safety cap)
+    lots = min(int(max_risk_amount / risk_per_lot), 5)
+
+    # Never force one lot when its modeled stop-loss risk exceeds the
+    # configured per-trade budget. A zero-lot result is a hard rejection.
+    if lots < 1:
+        no_trade_reasons.append(
+            f"Minimum one-lot risk ₹{risk_per_lot:.1f} exceeds per-trade budget "
+            f"₹{max_risk_amount:.0f}"
+        )
+        return {
+            "allowed":          False,
+            "risk_level":       "EXTREME",
+            "risk_amount":      0,
+            "quantity":         0,
+            "lots":             0,
+            "max_loss":         0,
+            "risk_reward":      option_rr_ratio if option_rr_ratio is not None else rr_ratio,
+            "risk_per_lot":     round(risk_per_lot, 1),
+            "max_risk_amount":  round(max_risk_amount, 0),
+            "reasons":          reasons,
+            "no_trade_reasons": no_trade_reasons,
+            "warnings":         warnings,
+        }
+
 
     quantity    = lots * lot_size
     max_loss    = round(risk_per_lot * lots, 0)
@@ -210,7 +233,15 @@ def assess_risk(
     # ── 3. Risk level classification ──────────────────────────────────────
     if vix > 22 or market_regime in ("HIGH_VOLATILITY", "EXPIRY_HIGH_GAMMA"):
         risk_level = "HIGH"
-        warnings.append(f"High VIX {vix:.1f} — elevated risk")
+        if vix > 22:
+            warnings.append(f"High VIX {vix:.1f} — elevated risk")
+        if market_regime == "HIGH_VOLATILITY":
+            warnings.append(
+                "HIGH_VOLATILITY regime - elevated risk; confidence reduced; "
+                "require confirmed entry conditions"
+            )
+        elif market_regime == "EXPIRY_HIGH_GAMMA":
+            warnings.append("EXPIRY_HIGH_GAMMA regime - elevated gamma risk")
     elif confluence_quality == "MEDIUM" or signal_strength < 55:
         risk_level = "MEDIUM"
     else:
@@ -244,14 +275,19 @@ class RiskManager:
     @staticmethod
     def assess_risk(market_data: Dict) -> Dict:
         vix    = market_data.get("vix", 0)
-        pcr    = market_data.get("pcr", 0)
+        try:
+            pcr = float(market_data.get("pcr") or 0)
+        except (TypeError, ValueError):
+            pcr = 0.0
+        pcr_meta = market_data.get("pcr_quality") or {}
+        pcr_available = pcr > 0 and pcr_meta.get("available") is not False
         trend  = market_data.get("trend", "sideways")
         score  = 0
         if vix > 25:
             score += 30
         elif vix > 20:
             score += 20
-        if pcr < 0.7 or pcr > 1.3:
+        if pcr_available and (pcr < 0.7 or pcr > 1.3):
             score += 20
         if trend == "bearish":
             score += 20

@@ -44,7 +44,8 @@ class OpenTradeRequest(BaseModel):
     target_2:          float        = Field(..., gt=0)
     target_3:          Optional[float] = None
     lots:              int          = Field(1, ge=1, le=10)
-    quantity:          Optional[int] = None
+    quantity:          Optional[int] = Field(None, ge=1)
+    lot_size:          Optional[int] = Field(None, ge=1)
     signal_strength:   Optional[int] = None
     confluence_score:  Optional[int] = None
     confluence_quality: Optional[str] = None
@@ -71,6 +72,8 @@ async def open_trade(req: OpenTradeRequest):
         data = req.model_dump()
         result = await open_paper_trade(data)
         return {"success": True, "trade": result}
+    except ValueError as e:
+        raise HTTPException(422, detail=str(e))
     except Exception as e:
         logger.exception("Failed to open paper trade")
         raise HTTPException(500, detail=str(e))

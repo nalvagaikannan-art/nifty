@@ -21,7 +21,7 @@
 
 
 <!-- ── FINAL SIGNAL BOX ─────────────────────────────── -->
-<div class="card" style="margin-bottom:1rem;border:2px solid var(--border);">
+<div class="card" id="final-signal-card" style="margin-bottom:1rem;border:2px solid var(--border);">
   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;">
     <div style="text-align:center;min-width:160px;">
       <div style="font-size:.7rem;color:var(--text2);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.3rem;">Final Signal</div>
@@ -67,7 +67,7 @@
     <div><span style="color:var(--text2);font-size:.72rem;">STATE</span><div id="signal-lifecycle-state" style="font-weight:800;font-size:1.05rem;">WAIT</div></div>
     <div><span style="color:var(--text2);font-size:.72rem;">CONFIRMATION</span><div id="signal-confirmation-count">0 / 3</div></div>
     <div><span style="color:var(--text2);font-size:.72rem;">ACTIVE SIDE</span><div id="signal-active-side">NONE</div></div>
-    <div style="flex:1;min-width:220px;"><span style="color:var(--text2);font-size:.72rem;">LIVE POSITION</span><div id="live-position-status">Checking...</div></div>
+    <div style="flex:1;min-width:220px;"><span id="live-position-label" style="color:var(--text2);font-size:.72rem;">LIVE POSITION</span><div id="live-position-status">Checking...</div></div>
   </div>
 </div>
 
@@ -273,9 +273,9 @@
 
 <!-- ── STRIKE RECOMMENDATION ─────────────────────────── -->
 <div class="card" style="margin-bottom:1rem;">
-  <h3 style="margin-bottom:.75rem;">🎯 Best Option Setup</h3>
+  <h3 style="margin-bottom:.75rem;">Option Setup &amp; Market Bias</h3>
   <div id="strategy-box" style="display:none;margin-bottom:1rem;padding:.75rem;background:rgba(255,255,255,.04);border-radius:8px;">
-    <div style="font-size:.75rem;color:var(--text2);margin-bottom:.25rem;">Strategy</div>
+    <div style="font-size:.75rem;color:var(--text2);margin-bottom:.25rem;">Directional Bias (context only)</div>
     <div id="strategy-name" style="font-weight:700;color:var(--primary);font-size:1rem;margin-bottom:.35rem;"></div>
     <div id="strategy-reason" style="font-size:.82rem;color:var(--text2);line-height:1.5;"></div>
   </div>
@@ -319,6 +319,7 @@
 <div class="card" style="margin-bottom:1rem;">
   <h3 style="margin-bottom:.75rem;">🧠 AI Reasoning</h3>
   <div id="ai-reason"><span class="spinner"></span> Analyzing...</div>
+  <div id="analysis-data-summary" style="display:none;margin-top:.65rem;"></div>
   <div id="key-factors" style="display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.75rem;"></div>
 </div>
 
@@ -335,6 +336,17 @@
 </div>
 
 <!-- ── Data Quality ─────────────────────────────────────── -->
+<!-- OI max-wall comparison: observational only; never a trade signal. -->
+<div class="card" id="oi-wall-shadow-card" style="display:none;margin-bottom:1rem;">
+  <h3 style="margin-bottom:.5rem;">OI Wall Evidence (Observation Only)</h3>
+  <p style="font-size:.8rem;color:var(--text2);margin-bottom:.75rem;">
+    Shadow evidence only. This panel does not affect BUY/SELL/WAIT, signal score, confidence, or entry gates.
+    Compares max-OI strikes with a same-session baseline.
+  </p>
+  <div id="oi-wall-shadow-note" style="font-size:.78rem;color:var(--text2);margin-bottom:.6rem;"></div>
+  <div id="oi-wall-shadow-body" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.6rem;"></div>
+</div>
+
 <div class="card" id="dq-card" style="display:none;margin-bottom:1rem;">
   <h3 style="margin-bottom:.75rem;">🛰️ Data Quality</h3>
   <div id="dq-body" style="display:flex;flex-wrap:wrap;gap:.5rem;"></div>
@@ -430,9 +442,25 @@
 <script>
 // jQuery ready wrapper - runs after base.html loads jQuery
 $(function() {
+  // Group the selected contract with the final entry decision.
+  $('#rec-option-card').appendTo('#final-signal-card')
+    .removeClass('card')
+    .css({marginTop:'1rem', marginBottom:0, padding:'1rem 0 0',
+          border:0, borderTop:'1px solid var(--border)'});
+  $('#rec-option-unavailable').appendTo('#final-signal-card')
+    .removeClass('card')
+    .css({marginTop:'1rem', marginBottom:0, padding:'1rem 0 0',
+          border:0, borderTop:'1px solid var(--border)'});
+
 var curSym   = 'NIFTY';
 var apiCache = {};
 var analysisLoadSeq = 0;
+
+// Coalesce automatic refreshes while preserving the latest user request.
+var analysisLoadInFlight = false;
+var analysisInFlightSym = '';
+var analysisInFlightExpiry = '';
+var analysisPendingLoad = null;
 
 function esc(s){ return $('<div>').text(s==null?'':String(s)).html(); }
 
@@ -453,16 +481,19 @@ function renderRecommendedOption(rec) {
     '<div style="font-size:1.1rem;font-weight:700;color:' + typeColor + ';">' +
     esc(rec.strike) + ' ' + esc(rec.type) + '</div>' +
     '<div style="font-size:.68rem;color:var(--text2);">Exp: ' + esc(rec.expiry || '--') + '</div></div>');
-  parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Entry (mid)</div>' +
-    '<div style="font-size:1.05rem;font-weight:600;">₹' + esc(rec.entry_price) + '</div>' +
+  parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Option LTP</div>' +
+    '<div style="font-size:1.05rem;font-weight:600;">₹' + fmtN(rec.ltp, 2) + '</div></div>');
+  parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Entry Estimate (mid)</div>' +
+    '<div style="font-size:1.05rem;font-weight:600;">₹' + fmtN(rec.entry_price, 2) + '</div>' +
     (rec.spread_pct != null ? '<div style="font-size:.68rem;color:var(--text2);">Spread ' + esc(rec.spread_pct) + '%</div>' : ''));
   if (rec.sl != null) {
     parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Stop Loss</div>' +
       '<div style="font-size:1.05rem;font-weight:600;color:var(--red);">₹' + esc(rec.sl) + '</div></div>');
   }
   if (rec.t1 != null) {
-    parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Target 1 / 2</div>' +
-      '<div style="font-size:1.05rem;font-weight:600;color:var(--green);">₹' + esc(rec.t1) + ' / ₹' + esc(rec.t2) + '</div>' +
+    parts.push('<div><div style="font-size:.68rem;color:var(--text2);">Targets 1 / 2 / 3</div>' +
+      '<div style="font-size:1.05rem;font-weight:600;color:var(--green);">' +
+      fmtN(rec.t1, 2) + ' / ' + fmtN(rec.t2, 2) + ' / ' + fmtN(rec.t3, 2) + '</div></div>' +
       (rec.risk_reward != null ? '<div style="font-size:.68rem;color:var(--text2);">R:R ' + esc(rec.risk_reward) + '</div>' : ''));
   }
   var riskBits = [];
@@ -483,7 +514,7 @@ function tfColor(t){ t=(t||'').toLowerCase(); return t==='up'?'var(--green)':t==
 function tfIcon(t) { t=(t||'').toLowerCase(); return t==='up'?'▲ UP':t==='down'?'▼ DOWN':'→ SIDE'; }
 
 function setRefreshState(on){
-  $('#refresh-btn').prop('disabled',on).text(on?'⏳ Refreshing...':'🔄 Refresh');
+  $('#refresh-btn').prop('disabled',false).text(on?'⏳ Refreshing...':'🔄 Refresh');
 }
 
 var curExpiry = '';   // '' = nearest expiry (server default)
@@ -535,11 +566,40 @@ function populateExpirySelect(allExpiries, resolvedExpiry){
   }
 
 function loadAll(sym, force, expiry){
+  if(expiry === undefined) expiry = curExpiry;
+  expiry = expiry || '';
+  curExpiry = expiry;
+
+  if(analysisLoadInFlight){
+    var sameAsFlight =
+      sym === analysisInFlightSym &&
+      expiry === analysisInFlightExpiry;
+
+    // Skip only routine polling for the same active selection.
+    if(!force && sameAsFlight) return;
+
+    // Hide the previous selection's recommendation as soon as a new load is queued.
+    $('#rec-option-card,#rec-option-unavailable').hide();
+
+    // Keep the latest requested selection; preserve a manual refresh.
+    if(analysisPendingLoad &&
+       analysisPendingLoad.sym === sym &&
+       analysisPendingLoad.expiry === expiry){
+      if(force) analysisPendingLoad.force = true;
+    } else {
+      analysisPendingLoad = {
+        sym: sym,
+        force: !!force,
+        expiry: expiry
+      };
+      // Prevent the active response from overwriting the pending selection.
+      analysisLoadSeq++;
+    }
+    return;
+  }
+
   var loadSeq = ++analysisLoadSeq;
   var loadSym = sym;
-
-  if(expiry === undefined) expiry = curExpiry;
-  curExpiry = expiry || '';
   var qs = curExpiry ? ('?expiry=' + encodeURIComponent(curExpiry)) : '';
 
   // Manual refresh gets a unique cache_bust token.
@@ -553,9 +613,29 @@ function loadAll(sym, force, expiry){
   }
   var key = sym+'_'+(curExpiry||'nearest')+'_'+Math.floor(Date.now()/15000);
   if(!force && apiCache[key]){ analysisLivePositionSignalData=apiCache[key].ai; renderAnalysis(apiCache[key].ai); renderStrikes(apiCache[key].strat); analysisLivePositionRefresh(); return; }
+
+  // Hide the previous recommendation while the new network response is pending.
+  $('#rec-option-card,#rec-option-unavailable').hide();
   setRefreshState(true);
+  analysisLoadInFlight = true;
+  analysisInFlightSym = loadSym;
+  analysisInFlightExpiry = curExpiry;
+
   var done={ai:false,strat:false};
-  function chk(){ if(done.ai&&done.strat) setRefreshState(false); }
+  function chk(){
+    if(done.ai && done.strat){
+      analysisLoadInFlight = false;
+      analysisInFlightSym = '';
+      analysisInFlightExpiry = '';
+      setRefreshState(false);
+
+      var pending = analysisPendingLoad;
+      analysisPendingLoad = null;
+      if(pending){
+        loadAll(pending.sym, pending.force, pending.expiry);
+      }
+    }
+  }
 
   $('#ai-reason').html('<span class="spinner"></span> Analyzing...');
   $.get('/api/analysis/ai/'+sym+cacheQs)
@@ -568,7 +648,12 @@ function loadAll(sym, force, expiry){
       analysisLivePositionSignalData=d;
       analysisLivePositionRefresh();
     })
-    .fail(function(x){ var m='Analysis failed'; try{m=JSON.parse(x.responseText).detail;}catch(e){} $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>'); })
+    .fail(function(x){
+      if(loadSeq !== analysisLoadSeq || loadSym !== curSym) return;
+      var m='Analysis failed';
+      try{m=JSON.parse(x.responseText).detail;}catch(e){}
+      $('#ai-reason').html('<div class="error-msg">⚠ '+esc(m)+'</div>');
+    })
     .always(function(){ done.ai=true; chk(); });
 
   $('#strikes-loading').text('Loading...').show();
@@ -581,22 +666,51 @@ function loadAll(sym, force, expiry){
       renderStrikes(d);
       populateExpirySelect(d.all_expiries, d.expiry);
     })
-    .fail(function(){ $('#strikes-loading').text('Strategy data unavailable.'); })
+    .fail(function(){
+      if(loadSeq !== analysisLoadSeq || loadSym !== curSym) return;
+      $('#strikes-loading').text('Strategy data unavailable.');
+      $('#signal-history-body').html('<span style="color:var(--text2);font-size:.85rem;">Signal history unavailable: strategy request failed.</span>');
+    })
     .always(function(){ done.strat=true; chk(); });
 }
 
 // SAFETY UI GUARD:
 // When backend data is hard-gated or market regime is NO_TRADE, suppress
 // fresh directional presentation. Existing HOLD lifecycle remains visible.
+function analysisRiskApproved(d){
+  var authority = d && d.entry_risk_authority;
+  var action = String((d && d.signal_action) || '').toUpperCase().trim();
+
+  return !!authority &&
+    authority.schema_version === 1 &&
+    authority.status === 'APPROVED' &&
+    authority.allowed === true &&
+    authority.action === action &&
+    ['BUY CE','BUY PE'].includes(action) &&
+    d.fresh_entry_allowed === true;
+}
+
 function analysisEffectiveStrategy(d){
   var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
-  var blocked = !!d.hard_gated ||
-    !!(d.market_regime && d.market_regime.no_trade);
+  var gate = d.entry_gate || d.v3_gate || {};
+  var blocked = !analysisRiskApproved(d) || !!d.hard_gated ||
+    d.fresh_entry_allowed === false ||
+    !!d.market_regime_no_trade ||
+    !!(d.market_regime && d.market_regime.no_trade) ||
+    !!(gate && gate.allowed === false) ||
+    !!(gate && gate.fresh_entry_allowed === false) ||
+    lifecycle.startsWith('HOLD_') ||
+    lifecycle.startsWith('WATCH_') ||
+    lifecycle === 'WAIT';
 
-  if(blocked && !lifecycle.startsWith('HOLD_')){
-    return 'WAIT';
+  if(blocked) return 'WAIT';
+
+  // The backend final action takes precedence over a raw strategy candidate.
+  var canonical = String(d.signal_action || '').toUpperCase().trim();
+  if(canonical){
+    return ['BUY CE','BUY PE','SELL CE','SELL PE'].includes(canonical)
+      ? canonical : 'WAIT';
   }
-
   return String(d.best_strategy || 'WAIT').toUpperCase();
 }
 
@@ -622,13 +736,24 @@ function renderV2Dashboard(d){
 
 var rk = d.v2_risk || {};
 
-    var uiBlocked = !!d.hard_gated ||
+    var uiBlocked = !analysisRiskApproved(d) || !!d.hard_gated ||
+      !!d.market_regime_no_trade ||
       !!(d.market_regime && d.market_regime.no_trade);
     var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
-    var freshSetupBlocked = uiBlocked && !lifecycle.startsWith('HOLD_');
+    var entryGate = d.entry_gate || d.v3_gate || {};
+    var freshSetupBlocked = uiBlocked ||
+      !analysisRiskApproved(d) ||
+      d.fresh_entry_allowed === false ||
+      !!(entryGate && entryGate.allowed === false) ||
+      !!(entryGate && entryGate.fresh_entry_allowed === false) ||
+      lifecycle.startsWith('HOLD_') ||
+      lifecycle.startsWith('WATCH_') ||
+      lifecycle === 'WAIT';
 
 
     var effectiveBest = analysisEffectiveStrategy(d);
+    // Align confluence visibility with the final effective action, even if payload flags disagree.
+    freshSetupBlocked = freshSetupBlocked || effectiveBest === 'WAIT';
   // Show dashboard
   $('#v2-dashboard').show();
 
@@ -648,7 +773,11 @@ var rk = d.v2_risk || {};
   };
   var regime = rg.regime || '--';
   $('#v2-regime').text(regime).css('color', regimeColors[regime] || '#888');
-  $('#v2-regime-conf').text(rg.confidence ? 'Confidence: ' + rg.confidence : '');
+  $('#v2-regime-conf').text(
+    d.market_open === false && regime === 'NO_TRADE'
+      ? 'Market closed - no-trade gate active'
+      : (rg.confidence ? 'Regime confidence: ' + rg.confidence : '')
+  );
 
   // Signal strength (not "confidence %")
   var ss = d.signal_strength || d.confidence || 0;
@@ -662,17 +791,24 @@ var rk = d.v2_risk || {};
   var cQuality = cf.quality || '--';
   var cDir = cf.direction || '--';
   var cColor = cQuality === 'HIGH' ? 'var(--green)' : cQuality === 'MEDIUM' ? '#ffd740' : 'var(--text2)';
-  $('#v2-confluence').text(cCount + ' / ' + cTotal + ' agree').css('color', cColor);
-  $('#v2-conf-quality').text(cDir + ' — ' + cQuality + ' quality').css('color', cColor);
-
-  // Trade quality
+  // A strong confluence diagnostic is not permission for a fresh entry.
+  // BLOCKED_CONFLUENCE_DIAGNOSTIC_GUARD_V18_14_7_26_13
   var tqColor = cQuality === 'HIGH' ? 'var(--green)' : cQuality === 'MEDIUM' ? '#ffd740' : 'var(--red)';
-  $('#v2-quality').text(cQuality).css('color', tqColor);
-    // Action banner
-    if(d.action && !freshSetupBlocked){
-      var actColor = (d.action||'').includes('NO TRADE') ? '#ff1744' :
-                     (d.action||'').includes('WAIT') ? '#ffd740' : 'var(--green)';
-      $('#v2-action-banner').text('⚡ ACTION: ' + d.action).css('color', actColor).show();
+  if(freshSetupBlocked){
+    $('#v2-confluence').text('ENTRY BLOCKED').css('color','var(--text2)');
+    $('#v2-conf-quality').text('Directional diagnostics hidden').css('color','var(--text2)');
+    $('#v2-quality').text('NOT AUTHORIZED').css('color','var(--text2)');
+  } else {
+    $('#v2-confluence').text(cCount + ' / ' + cTotal + ' agree').css('color', cColor);
+    $('#v2-conf-quality').text(cDir + ' — ' + cQuality + ' quality').css('color', cColor);
+    $('#v2-quality').text(cQuality).css('color', tqColor);
+  }
+    // Action banner uses the same gated decision as the headline and trade levels.
+    if(effectiveBest && !freshSetupBlocked){
+      var actColor = effectiveBest === 'WAIT' ? '#ffd740' :
+                     effectiveBest === 'BUY PE' ? '#ff1744' :
+                     effectiveBest.startsWith('SELL ') ? '#ff9800' : 'var(--green)';
+      $('#v2-action-banner').text('⚡ ACTION: ' + effectiveBest).css('color', actColor).show();
     } else {
       $('#v2-action-banner').hide();
     }
@@ -892,48 +1028,7 @@ function renderStrikes(d){
   if(!d){ $('#strikes-loading').hide(); return; }
   $('#strikes-loading').hide();
 
-  // V2 dashboard
-  renderV2Dashboard(d);
-
-    var effectiveBest = analysisEffectiveStrategy(d);
-  // Candidates
-    // SAFETY UI GUARD:
-    // Do not present cached strike/entry/SL/target levels as a fresh setup.
-    var uiBlocked = !!d.hard_gated ||
-      !!(d.market_regime && d.market_regime.no_trade);
-    var lifecycle = String(d.signal_lifecycle || '').toUpperCase();
-
-    if(uiBlocked && !lifecycle.startsWith('HOLD_')){
-      $('#strikes-grid,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
-      $('#strikes-wait').show();
-
-      var blockedReasons =
-        (d.market_regime && d.market_regime.reasons) ||
-        d.wait_reasons || [];
-
-      $('#wait-reasons').html(
-        blockedReasons.length
-          ? blockedReasons.map(function(r){
-              return '<div>• ' + esc(r) + '</div>';
-            }).join('')
-          : '<div>• Live intraday data is not confirmed for a fresh setup.</div>'
-      );
-
-      return;
-    }
-
-    // STRIKE_VISIBILITY_GUARD
-  renderCandidates(d.candidates, effectiveBest);
-
-  // Signal reversal alert
-  if(d.signal_reversal && d.reversal_type){
-    $('#reversal-text').text(d.reversal_type);
-    $('#reversal-alert').show();
-    setTimeout(function(){ $('#reversal-alert').hide(); }, 8000);
-  } else {
-    $('#reversal-alert').hide();
-  }
-
+  // SIGNAL_HISTORY_BEFORE_STRIKE_GUARD_20261010
   // Signal history
   var hist = d.signal_history || [];
   if(hist.length){
@@ -953,7 +1048,8 @@ function renderStrikes(d){
       return '<div class="hist-row' + (h.reversal?' reversal':'') + '">' +
         '<span>' + esc(historyTimeIST(h.timestamp)) + '</span>' +
         '<span class="hist-badge '+bClass+'">'+esc(h.strategy)+'</span>'+rev+
-        '<span style="color:var(--text2);">Score:'+h.score+'</span>'+
+        '<span style="color:var(--text2);">Strategy score:'+h.score+'</span>'+
+        '<span style="color:var(--text2);">Confidence:'+(h.confidence == null ? 'N/A' : h.confidence)+'</span>'+
         '<span style="color:var(--text2);font-size:.75rem;">'+esc(h.market_state||'')+'</span>'+
         '<span style="color:var(--text2);">₹'+fmtN(h.spot)+'</span>'+
       '</div>';
@@ -962,6 +1058,50 @@ function renderStrikes(d){
   } else {
     $('#signal-history-body').html('<span style="color:var(--text2);font-size:.85rem;">No history yet — signals will appear after first refresh.</span>');
   }
+
+  // V2 dashboard
+  renderV2Dashboard(d);
+
+    var effectiveBest = analysisEffectiveStrategy(d);
+  // Candidates
+    // SAFETY UI GUARD:
+    // Do not present cached strike/entry/SL/target levels as a fresh setup.
+    var entryGate = d.entry_gate || d.v3_gate || {};
+    var uiBlocked = !analysisRiskApproved(d) || !!d.hard_gated ||
+      !!d.market_regime_no_trade ||
+      !!(d.market_regime && d.market_regime.no_trade) ||
+      !!(entryGate && entryGate.allowed === false) ||
+      !!(entryGate && entryGate.fresh_entry_allowed === false) ||
+      effectiveBest === 'WAIT';
+
+    if(uiBlocked){
+      $('#strikes-grid,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
+      $('#strikes-wait').show();
+      var blockedReasons = (d.market_regime && d.market_regime.reasons) || [];
+      if(!blockedReasons.length && Array.isArray(d.market_regime_reasons))
+        blockedReasons = d.market_regime_reasons;
+      if(!blockedReasons.length && Array.isArray(d.wait_reasons))
+        blockedReasons = d.wait_reasons;
+      $('#wait-reasons').html(blockedReasons.length
+        ? blockedReasons.map(function(r){return '<div>&#8226; ' + esc(r) + '</div>';}).join('')
+        : '<div>&#8226; No fresh entry is authorized by the current signal and risk gates.</div>');
+      renderCandidates(d.candidates, effectiveBest);
+      return;
+    }
+
+    // STRIKE_VISIBILITY_GUARD
+  renderCandidates(d.candidates, effectiveBest);
+
+  // Signal reversal alert
+  if(d.signal_reversal && d.reversal_type){
+    $('#reversal-text').text(d.reversal_type);
+    $('#reversal-alert').show();
+    setTimeout(function(){ $('#reversal-alert').hide(); }, 8000);
+  } else {
+    $('#reversal-alert').hide();
+  }
+
+
 
   // Market state color
   var msColor = {'STRONG BULLISH':'#00c853','BULLISH':'#69f0ae','MILD BULLISH':'#b9f6ca',
@@ -1110,6 +1250,21 @@ function renderSessionState(d){
   var transition = ss.transition_state || ctx.transition_state || 'NONE';
   var alignment = ctx.alignment || 'NEUTRAL';
 
+  // SESSION_STATE_HISTORICAL_LABELS_20261010
+  // Closed-market or zero-completeness values must not look live.
+  var sessionHistorical = d.market_open === false ||
+    (d.data_completeness_pct != null &&
+     Number(d.data_completeness_pct) === 0);
+
+  function sessionValueLabel(value) {
+    var label = String(value == null ? '' : value)
+      .replace(/_/g, ' ').trim();
+    if (!label || /^(--|N.A|NA|UNAVAILABLE)$/i.test(label)) {
+      return 'N/A';
+    }
+    return sessionHistorical ? label + ' (HISTORICAL)' : label;
+  }
+
   var strength =
     ss.state_confidence != null
       ? ss.state_confidence
@@ -1117,7 +1272,7 @@ function renderSessionState(d){
 
   // Last-resort display fallback: derive VWAP relation from the live 5M
   // MTF VWAP when session_state itself is temporarily unavailable.
-  if (vwap === 'UNAVAILABLE' || vwap === '--') {
+  if (!sessionHistorical && (vwap === 'UNAVAILABLE' || vwap === '--')) {
     var liveMtf = d.multi_timeframe || {};
     var five = liveMtf['5min'] || {};
     var ind = five.indicators || {};
@@ -1138,34 +1293,51 @@ function renderSessionState(d){
   var details = [];
 
   if (ss.morning_direction && ss.morning_direction !== 'NEUTRAL') {
-    details.push('Morning ' + ss.morning_direction);
+    details.push('Morning ' + ss.morning_direction + (sessionHistorical ? ' (HISTORICAL)' : ''));
   }
 
   if (ss.recent_direction && ss.recent_direction !== 'NEUTRAL') {
-    details.push('Recent ' + ss.recent_direction);
+    details.push('Recent ' + ss.recent_direction + (sessionHistorical ? ' (HISTORICAL)' : ''));
   }
 
   if (ss.range_ratio != null) {
-    details.push('Range ' + Number(ss.range_ratio).toFixed(2) + 'x');
+    details.push('Range ' + Number(ss.range_ratio).toFixed(2) + 'x' + (sessionHistorical ? ' (HISTORICAL)' : ''));
   }
 
   $('#session-phase').text(String(phase).replace(/_/g,' '));
-  $('#session-day-type').text(String(dayType).replace(/_/g,' '));
+  $('#session-day-type').text(sessionValueLabel(dayType));
+  var mtf = d.multi_timeframe || {};
+  function sessionTrendLabel(trend, frame){
+    var label = String(trend == null ? '' : trend).trim().toUpperCase();
+    if(!label || /^(--|N\/A|NA|UNAVAILABLE|NONE)$/.test(label)) return 'N/A';
+    if(d.market_open === false || (frame && frame.fresh === false)){
+      return label + ' (HISTORICAL)';
+    }
+    return label;
+  }
   $('#session-tf').text(
-    String(tf5).toUpperCase() + ' / ' + String(tf15).toUpperCase()
+    sessionTrendLabel(tf5, mtf['5min'] || {}) + ' / ' +
+    sessionTrendLabel(tf15, mtf['15min'] || {})
   );
-  $('#session-vwap').text(String(vwap).replace(/_/g,' '));
-  $('#session-volatility').text(String(vol).replace(/_/g,' '));
-  $('#session-transition').text(String(transition).replace(/_/g,' '));
-  $('#session-alignment').text(String(alignment).replace(/_/g,' '));
+  $('#session-vwap').text(sessionValueLabel(vwap));
+  $('#session-volatility').text(sessionValueLabel(vol));
+  $('#session-transition').text(sessionValueLabel(transition));
+  $('#session-alignment').text(sessionValueLabel(alignment));
 
   $('#session-confidence').text(
-    strength === '--' ? '--' : strength + ' / 100'
+    strength === '--' || strength == null ? 'N/A' :
+      String(strength) + ' / 100' +
+      (sessionHistorical ? ' (HISTORICAL)' : '')
   );
 
   $('#session-state-detail').text(
     details.join(' · ') || 'Observation-only session context'
   );
+  if (sessionHistorical) {
+    $('#session-state-detail').prepend(
+      'HISTORICAL SESSION STATE - not live. '
+    );
+  }
 
   $('#session-alignment').css(
     'color',
@@ -1190,12 +1362,20 @@ function renderAnalysis(d){
   var lifecycleState = (d.signal_lifecycle || 'WAIT').toString().toUpperCase();
   var lifecycleActive = (d.signal_active_side || 'NONE').toString().toUpperCase();
   var lifecycleCandidate = (d.signal_candidate || 'NONE').toString().toUpperCase();
-  var dec = lifecycleState.indexOf('HOLD_') === 0 || lifecycleState.indexOf('CONFIRMED_') === 0 ? lifecycleActive :
+  var lifecycleLabel = lifecycleState.indexOf('HOLD_') === 0 || lifecycleState.indexOf('CONFIRMED_') === 0 ? lifecycleActive :
     lifecycleState.indexOf('WATCH_') === 0 ? ('WATCH ' + lifecycleCandidate) : 'WAIT';
+
+  // The headline shows the final entry decision. Lifecycle remains visible
+  // separately in the Signal & Position Status panel below.
+  // Match the Dashboard's effective action: hard gates, entry gates,
+  // and WATCH/HOLD lifecycle states must not appear as a fresh entry.
+  var dec = analysisEffectiveStrategy(d);
+  if(!dec) dec = lifecycleLabel;
   if(dec === 'NONE') dec = 'WAIT';
+
   var badge=$('#sig-badge').text(dec).attr('class','ai-badge');
-  if(dec.includes('CALL')) badge.addClass('bull');
-  else if(dec.includes('PUT')) badge.addClass('bear');
+  if(dec === 'BUY CE' || dec === 'HOLD CALL BIAS' || dec === 'CALL') badge.addClass('bull');
+  else if(dec === 'BUY PE' || dec === 'HOLD PUT BIAS' || dec === 'PUT') badge.addClass('bear');
   else badge.addClass('wait');
 
   var bull=d.bull_score||0,bear=d.bear_score||0,max=98;
@@ -1247,25 +1427,158 @@ function renderAnalysis(d){
   $('#sig-volatility').text(d.volatility_label||'');
 
   var tf=d.timeframe_trend||{};
-  $('#tf-5').text(tfIcon(tf['5min'])).css('color',tfColor(tf['5min']));
-  $('#tf-15').text(tfIcon(tf['15min'])).css('color',tfColor(tf['15min']));
-  $('#tf-1h').text(tfIcon(tf['1hr'])).css('color',tfColor(tf['1hr']));
-  $('#a-pcr').text(fmtN(d.pcr,3)); $('#a-vix').text(fmtN(d.vix,1)); $('#a-mp').text(fmtN(d.max_pain));
-
-  $('#ai-reason').html('<div class="ai-reasoning">'+esc(d.reason||'--')+'</div>');
-  if(d.key_factors&&d.key_factors.length){
-    $('#key-factors').html(d.key_factors.map(function(f){
-      return '<span class="level-pill support" style="background:rgba(64,196,255,.1);color:var(--primary);">'+esc(f)+'</span>';
-    }).join(''));
+  var frameMarketClosed = d.market_open === false;
+  function renderTimeframeValue(value){
+    var raw = String(value == null ? '' : value).trim();
+    if(!raw || /^(n\/a|na|unavailable|none)$/i.test(raw)) return 'N/A';
+    var label = tfIcon(raw);
+    return frameMarketClosed ? label + ' (HISTORICAL)' : label;
   }
-  var reasons=d.all_reasons||[];
-  $('#all-reasons').html(reasons.length?reasons.map(function(r){
-    return '<div style="padding:.3rem .5rem;border-radius:5px;background:rgba(255,255,255,.03);">'+esc(r)+'</div>';
-  }).join(''):'<span style="color:var(--text2);">Signals unavailable</span>');
+  $('#tf-5').text(renderTimeframeValue(tf['5min'])).css('color',tfColor(tf['5min']));
+  $('#tf-15').text(renderTimeframeValue(tf['15min'])).css('color',tfColor(tf['15min']));
+  $('#tf-1h').text(renderTimeframeValue(tf['1hr'])).css('color',tfColor(tf['1hr']));
+  $('#live-position-label').text(frameMarketClosed ? 'BROKER POSITION SNAPSHOT' : 'LIVE POSITION');
+  var dq = d.data_quality || {};
+  var qualityFacts = []
+    .concat(Array.isArray(d.key_factors) ? d.key_factors : [])
+    .concat(Array.isArray(d.all_reasons) ? d.all_reasons : [])
+    .join(' ');
+  var pcrMeta = d.pcr_quality || {};
+  var chainQuality = pcrMeta.chain_quality || d.option_chain_quality || {};
+  var qualityReported = chainQuality && typeof chainQuality === 'object' &&
+    Object.keys(chainQuality).length > 0;
+  var oiQualityBad = qualityReported &&
+    (chainQuality.available !== true || chainQuality.oi_usable !== true);
+  var volumeQualityBad = qualityReported &&
+    (chainQuality.available !== true || chainQuality.volume_usable !== true);
+  var oiCoverageText = typeof chainQuality.oi_coverage_pct === 'number'
+    ? chainQuality.oi_coverage_pct.toFixed(1) + '%' : 'not reported';
+  var volumeCoverageText = typeof chainQuality.volume_coverage_pct === 'number'
+    ? chainQuality.volume_coverage_pct.toFixed(1) + '%' : 'not reported';
+  var oiQualityReason = String(chainQuality.reason || 'OI coverage insufficient');
+  var vixMeta = d.vix_quality || {};
+  var chainUnavailable = d.option_chain_valid === false ||
+    (d.option_chain_valid === undefined && !d.expiry &&
+     (!Array.isArray(d.all_expiries) || d.all_expiries.length === 0) &&
+     /option chain data missing|pcr unavailable|max pain data unavailable|zero valid rows/i.test(qualityFacts));
+
+  var pcrValue = Number(d.pcr);
+  var vixValue = Number(d.vix);
+  var pcrAvailable = Number.isFinite(pcrValue) && pcrValue > 0 &&
+    !chainUnavailable && pcrMeta.available !== false && !oiQualityBad;
+  var vixAvailable = Number.isFinite(vixValue) && vixValue > 0 &&
+    vixMeta.available !== false;
+
+  $('#a-pcr').text(pcrAvailable ? fmtN(pcrValue,3) : 'N/A')
+    .attr('title', pcrAvailable
+      ? ('Source: ' + (pcrMeta.source || 'source unverified') +
+         ' | Observation time: ' + (pcrMeta.observed_at || 'not provided'))
+      : (oiQualityBad ? oiQualityReason : (pcrMeta.reason || 'PCR unavailable')));
+  $('#a-vix').text(vixAvailable ? fmtN(vixValue,1) : 'N/A')
+    .attr('title', vixAvailable
+      ? ('Source: ' + (vixMeta.source || 'source unverified') +
+         ' | Fetched: ' + (vixMeta.fetched_at || 'fetch time unavailable') +
+         ' | Observed: ' + (vixMeta.observed_at || 'provider time unavailable'))
+      : (vixMeta.reason || 'VIX unavailable'));
+  $('#a-mp').text(!chainUnavailable && !oiQualityBad && Number(d.max_pain) > 0
+    ? fmtN(d.max_pain) : 'N/A')
+    .attr('title', oiQualityBad ? oiQualityReason :
+      (volumeQualityBad
+        ? 'Volume quality limited (' + volumeCoverageText + '); writing/activity unverified'
+        : (chainUnavailable ? 'Option chain unavailable' :
+           'Provider observation time may be unavailable')));
+
+  var aiReasonText = d.reason || '--';
+  var renderDQ = d.data_quality || {};
+  var unverifiedSnapshot = Number(d.data_completeness_pct) === 0 &&
+    String(renderDQ.technicals_source || '').toLowerCase() === 'placeholder';
+  if(unverifiedSnapshot){
+    aiReasonText = 'Live inputs are unavailable and technical readings are unverified placeholders. RSI, MACD, and Volume must not be interpreted as current readings. No fresh directional entry is confirmed.';
+  }
+  $('#ai-reason').html('<div class="ai-reasoning">'+esc(aiReasonText)+'</div>');
+  var rawPct = d.data_completeness_pct;
+  var hasPct = rawPct !== null && rawPct !== undefined && rawPct !== '' && Number.isFinite(Number(rawPct));
+  var pct = hasPct ? Math.max(0, Math.min(100, Number(rawPct))) : null;
+  var marketClosed = d.market_open === false;
+  var facts = [].concat(Array.isArray(d.key_factors) ? d.key_factors : [])
+    .concat(Array.isArray(d.all_reasons) ? d.all_reasons : []).join(' ');
+  var chainUnavailable = !d.expiry &&
+    (!Array.isArray(d.all_expiries) || d.all_expiries.length === 0) &&
+    /option.?chain.*(missing|invalid|zero valid rows)|pcr unavailable|max pain data unavailable/i.test(facts);
+  var noUsableData = hasPct && pct === 0;
+  var context = [];
+  if(marketClosed) context.push('Market closed: last-known prices are not live quotes.');
+  if(hasPct) context.push('Data completeness: ' + Math.round(pct) + '%.');
+  if(chainUnavailable) context.push('Option chain unavailable: PCR and Max Pain are not valid measurements for this snapshot.');
+  if(oiQualityBad) context.push('OI quality limited (' + oiCoverageText + '): PCR, Max Pain and OI-flow evidence are unavailable.');
+  if(volumeQualityBad) context.push('Volume quality limited (' + volumeCoverageText + '): writing/activity evidence is unavailable.');
+  if(d.hard_gated === true || String(d.preferred_side || '').toUpperCase() === 'NONE')
+    context.push('No fresh directional entry is confirmed.');
+  if(!context.length) context.push('Review data quality and rule reasons before interpreting this analysis.');
+  var contextClass = (marketClosed || noUsableData || chainUnavailable || oiQualityBad || volumeQualityBad) ? ' closed' : '';
+  $('#analysis-data-summary').html(
+    '<div class="status-banner' + contextClass + '" style="margin-bottom:0;">' +
+    context.map(function(item){ return esc(item); }).join(' ') + '</div>'
+  ).show();
+  var keyFactors = Array.isArray(d.key_factors) ? d.key_factors.slice() : [];
+  var factorDataQuality = d.data_quality || {};
+  var placeholderTechnicalFactors = Number(d.data_completeness_pct) === 0 &&
+    String(factorDataQuality.technicals_source || '').toLowerCase() === 'placeholder';
+  if(placeholderTechnicalFactors){
+    keyFactors = keyFactors.filter(function(f){
+      var text = String(f == null ? '' : f).toLowerCase();
+      return !(/\brsi\b|\bmacd\b|\bvolume\b|\bsupertrend\b|\bema(?:20|50)?\b|\badx\b|\batr\b|\bvwap\b/i.test(text));
+    });
+    keyFactors.unshift('Technical indicators unavailable for this snapshot (0% data completeness).');
+  }
+  $('#key-factors').html(keyFactors.length ? keyFactors.map(function(f){
+    return '<span class="level-pill support" style="background:rgba(64,196,255,.1);color:var(--primary);">' + esc(f) + '</span>';
+  }).join('') : '<span style="color:var(--text2);font-size:.8rem;">No key factors returned for this snapshot.</span>');
+  var reasons = Array.isArray(d.all_reasons) ? d.all_reasons : [];
+  var ruleDQ = d.data_quality || {};
+  var rulePlaceholderTechnical =
+    String(ruleDQ.technicals_source || '').toLowerCase() === 'placeholder' &&
+    Number(d.data_completeness_pct) === 0;
+  var ruleOI = d.oi_change_tracked || {};
+  var ruleOIUnavailable = ruleOI.available === false ||
+    String(ruleOI.status || '').toLowerCase() === 'unavailable';
+
+  function normalizeRuleReason(raw){
+    var text = String(raw == null ? '' : raw);
+    var lower = text.toLowerCase();
+    if(ruleOIUnavailable && lower.indexOf('oi change neutral') >= 0){
+      return 'UNAVAILABLE: OI change has no valid same-session reference; zero is not neutral.';
+    }
+    if(chainUnavailable && lower.indexOf('call oi') >= 0){
+      return 'UNAVAILABLE: Call OI cannot be assessed because the option chain is missing.';
+    }
+    if(chainUnavailable && lower.indexOf('put oi') >= 0){
+      return 'UNAVAILABLE: Put OI cannot be assessed because the option chain is missing.';
+    }
+    if(rulePlaceholderTechnical && lower.indexOf('rsi 50') >= 0 && lower.indexOf('neutral') >= 0){
+      return 'UNAVAILABLE: RSI placeholder value 50.0 is not verified for this snapshot.';
+    }
+    if(rulePlaceholderTechnical && lower.indexOf('macd 0') >= 0){
+      return 'UNAVAILABLE: MACD placeholder value 0.0 is not verified for this snapshot.';
+    }
+    if(rulePlaceholderTechnical && lower.indexOf('volume normal') >= 0){
+      return 'UNAVAILABLE: Volume reading is not verified for this snapshot.';
+    }
+    if(rulePlaceholderTechnical && lower.indexOf('supertrend') >= 0 && lower.indexOf('neutral') >= 0){
+      return 'UNAVAILABLE: Supertrend reading is not verified for this snapshot.';
+    }
+    return text;
+  }
+
+  $('#all-reasons').html(reasons.length ? reasons.map(function(r){
+    return '<div style="padding:.3rem .5rem;border-radius:5px;background:rgba(255,255,255,.03);">' +
+      esc(normalizeRuleReason(r)) + '</div>';
+  }).join('') : '<span style="color:var(--text2);">No rule reasons returned for this snapshot.</span>');
 
   renderStatusBanners(d);
-  renderScenarios(d.scenarios);
-  renderTamilIndicators(d.tamil_indicators);
+  renderScenarios(d.scenarios, d);
+  renderOIWallEvidence(d.oi_change_tracked);
+  renderTamilIndicators(d.tamil_indicators, d);
   renderDataQuality(d.data_quality);
 }
 
@@ -1309,7 +1622,10 @@ function renderLivePositions(data, d){
       ' · P&L ₹'+fmtN(p.pnl,2)+'<br><span style="color:'+actionColor+';font-weight:700;">'+esc(action)+'</span>'+
       '</div>';
   }).join('');
-  $('#live-position-status').html(html);
+  var closedQuoteWarning = d && d.market_open === false
+    ? '<div class="status-banner closed" style="margin:.25rem 0 .5rem;">MARKET CLOSED: Position LTP and P&amp;L may be last reported values; quote freshness is unverified.</div>'
+    : '';
+  $('#live-position-status').html(closedQuoteWarning + html);
 }
 
 function renderStatusBanners(d){
@@ -1326,36 +1642,153 @@ function renderStatusBanners(d){
   $('#status-banners').html(html);
 }
 
-function renderScenarios(scenarios){
+function renderScenarios(scenarios, analysis){
   if(!scenarios || !scenarios.length){ $('#scenarios-card').hide(); return; }
-  var icons = {bullish:'🟢', bearish:'🔴', sideways:'🟡'};
+  var icons = {bullish:'&#128994;', bearish:'&#128308;', sideways:'&#128993;'};
   var titles = {bullish:'Bullish Scenario', bearish:'Bearish Scenario', sideways:'Range Scenario'};
-  var html = scenarios.map(function(s){
-    var icon = icons[s.type]||'⚪';
+  var dq = (analysis && analysis.data_quality) || {};
+  var referenceOnly = !!analysis && (analysis.market_open === false ||
+    (Number(analysis.data_completeness_pct) === 0 &&
+     String(dq.technicals_source || '').toLowerCase() === 'placeholder'));
+  var html = referenceOnly
+    ? '<div class="status-banner closed" style="margin-bottom:.6rem;">REFERENCE SCENARIOS ONLY - live inputs unavailable or market closed. Scenario percentages are hidden; these conditional levels are not a live forecast.</div>'
+    : '';
+  html += scenarios.map(function(s){
+    var icon = icons[s.type] || '&#9898;';
+    var probability = !referenceOnly && s.probability != null
+      ? '<span style="font-size:.78rem;color:var(--text2);">'+esc(s.probability)+'%</span>'
+      : '';
     return '<div class="scenario-row '+esc(s.type)+'">'+
       '<div class="scenario-head"><span>'+icon+' '+esc(titles[s.type]||s.type)+'</span>'+
-      (s.probability!=null?'<span style="font-size:.78rem;color:var(--text2);">'+esc(s.probability)+'%</span>':'')+'</div>'+
-      '<div>'+esc(s.condition)+' → <b>'+esc(s.target_zone)+'</b></div>'+
-      '<div class="scenario-inval">❌ Invalidation: '+esc(s.invalidation)+'</div>'+
-    '</div>';
+      probability+'</div>'+
+      '<div>'+esc(s.condition)+' &rarr; <b>'+esc(s.target_zone)+'</b></div>'+
+      '<div class="scenario-inval">Invalidation: '+esc(s.invalidation)+'</div>'+
+      '</div>';
   }).join('');
   $('#scenarios-body').html(html);
   $('#scenarios-card').show();
 }
+function renderOIWallEvidence(oiMeta){
+  var evidence = oiMeta && oiMeta.wall_evidence;
+  if(!evidence || typeof evidence !== 'object'){
+    if(!oiMeta || typeof oiMeta !== 'object'){
+      $('#oi-wall-shadow-card').hide();
+      return;
+    }
 
-function renderTamilIndicators(items){
+    var unavailableReason = String(
+      oiMeta.reason || 'OI history not available yet'
+    ).replace(/_/g, ' ');
+
+    function unavailableSide(title){
+      return '<div style="padding:.65rem;border:1px solid var(--border);border-radius:8px;">' +
+        '<b>' + esc(title) + '</b>' +
+        '<div style="margin-top:.35rem;">Max-OI strike: N/A</div>' +
+        '<div>OI change: N/A | Premium change: N/A</div>' +
+        '<div style="font-size:.78rem;color:var(--text2);margin-top:.25rem;">' +
+          'Evidence unavailable: ' + esc(unavailableReason) + '</div></div>';
+    }
+
+    $('#oi-wall-shadow-note').text(
+      'Reference window: N/A. OI baseline unavailable for this snapshot.'
+    );
+    $('#oi-wall-shadow-body').html(
+      unavailableSide('CE - Call max-OI wall') +
+      unavailableSide('PE - Put max-OI wall')
+    );
+    $('#oi-wall-shadow-card').show();
+    return;
+  }
+
+  function fmt(value, digits, signed){
+    if(value === null || value === undefined || value === '' ||
+       !Number.isFinite(Number(value))) return 'N/A';
+    var n = Number(value);
+    var out = n.toFixed(digits);
+    if(signed && n > 0) out = '+' + out;
+    return out;
+  }
+
+  function renderSide(key, title){
+    var item = evidence[key] || {};
+    var strike = item.strike !== null && item.strike !== undefined
+      ? fmt(item.strike, 0, false) : 'N/A';
+
+    if(item.available !== true){
+      var reason = String(item.reason || 'Baseline not available')
+        .replace(/_/g, ' ');
+      return '<div style="padding:.65rem;border:1px solid var(--border);border-radius:8px;">' +
+        '<b>' + esc(title) + '</b>' +
+        '<div style="margin-top:.35rem;">Strike: ' + esc(strike) + '</div>' +
+        '<div>OI change: N/A | Premium change: N/A</div>' +
+        '<div style="font-size:.78rem;color:var(--text2);margin-top:.25rem;">' +
+          'Evidence unavailable: ' + esc(reason) + '</div></div>';
+    }
+
+    return '<div style="padding:.65rem;border:1px solid var(--border);border-radius:8px;">' +
+      '<b>' + esc(title) + '</b>' +
+      '<div style="margin-top:.35rem;">Max-OI strike: ' + esc(strike) + '</div>' +
+      '<div>OI change: ' + esc(fmt(item.oi_change, 0, true)) + '</div>' +
+      '<div>Premium change: ' + esc(fmt(item.price_change, 2, true)) + '</div>' +
+      '<div style="margin-top:.35rem;font-weight:600;">Pattern: ' +
+        esc(String(item.label || 'N/A')) + '</div>' +
+      '<div style="font-size:.75rem;color:var(--text2);margin-top:.25rem;">' +
+        'Current OI: ' + esc(fmt(item.current_oi, 0, false)) +
+        ' | Baseline OI: ' + esc(fmt(item.previous_oi, 0, false)) +
+      '</div></div>';
+  }
+
+  var windowText = Number.isFinite(Number(oiMeta.window_minutes))
+    ? 'Reference snapshot age: approximately ' +
+      esc(fmt(oiMeta.window_minutes, 1, false)) + ' minutes.'
+    : 'Reference window: N/A.';
+  $('#oi-wall-shadow-note').text(windowText);
+
+  $('#oi-wall-shadow-body').html(
+    renderSide('ce', 'CE - Call max-OI wall') +
+    renderSide('pe', 'PE - Put max-OI wall')
+  );
+  $('#oi-wall-shadow-card').show();
+}
+
+function renderTamilIndicators(items, data){
   if(!items || !items.length){ $('#tamil-card').hide(); return; }
+
+  var dq = (data && data.data_quality) || {};
+  var placeholderTechnical =
+    String(dq.technicals_source || '').toLowerCase() === 'placeholder' &&
+    Number(data && data.data_completeness_pct) === 0;
+
+  var oiMeta = data && data.oi_change_tracked;
+  var oiUnavailable = !oiMeta || oiMeta.available === false ||
+    String(oiMeta.status || '').toLowerCase() === 'unavailable';
+
+  var placeholderIds = {rsi:true, macd:true, volume:true, supertrend:true};
   var html = items.map(function(it){
+    var id = String(it.id || '').toLowerCase();
+    var value = String(it.value_display == null ? 'N/A' : it.value_display); if(!value.trim() || value.trim() === '--') value = 'N/A';
+    var explanation = it.explanation_ta || '';
+
+    if(placeholderTechnical && placeholderIds[id]){
+      value = 'N/A';
+      explanation = 'Indicator unavailable: this snapshot uses placeholder technicals and has 0% data completeness. No current reading is verified.';
+    }
+
+    if(id === 'oi_change' && oiUnavailable){
+      value = 'N/A';
+      explanation = 'Open Interest change unavailable: same-session OI tracking is not available for this snapshot. Zero must not be interpreted as neutral OI flow.';
+    }
+
     return '<div class="tamil-row '+esc(it.direction||'neutral')+'">'+
       '<div class="tamil-head"><span>'+esc(it.icon||'')+' '+esc(it.title_ta||it.id)+'</span>'+
-      '<span style="font-weight:600;">'+esc(it.value_display||'--')+'</span></div>'+
-      '<div class="tamil-exp">'+esc(it.explanation_ta||'')+'</div>'+
-    '</div>';
+      '<span style="font-weight:600;">'+esc(value)+'</span></div>'+
+      '<div class="tamil-exp">'+esc(explanation)+'</div>'+
+      '</div>';
   }).join('');
+
   $('#tamil-body').html(html);
   $('#tamil-card').show();
 }
-
 function renderDataQuality(dq){
   if(!dq){ $('#dq-card').hide(); return; }
   var labels = {
@@ -1400,7 +1833,7 @@ function renderDataQuality(dq){
     var autoRefreshTimer = setInterval(function(){
       if(!analysisIsNseMarketHoursNow()) return;
       loadAll(curSym,false,curExpiry);
-    },15000);
+    },60000);
 
   // ANALYSIS_FAST_SPOT_WS_20261008
   // Display-only live spot path. It does not trigger analysis/strategy calls.

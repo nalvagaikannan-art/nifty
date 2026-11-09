@@ -18,6 +18,7 @@ from __future__ import annotations
 import uuid
 import json
 import logging
+import math
 
 from app.services.contract_specs import resolve_lot_size
 from datetime import datetime
@@ -126,25 +127,67 @@ class TradeJournal(Base):
 
 # ── Service functions ──────────────────────────────────────────────────────
 
+def _validated_positive_integer(value, field_name, maximum=None):
+    """Validate an integer quantity input without silently truncating it."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    if not math.isfinite(numeric) or not numeric.is_integer() or numeric < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    result = int(numeric)
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{field_name} cannot exceed {maximum}")
+
+    return result
+
+
 async def open_paper_trade(data: Dict) -> Dict:
     """
     New paper trade open செய்கிறோம்.
     data keys: symbol, strike, option_type, entry_price, stop_loss,
-               target_1, target_2, quantity, lots,
+               target_1, target_2, quantity, lots, lot_size,
                signal_strength, confluence_score, market_regime, ...
     """
-    async with AsyncSessionLocal() as session:
-        # PAPER_TRADING_LOT_SIZE_SOURCE_20260925
-        _symbol = str(data.get("symbol", "NIFTY")).upper()
-        lot_size = int(
-            data.get("lot_size")
-            or resolve_lot_size(_symbol, data.get("option_chain"))
-        )
-        lots     = data.get("lots", 1)
-        qty      = data.get("quantity", lots * lot_size)
+    # Validate all contract sizing inputs before opening a database session.
+    _symbol = str(data.get("symbol") or "NIFTY").strip().upper()
+    if not _symbol:
+        raise ValueError("symbol is required")
 
+    lots = _validated_positive_integer(
+        data.get("lots", 1), "lots", maximum=10
+    )
+
+    raw_lot_size = data.get("lot_size")
+    if raw_lot_size is None:
+        raw_lot_size = resolve_lot_size(
+            _symbol, data.get("option_chain")
+        )
+
+    lot_size = _validated_positive_integer(raw_lot_size, "lot_size")
+    expected_quantity = lots * lot_size
+
+    submitted_quantity = data.get("quantity")
+    if submitted_quantity is None:
+        qty = expected_quantity
+    else:
+        qty = _validated_positive_integer(
+            submitted_quantity, "quantity"
+        )
+        if qty != expected_quantity:
+            raise ValueError(
+                "quantity must equal lots * lot_size "
+                f"(expected {expected_quantity}, received {qty})"
+            )
+
+    async with AsyncSessionLocal() as session:
         trade = PaperTrade(
-            symbol           = data.get("symbol", "NIFTY").upper(),
+            symbol           = _symbol,
             expiry           = data.get("expiry"),
             strike           = float(data.get("strike", 0)),
             option_type      = data.get("option_type", "CE").upper(),

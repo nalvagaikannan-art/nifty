@@ -29,6 +29,7 @@ accuracy is bounded by how often the dashboard was actually left open/polling
 — exactly like the existing per-indicator engine. It is intentionally a
 separate, complementary view (per *signal/action*, not per *indicator*).
 """
+from app.utils.expiry import canonical_expiry, expiry_sql_key
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import logging
@@ -455,6 +456,46 @@ def _nearest_price(
     return best_price
 
 
+def _premium_horizon_gap_example(
+    action: str,
+    expiry,
+    strike: float,
+    option_type: str,
+    target: datetime,
+    timestamps: List[datetime],
+) -> Dict:
+    """Describe snapshot timing around a missing target; never grades prices."""
+    i = bisect_left(timestamps, target)
+    before_ts = timestamps[i - 1] if i > 0 else None
+    after_ts = timestamps[i] if i < len(timestamps) else None
+    last_ts = timestamps[-1] if timestamps else None
+
+    return {
+        "action": action,
+        "expiry": str(expiry),
+        "strike": strike,
+        "option_type": str(option_type).upper(),
+        "target_timestamp": target.isoformat(),
+        "snapshot_before_target": (
+            before_ts.isoformat() if before_ts is not None else None
+        ),
+        "minutes_since_snapshot_before_target": (
+            round((target - before_ts).total_seconds() / 60.0, 2)
+            if before_ts is not None else None
+        ),
+        "snapshot_after_target": (
+            after_ts.isoformat() if after_ts is not None else None
+        ),
+        "minutes_until_snapshot_after_target": (
+            round((after_ts - target).total_seconds() / 60.0, 2)
+            if after_ts is not None else None
+        ),
+        "last_contract_snapshot": (
+            last_ts.isoformat() if last_ts is not None else None
+        ),
+    }
+
+
 def _asof_price(
     prices: List[Tuple[datetime, float]],
     timestamps: List[datetime],
@@ -519,6 +560,69 @@ def _asof_completed_ohlc_price(
     if gap_minutes > max_gap_minutes:
         return None
     return best_price
+
+def _asof_spot_price_with_fallback(
+    prices: List[Tuple[datetime, float]],
+    timestamps: List[datetime],
+    target: datetime,
+    max_gap_minutes: float,
+    intraday_rows,
+) -> Optional[float]:
+    """Prefer a valid as-of spot snapshot; otherwise use a completed 5m candle."""
+    price = _asof_price(
+        prices, timestamps, target, max_gap_minutes
+    )
+    if price is not None and price > 0:
+        return price
+    return _asof_completed_ohlc_price(
+        intraday_rows, target, max_gap_minutes
+    )
+
+
+def _target_within_nse_session(
+    event_ts: datetime,
+    target_ts: datetime,
+) -> bool:
+    """Whether a full evaluation horizon stays inside one NSE session."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+
+    def to_ist(ts):
+        if ts is None:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(ist)
+
+    event_local = to_ist(event_ts)
+    target_local = to_ist(target_ts)
+    if event_local is None or target_local is None:
+        return False
+
+    if event_local.date() != target_local.date():
+        return False
+    if event_local.weekday() >= 5 or target_local.weekday() >= 5:
+        return False
+
+    def minute_of_day(ts):
+        return (
+            ts.hour * 60 + ts.minute
+            + ts.second / 60.0
+            + ts.microsecond / 60_000_000.0
+        )
+
+    open_minute = 9 * 60 + 15
+    close_minute = 15 * 60 + 30
+    event_minute = minute_of_day(event_local)
+    target_minute = minute_of_day(target_local)
+
+    return (
+        open_minute <= event_minute < close_minute
+        and open_minute <= target_minute <= close_minute
+    )
+
 
 def _grade(action: str, change_pct: float) -> str:
     """Grade the underlying-direction expectation for all four actions.
@@ -714,6 +818,9 @@ async def compute_signal_accuracy(
 
     pending = 0
     no_data = 0
+    session_unavailable_by_horizon = {
+        h: 0 for h in HORIZONS_MINUTES
+    }
 
     # ------------------------------------------------------------
     # Grade each independent episode.
@@ -756,9 +863,20 @@ async def compute_signal_accuracy(
             no_data += 1
             continue
 
+        eligible_horizons = set()
+        for candidate_horizon in HORIZONS_MINUTES:
+            candidate_target = ts + timedelta(minutes=candidate_horizon)
+            if _target_within_nse_session(ts, candidate_target):
+                eligible_horizons.add(candidate_horizon)
+            else:
+                session_unavailable_by_horizon[candidate_horizon] += 1
+
         main_grade = None
 
         for h in HORIZONS_MINUTES:
+            if h not in eligible_horizons:
+                continue
+
             target = ts + timedelta(minutes=h)
 
             if target > now:
@@ -829,6 +947,11 @@ async def compute_signal_accuracy(
 
         "pending_at_headline_horizon": pending,
         "no_price_data": no_data,
+        "session_unavailable_at_headline_horizon": session_unavailable_by_horizon[horizon_minutes],
+        "session_unavailable_by_horizon": {
+            str(h): session_unavailable_by_horizon[h]
+            for h in HORIZONS_MINUTES
+        },
         "no_directional_recommendation": 0,
 
         "overall": _fmt_bucket(
@@ -931,6 +1054,224 @@ def _grade_premium(change_pct: float, cost_pct: float = 0.0) -> str:
     return "correct" if net > 0 else "wrong"
 
 
+def _record_premium_data_gap(
+    reasons: Dict[str, int],
+    by_action: Dict[str, Dict[str, int]],
+    reason: str,
+    action: str,
+) -> None:
+    """Count missing premium data by reason and action."""
+    reasons[reason] = reasons.get(reason, 0) + 1
+    action_counts = by_action.setdefault(action, {})
+    action_counts[reason] = action_counts.get(reason, 0) + 1
+
+
+def _record_direction_premium_disagreement(
+    bucket: Dict[str, int],
+    spot_grade: Optional[str],
+    premium_grade: Optional[str],
+) -> None:
+    """Record every paired episode exactly once, including both-flat."""
+    valid = {"correct", "wrong", "flat"}
+    if spot_grade not in valid or premium_grade not in valid:
+        bucket["missing"] += 1
+    elif spot_grade == "correct" and premium_grade == "correct":
+        bucket["both_correct"] += 1
+    elif spot_grade == "wrong" and premium_grade == "wrong":
+        bucket["both_wrong"] += 1
+    elif spot_grade == "correct" and premium_grade == "wrong":
+        bucket["spot_correct_premium_wrong"] += 1
+    elif spot_grade == "wrong" and premium_grade == "correct":
+        bucket["spot_wrong_premium_correct"] += 1
+    elif spot_grade in ("correct", "wrong") and premium_grade == "flat":
+        bucket["spot_graded_premium_flat"] += 1
+    elif spot_grade == "flat" and premium_grade in ("correct", "wrong"):
+        bucket["spot_flat_premium_graded"] += 1
+    else:
+        # Both grades are flat. It is comparable, but neither directional
+        # result is a win or loss.
+        bucket["both_flat"] += 1
+
+
+def _disagreement_comparable_count(bucket: Dict[str, int]) -> int:
+    """Count all episodes with valid grades for both spot and premium."""
+    return sum(bucket[key] for key in (
+        "both_correct",
+        "both_wrong",
+        "spot_correct_premium_wrong",
+        "spot_wrong_premium_correct",
+        "spot_graded_premium_flat",
+        "spot_flat_premium_graded",
+        "both_flat",
+    ))
+
+
+
+def _premium_risk_classification(result: Dict, action: str) -> str:
+    """Classify historical premium episodes by frozen entry-risk authority."""
+    from app.services.entry_risk_authority import is_entry_risk_approved
+
+    if not isinstance(result, dict):
+        return "UNAPPROVED"
+
+    version = result.get("metadata_version")
+
+    # Pre-authority AnalysisResult history cannot be retroactively treated
+    # as risk-approved. Keep explicit legacy positive records separate.
+    if version is None:
+        return "LEGACY_RISK_UNVERIFIED"
+
+    if type(version) is not int:
+        return "UNAPPROVED"
+
+    if version == 1:
+        return (
+            "LEGACY_RISK_UNVERIFIED"
+            if result.get("fresh_entry_allowed") is True
+            else "UNAPPROVED"
+        )
+
+    if version != 2 or result.get("fresh_entry_allowed") is not True:
+        return "UNAPPROVED"
+
+    action_map = {
+        "CALL_BUY": "BUY CE",
+        "PUT_BUY": "BUY PE",
+        "CALL_SELL": "SELL CE",
+        "PUT_SELL": "SELL PE",
+    }
+    expected_action = action_map.get(action)
+    authority = result.get("entry_risk_authority")
+
+    if (
+        expected_action is None
+        or not is_entry_risk_approved(authority)
+        or authority.get("action") != expected_action
+    ):
+        return "UNAPPROVED"
+
+    # The approval must refer to the exact contract whose premium is graded.
+    snapshot = authority.get("snapshot") or {}
+    contract = snapshot.get("selected_contract") or {}
+    rec = result.get("recommended_option") or {}
+
+    if not isinstance(contract, dict) or not isinstance(rec, dict):
+        return "UNAPPROVED"
+
+    if rec.get("available") is not True:
+        return "UNAPPROVED"
+
+    expected_type = expected_action.split()[1]
+    symbol = str(result.get("symbol") or "").strip().upper()
+    recommendation_symbol = str(
+        rec.get("symbol") or ""
+    ).strip().upper()
+
+    if (
+        not symbol
+        or str(contract.get("symbol") or "").strip().upper() != symbol
+        or (
+            recommendation_symbol
+            and recommendation_symbol != symbol
+        )
+        or str(rec.get("type") or "").strip().upper() != expected_type
+        or str(contract.get("type") or "").strip().upper() != expected_type
+    ):
+        return "UNAPPROVED"
+
+    def normalized_expiry(value):
+        return (
+            str(value or "")
+            .strip()
+            .upper()
+            .replace("-", "")
+            .replace(" ", "")
+        )
+
+    if (
+        not normalized_expiry(contract.get("expiry"))
+        or normalized_expiry(contract.get("expiry"))
+            != normalized_expiry(rec.get("expiry"))
+    ):
+        return "UNAPPROVED"
+
+    try:
+        if abs(float(contract.get("strike")) - float(rec.get("strike"))) > 1e-8:
+            return "UNAPPROVED"
+        if abs(float(contract.get("entry_price")) - float(rec.get("entry_price"))) > 0.05:
+            return "UNAPPROVED"
+        if abs(float(contract.get("sl")) - float(rec.get("sl"))) > 0.05:
+            return "UNAPPROVED"
+    except (TypeError, ValueError, OverflowError):
+        return "UNAPPROVED"
+
+    return "RISK_APPROVED"
+
+
+def _select_premium_accuracy_episodes(analysis_rows):
+    """Separate V2-approved, legacy-unverified and denied episodes.
+
+    The 10-minute episode boundary also includes authority classification,
+    so a legacy row cannot suppress a later V2-approved entry at deployment.
+    """
+    approved_episodes = []
+    legacy_episodes = 0
+    unapproved_episodes = 0
+
+    last_side = None
+    last_action = None
+    last_classification = None
+    last_actionable_ts = None
+
+    for row in analysis_rows:
+        result = row.result or {}
+
+        if not _is_actionable_calibration_row(result):
+            continue
+
+        action = _explicit_action_from_signal(result)
+        if action not in EXPLICIT_TRADE_ACTIONS:
+            continue
+
+        classification = _premium_risk_classification(result, action)
+
+        ts = analysis_event_timestamp(row)
+        if ts is None:
+            continue
+
+        side = str(result.get("preferred_side") or "NONE").upper()
+
+        is_new_episode = (
+            last_side != side
+            or last_action != action
+            or last_classification != classification
+            or last_actionable_ts is None
+            or (
+                (ts - last_actionable_ts).total_seconds()
+                > CALIBRATION_EPISODE_GAP_MIN * 60
+            )
+        )
+
+        if is_new_episode:
+            if classification == "RISK_APPROVED":
+                approved_episodes.append(row)
+            elif classification == "LEGACY_RISK_UNVERIFIED":
+                legacy_episodes += 1
+            else:
+                unapproved_episodes += 1
+
+        last_side = side
+        last_action = action
+        last_classification = classification
+        last_actionable_ts = ts
+
+    return (
+        approved_episodes,
+        legacy_episodes,
+        unapproved_episodes,
+    )
+
+
 async def compute_premium_accuracy(
     symbol: str,
     days: int = 15,
@@ -984,46 +1325,26 @@ async def compute_premium_accuracy(
             )
         ).scalars().all()
 
-    episodes = []
-    last_side = None
-    last_action = None
-    last_actionable_ts = None
-
-    for row in analysis_rows:
-        result = row.result or {}
-
-        if not _is_actionable_calibration_row(result):
-            continue
-
-        action = _explicit_action_from_signal(result)
-        if action not in EXPLICIT_TRADE_ACTIONS:
-            continue
-
-        side = str(
-            result.get("preferred_side") or "NONE"
-        ).upper()
-
-        ts = analysis_event_timestamp(row)
-        if ts is None:
-            continue
-
-
-        is_new_episode = (
-            last_side != side
-            or last_action != action
-            or last_actionable_ts is None
-            or (
-                (ts - last_actionable_ts).total_seconds()
-                > CALIBRATION_EPISODE_GAP_MIN * 60
+        # Same completed-candle fallback used by standalone Spot accuracy.
+        # IntradayOHLC.timestamp is candle start; helper checks completion time.
+        intraday_rows = (
+            await session.execute(
+                select(IntradayOHLC)
+                .where(IntradayOHLC.symbol == symbol)
+                .where(
+                    IntradayOHLC.timestamp >= (
+                        cutoff - timedelta(minutes=5)
+                    )
+                )
+                .order_by(IntradayOHLC.timestamp.asc())
             )
-        )
+        ).scalars().all()
 
-        if is_new_episode:
-            episodes.append(row)
-
-        last_side = side
-        last_action = action
-        last_actionable_ts = ts
+    (
+        episodes,
+        legacy_risk_unverified_episodes,
+        unapproved_actionable_episodes,
+    ) = _select_premium_accuracy_episodes(analysis_rows)
 
     # ------------------------------------------------------------
     # Build spot series for the episode-level Direction vs Premium
@@ -1113,10 +1434,13 @@ async def compute_premium_accuracy(
                         )
                         .where(
                             tuple_(
-                                OptionData.expiry,
+                                expiry_sql_key(OptionData.expiry),
                                 OptionData.strike,
                                 OptionData.option_type,
-                            ).in_(batch)
+                            ).in_([
+                                (canonical_expiry(expiry), strike, option_type)
+                                for expiry, strike, option_type in batch
+                            ])
                         )
                         .order_by(
                             OptionData.timestamp.asc()
@@ -1209,6 +1533,19 @@ async def compute_premium_accuracy(
 
     pending = 0
     no_data = 0
+    no_data_reasons = {
+        "missing_contract_series": 0,
+        "no_entry_snapshot": 0,
+        "entry_snapshot_invalid_or_stale": 0,
+        "missing_horizon_snapshot": 0,
+    }
+    no_data_by_action = {
+        action: {} for action in EXPLICIT_TRADE_ACTIONS
+    }
+    no_data_examples = []
+    session_unavailable_by_horizon = {
+        h: 0 for h in HORIZONS_MINUTES
+    }
     no_recommendation = 0
     signals_seen = 0
 
@@ -1234,6 +1571,7 @@ async def compute_premium_accuracy(
         "spot_wrong_premium_correct": 0,
         "spot_graded_premium_flat": 0,
         "spot_flat_premium_graded": 0,
+        "both_flat": 0,
         "missing": 0,
     }
 
@@ -1281,6 +1619,10 @@ async def compute_premium_accuracy(
 
         if not series:
             no_data += 1
+            _record_premium_data_gap(
+                no_data_reasons, no_data_by_action,
+                "missing_contract_series", action,
+            )
             continue
 
         timestamps = contract_timestamps[key]
@@ -1302,6 +1644,10 @@ async def compute_premium_accuracy(
 
         if entry_i < 0:
             no_data += 1
+            _record_premium_data_gap(
+                no_data_reasons, no_data_by_action,
+                "no_entry_snapshot", action,
+            )
             continue
 
         entry_ts, premium_then = series[entry_i]
@@ -1317,6 +1663,10 @@ async def compute_premium_accuracy(
             > PREMIUM_HORIZON_TOLERANCE_MIN
         ):
             no_data += 1
+            _record_premium_data_gap(
+                no_data_reasons, no_data_by_action,
+                "entry_snapshot_invalid_or_stale", action,
+            )
             continue
 
         moneyness = rec.get("label") or "unknown"
@@ -1365,22 +1715,24 @@ async def compute_premium_accuracy(
         # --------------------------------------------------------
         spot_grade = None
 
-        spot_then = _asof_price(
+        spot_then = _asof_spot_price_with_fallback(
             spot_prices,
             spot_timestamps,
             ts,
             SPOT_HORIZON_TOLERANCE_MIN,
+            intraday_rows,
         )
 
         if (
             spot_then is not None
             and headline_target <= now
         ):
-            spot_later = _asof_price(
+            spot_later = _asof_spot_price_with_fallback(
                 spot_prices,
                 spot_timestamps,
                 headline_target,
                 SPOT_HORIZON_TOLERANCE_MIN,
+                intraday_rows,
             )
 
             if spot_later is not None and spot_later > 0:
@@ -1400,6 +1752,12 @@ async def compute_premium_accuracy(
         for h in HORIZONS_MINUTES:
             target = ts + timedelta(minutes=h)
 
+            # Match Spot accuracy: do not grade horizons crossing
+            # an NSE session boundary or outside regular session hours.
+            if not _target_within_nse_session(ts, target):
+                session_unavailable_by_horizon[h] += 1
+                continue
+
             if target > now:
                 if h == horizon_minutes:
                     pending += 1
@@ -1415,6 +1773,17 @@ async def compute_premium_accuracy(
             if premium_later is None:
                 if h == horizon_minutes:
                     no_data += 1
+                    _record_premium_data_gap(
+                        no_data_reasons, no_data_by_action,
+                        "missing_horizon_snapshot", action,
+                    )
+                    if len(no_data_examples) < 20:
+                        no_data_examples.append(
+                            _premium_horizon_gap_example(
+                                action, expiry, strike, option_type,
+                                target, timestamps,
+                            )
+                        )
                 continue
 
             change_pct = (
@@ -1477,35 +1846,9 @@ async def compute_premium_accuracy(
         # Direction vs Premium disagreement:
         # compare the SAME episode at the headline horizon.
         # --------------------------------------------------------
-        if spot_grade in ("correct", "wrong", "flat") and main_grade in (
-            "correct", "wrong", "flat"
-        ):
-            if spot_grade == "correct" and main_grade == "correct":
-                disagreement["both_correct"] += 1
-            elif spot_grade == "wrong" and main_grade == "wrong":
-                disagreement["both_wrong"] += 1
-            elif (
-                spot_grade == "correct"
-                and main_grade == "wrong"
-            ):
-                disagreement["spot_correct_premium_wrong"] += 1
-            elif (
-                spot_grade == "wrong"
-                and main_grade == "correct"
-            ):
-                disagreement["spot_wrong_premium_correct"] += 1
-            elif (
-                spot_grade in ("correct", "wrong")
-                and main_grade == "flat"
-            ):
-                disagreement["spot_graded_premium_flat"] += 1
-            elif (
-                spot_grade == "flat"
-                and main_grade in ("correct", "wrong")
-            ):
-                disagreement["spot_flat_premium_graded"] += 1
-        else:
-            disagreement["missing"] += 1
+        _record_direction_premium_disagreement(
+            disagreement, spot_grade, main_grade
+        )
 
         # --------------------------------------------------------
         # MFE / MAE measured from SIGNAL time forward.
@@ -1632,12 +1975,25 @@ async def compute_premium_accuracy(
 
         "actionable_episodes": len(episodes),
         "signals_seen": len(episodes),
+        "risk_approved_episodes": len(episodes),
+        "legacy_risk_unverified_episodes": legacy_risk_unverified_episodes,
+        "unapproved_actionable_episodes": unapproved_actionable_episodes,
+        "risk_authority_basis": "V2_ENTRY_RISK_AUTHORITY_APPROVED_ONLY",
         "episode_gap_minutes": (
             CALIBRATION_EPISODE_GAP_MIN
         ),
 
         "pending_at_headline_horizon": pending,
         "no_premium_data": no_data,
+        "no_premium_data_reasons": no_data_reasons,
+        "no_premium_data_reasons_by_action": no_data_by_action,
+        "no_premium_data_examples": no_data_examples,
+        "session_unavailable_at_headline_horizon":
+            session_unavailable_by_horizon[horizon_minutes],
+        "session_unavailable_by_horizon": {
+            str(h): session_unavailable_by_horizon[h]
+            for h in HORIZONS_MINUTES
+        },
 
         "overall": _fmt_bucket2(
             overall[horizon_minutes]
@@ -1704,14 +2060,7 @@ async def compute_premium_accuracy(
 
         "disagreement": {
             **disagreement,
-            "comparable": (
-                disagreement["both_correct"]
-                + disagreement["both_wrong"]
-                + disagreement["spot_correct_premium_wrong"]
-                + disagreement["spot_wrong_premium_correct"]
-                + disagreement["spot_graded_premium_flat"]
-                + disagreement["spot_flat_premium_graded"]
-            ),
+            "comparable": _disagreement_comparable_count(disagreement),
             "total_episodes": len(episodes),
             "direct_direction_premium_disagreements": (
                 disagreement["spot_correct_premium_wrong"]
@@ -1796,5 +2145,5 @@ async def compute_premium_accuracy(
         },
 
         "accuracy_basis":
-            "EXPLICIT_ACTION_INDEPENDENT_EPISODES",
+            "V2_RISK_APPROVED_EXPLICIT_ACTION_INDEPENDENT_EPISODES",
     }
