@@ -6,9 +6,17 @@ Confluence, Market Regime, Trade Levels, Risk Engine
 
 import pytest
 from app.services.confluence_engine import run_confluence_engine
-from app.services.market_regime import classify_market_regime
+from app.services.market_regime import classify_market_regime, _time_session
 from app.services.trade_levels import calculate_trade_levels
 from app.services.risk_engine import assess_risk
+
+
+@pytest.fixture(autouse=True)
+def fixed_market_session(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_regime._time_session",
+        lambda: "MID",
+    )
 
 
 # ── Sample market data builders ───────────────────────────────────────────
@@ -121,6 +129,37 @@ class TestConfluenceEngine:
 # ── Market Regime Tests ───────────────────────────────────────────────────
 
 class TestMarketRegime:
+    def test_time_session_boundaries(self, monkeypatch):
+        import app.services.market_regime as mr
+
+        class FixedDateTime:
+            @classmethod
+            def now(cls, tz=None):
+                from datetime import datetime
+                return datetime(2026, 9, 3, 9, 14, tzinfo=tz)
+
+        monkeypatch.setattr(mr, "datetime", FixedDateTime)
+        assert _time_session() == "PRE_MARKET"
+
+        for hour, minute, expected in [
+            (9, 15, "OPENING"),
+            (9, 44, "OPENING"),
+            (9, 45, "MID"),
+            (14, 59, "MID"),
+            (15, 0, "CLOSING"),
+            (15, 30, "CLOSING"),
+            (15, 31, "POST_MARKET"),
+        ]:
+            class FixedDateTime:
+                @classmethod
+                def now(cls, tz=None):
+                    from datetime import datetime
+                    return datetime(2026, 9, 3, hour, minute, tzinfo=tz)
+
+            monkeypatch.setattr(mr, "datetime", FixedDateTime)
+            assert _time_session() == expected
+
+
 
     def test_trend_up(self):
         data   = make_market_data(adx=28, di_plus=26, di_minus=14)
@@ -141,18 +180,22 @@ class TestMarketRegime:
         assert result["option_buying_allowed"] is False
         assert result["option_selling_allowed"] is True
 
-    def test_high_volatility(self):
+    def test_high_volatility_is_soft_context(self):
         data   = make_market_data(vix=28)
         result = classify_market_regime(data)
         assert result["regime"] == "HIGH_VOLATILITY"
-        assert result["no_trade"] is True
-        assert result["option_buying_allowed"] is False
+        assert result["no_trade"] is False
+        assert result["hard_no_trade"] is False
+        assert result["option_buying_allowed"] is True
+        assert result["option_selling_allowed"] is True
+        assert result["preferred_strategy"] == "CAUTIOUS STRATEGY - REDUCED CONFIDENCE"
 
     def test_market_closed(self):
         data   = make_market_data(market_open=False)
         result = classify_market_regime(data)
         assert result["regime"] == "NO_TRADE"
         assert result["no_trade"] is True
+        assert result["hard_no_trade"] is True
 
     def test_breakout(self):
         data = make_market_data(spot=24000, prev_close=23640, adx=22)  # +1.5% gap
@@ -163,6 +206,7 @@ class TestMarketRegime:
         data   = make_market_data(vix=32)
         result = classify_market_regime(data)
         assert result["no_trade"] is True
+        assert result["hard_no_trade"] is True
 
     def test_output_has_required_keys(self):
         result = classify_market_regime(make_market_data())
@@ -179,7 +223,7 @@ class TestTradeLevels:
         data   = make_market_data()
         result = calculate_trade_levels(data, "bullish", spot=24000, option_ltp=150)
         assert result["direction"] == "bullish"
-        assert result["stop_loss_spot"] < 24000
+        assert result["stop_loss_spot"] < result["trigger"]
         assert result["target_1_spot"] > 24000
         assert result["target_2_spot"] > result["target_1_spot"]
         assert result["trigger"] > 0
@@ -203,6 +247,18 @@ class TestTradeLevels:
         assert result["option_entry"] is not None
         assert result["option_sl"] is not None
         assert result["option_t1"] is not None
+        assert result["delta_is_real"] is False
+        assert result["theta_adjustment_applied"] is False
+
+    def test_real_delta_and_theta_adjustment_metadata(self):
+        data = make_market_data()
+        result = calculate_trade_levels(
+            data, "bullish", spot=24000, option_ltp=120,
+            delta=0.5, theta_per_day=-2.0, assumed_hold_days=1.0,
+        )
+        assert result["delta_is_real"] is True
+        assert result["theta_adjustment_applied"] is True
+        assert result["theta_per_day_used"] == -2.0
 
     def test_option_sl_above_floor(self):
         data   = make_market_data()
@@ -230,8 +286,9 @@ class TestRiskEngine:
         params = dict(
             capital=200000,
             entry_price=150,
-            stop_loss_price=100,
+            stop_loss_price=125,
             rr_ratio=2.0,
+            option_rr_ratio=2.0,
             market_regime="TREND_UP",
             vix=14,
             days_to_expiry=7,
@@ -248,6 +305,21 @@ class TestRiskEngine:
         assert result["allowed"] is True
         assert result["lots"] >= 1
         assert result["max_loss"] > 0
+        assert result["max_loss"] <= result["max_risk_amount"]
+
+    def test_minimum_one_lot_exceeding_budget_is_rejected(self):
+        result = assess_risk(**self._good_params(stop_loss_price=100))
+
+        assert result["allowed"] is False
+        assert result["lots"] == 0
+        assert result["quantity"] == 0
+        assert result["max_loss"] == 0
+        assert result["risk_per_lot"] == 3250
+        assert result["max_risk_amount"] == 2000
+        assert any(
+            "Minimum one-lot risk" in reason
+            for reason in result["no_trade_reasons"]
+        )
 
     def test_daily_loss_exceeded(self):
         result = assess_risk(**self._good_params(capital=200000, daily_pnl=-7000))
@@ -275,9 +347,14 @@ class TestRiskEngine:
         result = assess_risk(**self._good_params(vix=32))
         assert result["allowed"] is False
 
-    def test_high_volatility_regime(self):
+    def test_high_volatility_regime_is_allowed_with_high_risk_warning(self):
         result = assess_risk(**self._good_params(market_regime="HIGH_VOLATILITY"))
-        assert result["allowed"] is False
+        assert result["allowed"] is True
+        assert result["risk_level"] == "HIGH"
+        assert sum(
+            "HIGH_VOLATILITY regime" in warning
+            for warning in result["warnings"]
+        ) == 1
 
     def test_expiry_gamma_regime(self):
         result = assess_risk(**self._good_params(market_regime="EXPIRY_HIGH_GAMMA"))
@@ -288,7 +365,7 @@ class TestRiskEngine:
         assert result["allowed"] is False
 
     def test_low_rr_rejected(self):
-        result = assess_risk(**self._good_params(rr_ratio=1.0))
+        result = assess_risk(**self._good_params(rr_ratio=1.0, option_rr_ratio=1.0))
         assert result["allowed"] is False
 
     def test_signal_strength_does_not_increase_position(self):
@@ -300,5 +377,72 @@ class TestRiskEngine:
     def test_position_size_from_capital(self):
         r_small = assess_risk(**self._good_params(capital=100000))
         r_large = assess_risk(**self._good_params(capital=500000))
-        # More capital → more lots
-        assert r_large["lots"] >= r_small["lots"]
+        # No minimum lot when the budget cannot cover one lot.
+        assert r_small["allowed"] is False
+        assert r_small["lots"] == 0
+        # Higher capital covers the modeled risk while remaining within budget.
+        assert r_large["allowed"] is True
+        assert r_large["lots"] >= 1
+        assert r_large["max_loss"] <= r_large["max_risk_amount"]
+
+
+def _confluence_quality_fixture(oi_usable=True, volume_usable=True):
+    return {
+        "available": True,
+        "status": "adequate" if oi_usable and volume_usable else "limited",
+        "oi_usable": oi_usable,
+        "volume_usable": volume_usable,
+        "reason": "OI coverage insufficient",
+        "volume_reason": "Volume coverage insufficient",
+    }
+
+
+def _confluence_factor_map(result):
+    return {factor["id"]: factor for factor in result["factors"]}
+
+
+def test_confluence_quality_low_oi_suppresses_option_flow_factors():
+    data = make_market_data()
+    baseline = _confluence_factor_map(run_confluence_engine(data))
+    data["option_chain_quality"] = _confluence_quality_fixture(
+        oi_usable=False, volume_usable=True
+    )
+
+    factors = _confluence_factor_map(run_confluence_engine(data))
+    for fid in ("pcr", "oi_change", "call_writing", "put_writing"):
+        assert factors[fid]["direction"] == "neutral"
+        assert factors[fid]["score"] == 0
+        assert "withheld" in factors[fid]["reason"]
+        assert factors[fid]["max_score"] == baseline[fid]["max_score"]
+
+
+def test_confluence_quality_low_volume_only_suppresses_writing():
+    data = make_market_data()
+    baseline = _confluence_factor_map(run_confluence_engine(data))
+    data["pcr_quality"] = {
+        "chain_quality": _confluence_quality_fixture(
+            oi_usable=True, volume_usable=False
+        )
+    }
+
+    factors = _confluence_factor_map(run_confluence_engine(data))
+    for fid in ("pcr", "oi_change"):
+        assert factors[fid]["direction"] == baseline[fid]["direction"]
+        assert factors[fid]["score"] == baseline[fid]["score"]
+
+    for fid in ("call_writing", "put_writing"):
+        assert factors[fid]["direction"] == "neutral"
+        assert factors[fid]["score"] == 0
+        assert "volume coverage insufficient" in factors[fid]["reason"].lower()
+
+
+def test_confluence_quality_missing_preserves_legacy_scoring():
+    result = run_confluence_engine(make_market_data())
+    factors = _confluence_factor_map(result)
+
+    assert factors["pcr"]["direction"] == "bullish"
+    assert factors["pcr"]["score"] > 0
+    assert factors["oi_change"]["direction"] == "bullish"
+    assert factors["oi_change"]["score"] > 0
+    assert all("quality limited" not in f["reason"].lower()
+               for f in result["factors"])

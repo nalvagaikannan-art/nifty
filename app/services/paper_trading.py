@@ -18,6 +18,9 @@ from __future__ import annotations
 import uuid
 import json
 import logging
+import math
+
+from app.services.contract_specs import resolve_lot_size
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -25,6 +28,7 @@ from sqlalchemy import Column, String, Float, Integer, DateTime, JSON, Boolean, 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Base, AsyncSessionLocal
+from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +40,9 @@ STATUS_STOPPED   = "STOPPED"
 STATUS_CLOSED    = "CLOSED"
 STATUS_EXPIRED   = "EXPIRED"
 
-LOT_SIZE_MAP = {
-    "NIFTY":     50,
-    "BANKNIFTY": 15,
-    "FINNIFTY":  40,
-}
+# PAPER_TRADING_LOT_SIZE_SOURCE_20260925
+# Contract size comes from the resolved chain metadata when available;
+# otherwise use the current-contract fallback resolver.
 
 
 # ── SQLAlchemy Model ──────────────────────────────────────────────────────
@@ -49,8 +51,8 @@ class PaperTrade(Base):
     __tablename__ = "paper_trades"
 
     id                = Column(String, primary_key=True, default=lambda: str(uuid.uuid4())[:8])
-    created_at        = Column(DateTime, default=datetime.utcnow)
-    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at        = Column(DateTime, default=now_utc_naive)
+    updated_at        = Column(DateTime, default=now_utc_naive, onupdate=now_utc_naive)
     closed_at         = Column(DateTime, nullable=True)
 
     symbol            = Column(String, nullable=False)
@@ -97,7 +99,7 @@ class TradeJournal(Base):
 
     id                = Column(String, primary_key=True, default=lambda: str(uuid.uuid4())[:8])
     paper_trade_id    = Column(String, nullable=True)
-    created_at        = Column(DateTime, default=datetime.utcnow)
+    created_at        = Column(DateTime, default=now_utc_naive)
     closed_at         = Column(DateTime, nullable=True)
 
     symbol            = Column(String)
@@ -125,20 +127,67 @@ class TradeJournal(Base):
 
 # ── Service functions ──────────────────────────────────────────────────────
 
+def _validated_positive_integer(value, field_name, maximum=None):
+    """Validate an integer quantity input without silently truncating it."""
+    if isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    if not math.isfinite(numeric) or not numeric.is_integer() or numeric < 1:
+        raise ValueError(f"{field_name} must be a positive integer")
+
+    result = int(numeric)
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{field_name} cannot exceed {maximum}")
+
+    return result
+
+
 async def open_paper_trade(data: Dict) -> Dict:
     """
     New paper trade open செய்கிறோம்.
     data keys: symbol, strike, option_type, entry_price, stop_loss,
-               target_1, target_2, quantity, lots,
+               target_1, target_2, quantity, lots, lot_size,
                signal_strength, confluence_score, market_regime, ...
     """
-    async with AsyncSessionLocal() as session:
-        lot_size = LOT_SIZE_MAP.get(data.get("symbol", "NIFTY").upper(), 50)
-        lots     = data.get("lots", 1)
-        qty      = data.get("quantity", lots * lot_size)
+    # Validate all contract sizing inputs before opening a database session.
+    _symbol = str(data.get("symbol") or "NIFTY").strip().upper()
+    if not _symbol:
+        raise ValueError("symbol is required")
 
+    lots = _validated_positive_integer(
+        data.get("lots", 1), "lots", maximum=10
+    )
+
+    raw_lot_size = data.get("lot_size")
+    if raw_lot_size is None:
+        raw_lot_size = resolve_lot_size(
+            _symbol, data.get("option_chain")
+        )
+
+    lot_size = _validated_positive_integer(raw_lot_size, "lot_size")
+    expected_quantity = lots * lot_size
+
+    submitted_quantity = data.get("quantity")
+    if submitted_quantity is None:
+        qty = expected_quantity
+    else:
+        qty = _validated_positive_integer(
+            submitted_quantity, "quantity"
+        )
+        if qty != expected_quantity:
+            raise ValueError(
+                "quantity must equal lots * lot_size "
+                f"(expected {expected_quantity}, received {qty})"
+            )
+
+    async with AsyncSessionLocal() as session:
         trade = PaperTrade(
-            symbol           = data.get("symbol", "NIFTY").upper(),
+            symbol           = _symbol,
             expiry           = data.get("expiry"),
             strike           = float(data.get("strike", 0)),
             option_type      = data.get("option_type", "CE").upper(),
@@ -182,8 +231,8 @@ async def close_paper_trade(trade_id: str, exit_price: float, exit_reason: str =
 
         trade.exit_price   = exit_price
         trade.exit_reason  = exit_reason
-        trade.closed_at    = datetime.utcnow()
-        trade.updated_at   = datetime.utcnow()
+        trade.closed_at    = now_utc_naive()
+        trade.updated_at   = now_utc_naive()
 
         # P&L
         if trade.side == "BUY":
@@ -365,7 +414,7 @@ async def get_paper_trade_stats(symbol: Optional[str] = None) -> Dict:
 async def get_daily_pnl() -> float:
     """Today's realized P&L from paper trades"""
     async with AsyncSessionLocal() as session:
-        today = datetime.utcnow().date()
+        today = now_utc_naive().date()
         q = select(PaperTrade).where(
             PaperTrade.status != STATUS_OPEN,
             func.date(PaperTrade.closed_at) == today

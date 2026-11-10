@@ -83,6 +83,7 @@ function renderPosition(p) {
       '<span class="ai-tag">🤖 ' + esc(p.ai_suggestion) + '</span>' +
       '<button class="btn btn-danger" style="font-size:.75rem;padding:.3rem .8rem;margin-left:auto;" onclick="squareOff(\'' + esc(p.symbol) + '\')">Square Off</button>' +
     '</div>' +
+    (p.ai_reasons && p.ai_reasons.length ? '<div class="pos-reasons">' + p.ai_reasons.map(function(r){ return '<div class="pos-reason-line">\u2022 ' + esc(r) + '</div>'; }).join('') + '</div>' : '') +
   '</div>';
 }
 

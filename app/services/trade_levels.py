@@ -24,6 +24,9 @@ Output per trade setup:
 
 from typing import Dict, List, Optional, Tuple
 import logging
+from app.utils.helpers import intraday_hold_days_to_close
+
+from app.services.contract_specs import resolve_lot_size
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +91,10 @@ def calculate_trade_levels(
     direction: str,       # "bullish" or "bearish"
     spot: float,
     option_ltp: float,    # Current option premium
-    lot_size: int = 50,   # NIFTY lot size
+    lot_size: int = resolve_lot_size("NIFTY"),  # COMMON_CONTRACT_LOT_FALLBACK_20260925
     delta: Optional[float] = None,          # real Black-Scholes delta for the chosen strike, if known
     theta_per_day: Optional[float] = None,  # ₹/day decay for the chosen strike, if known (negative)
-    assumed_hold_days: float = 1.0,         # how long you expect to hold before hitting T2 — used to net out theta
+    assumed_hold_days: Optional[float] = None, # explicit override; otherwise snapshot → 15:30 IST
     regime: Optional[str] = None,           # market_regime.classify_market_regime()'s "regime" string
 ) -> Dict:
     """
@@ -102,7 +105,7 @@ def calculate_trade_levels(
         direction: "bullish" (BUY CE) or "bearish" (BUY PE)
         spot: Current NIFTY spot price
         option_ltp: Option premium
-        lot_size: Lot size (default 50 for NIFTY)
+        lot_size: Contract lot size; exact chain size should be supplied by caller
         delta: real per-strike delta (options_greeks.black_scholes_greeks) —
             when given, this REPLACES the old fixed 0.45 approximation used
             to map underlying-point risk to option-premium risk. Review
@@ -173,6 +176,20 @@ def calculate_trade_levels(
             sl_spot  = spot - atr * profile["sl_atr_mult"]
             sl_method = f"{profile['sl_atr_mult']:.2g}× ATR below entry ({atr:.0f})"
 
+        # Structural SL safety cap: a distant support/resistance level must
+        # never create a stop wider than the regime's own ATR risk boundary.
+        # The entry trigger is the correct reference for this cap, not spot.
+        if atr > 0:
+            atr_cap_sl = entry_low - atr * profile["sl_atr_mult"]
+            if sl_spot < atr_cap_sl:
+                reasons.append(
+                    f"Structural SL capped at {profile['sl_atr_mult']:.2g}×ATR from entry"
+                )
+                sl_spot = atr_cap_sl
+                sl_method = (
+                    f"ATR-capped structural SL ({profile['sl_atr_mult']:.2g}×ATR)"
+                )
+
         reasons.append(f"SL basis: {sl_method}")
 
     else:  # bearish
@@ -202,6 +219,20 @@ def calculate_trade_levels(
         else:
             sl_spot  = spot + atr * profile["sl_atr_mult"]
             sl_method = f"{profile['sl_atr_mult']:.2g}× ATR above entry ({atr:.0f})"
+
+        # Structural SL safety cap: a distant support/resistance level must
+        # never create a stop wider than the regime's own ATR risk boundary.
+        # The entry trigger is the correct reference for this cap, not spot.
+        if atr > 0:
+            atr_cap_sl = entry_high + atr * profile["sl_atr_mult"]
+            if sl_spot > atr_cap_sl:
+                reasons.append(
+                    f"Structural SL capped at {profile['sl_atr_mult']:.2g}×ATR from entry"
+                )
+                sl_spot = atr_cap_sl
+                sl_method = (
+                    f"ATR-capped structural SL ({profile['sl_atr_mult']:.2g}×ATR)"
+                )
 
         reasons.append(f"SL basis: {sl_method}")
 
@@ -235,12 +266,32 @@ def calculate_trade_levels(
     eff_delta = abs(delta) if delta is not None else DELTA_APPROX_FALLBACK
     delta_is_real = delta is not None
 
+    # AUTHORITATIVE_INTRADAY_THETA_TIME_20260925:
+    # Use the actual snapshot timestamp → today's 15:30 IST close.
+    # No arbitrary 0.25/0.5/1.0-day assumption.
+    if assumed_hold_days is None:
+        hold_days = intraday_hold_days_to_close(market_data.get("timestamp"))
+    else:
+        hold_days = max(0.0, float(assumed_hold_days))
+
     if option_ltp > 0:
         opt_risk = round(risk_spot * eff_delta, 1)
         opt_sl   = round(option_ltp - opt_risk, 1)
         opt_t1   = round(option_ltp + opt_risk * t1_r, 1)
         opt_t2   = round(option_ltp + opt_risk * t2_r, 1)
         opt_t3   = round(option_ltp + opt_risk * t3_r, 1)
+
+        # THETA_TARGET_PRESERVE_FIX:
+        # Keep valid pre-theta targets available when theta adjustment
+        # alone would make T1/T2/T3 ordering invalid.
+        pre_theta_t1 = opt_t1
+        pre_theta_t2 = opt_t2
+        pre_theta_t3 = opt_t3
+        pre_theta_targets_valid = (
+            pre_theta_t1 > option_ltp
+            and pre_theta_t2 > pre_theta_t1
+            and pre_theta_t3 > pre_theta_t2
+        )
 
         # Net theta decay OUT of the targets (review #23/#38: a
         # directionally-correct trade can still lose money to time decay —
@@ -249,17 +300,49 @@ def calculate_trade_levels(
         # bigger adverse move to trigger, since decay is already working
         # against the position independent of direction).
         theta_note = ""
-        if theta_per_day is not None and theta_per_day < 0 and assumed_hold_days > 0:
-            expected_decay = round(abs(theta_per_day) * assumed_hold_days, 1)
-            opt_t1 = round(opt_t1 - expected_decay, 1)
-            opt_t2 = round(opt_t2 - expected_decay, 1)
-            opt_t3 = round(opt_t3 - expected_decay, 1)
+        if theta_per_day is not None and theta_per_day < 0 and hold_days > 0:
+            expected_decay = round(abs(theta_per_day) * hold_days, 1)
+
+            # BUY_THETA_SIGN_FIX_20260925:
+            # Theta decay works AGAINST a long option.  Therefore the
+            # premium target must require an EXTRA move to preserve the
+            # intended structural reward.  Subtracting theta from a BUY
+            # target falsely moves the target closer to entry and can turn
+            # a 1R target into a tiny reward (e.g. ₹19.6 risk vs ₹1.6 T1).
+            opt_t1 = round(opt_t1 + expected_decay, 1)
+            opt_t2 = round(opt_t2 + expected_decay, 1)
+            opt_t3 = round(opt_t3 + expected_decay, 1)
+
+            # SL remains cushioned for time decay: some premium erosion can
+            # occur even without an adverse underlying move.
             opt_sl = round(opt_sl - expected_decay * 0.5, 1)
-            theta_note = f", net of ~₹{expected_decay:.1f} expected theta decay over {assumed_hold_days:.0f}d"
+            theta_note = f", requires ~₹{expected_decay:.1f} extra premium move for expected theta decay over {hold_days:.2f}d"
 
         # Premium SL floor: never let option go to zero
         premium_sl_floor = round(option_ltp * 0.40, 1)
         opt_sl = max(opt_sl, premium_sl_floor)
+
+        # Final option-premium ordering validation.
+        # Option levels must stay entirely in premium space:
+        # SL < Entry < T1 < T2 < T3.
+        # Theta adjustment can otherwise push a target below entry.
+        option_order_valid = (
+            opt_sl < option_ltp
+            and opt_t1 > option_ltp
+            and opt_t2 > opt_t1
+            and opt_t3 > opt_t2
+        )
+        if not option_order_valid:
+            if pre_theta_targets_valid:
+                reasons.append(
+                    "Theta adjustment invalidated targets — preserved valid pre-theta T1/T2/T3"
+                )
+                opt_t1 = pre_theta_t1
+                opt_t2 = pre_theta_t2
+                opt_t3 = pre_theta_t3
+            else:
+                reasons.append("Invalid option target order after theta adjustment")
+                opt_t1 = opt_t2 = opt_t3 = None
 
         delta_basis = f"real delta {eff_delta:.2f}" if delta_is_real else f"approx delta {eff_delta:.2f} (real Greeks unavailable)"
         reasons.append(
@@ -297,6 +380,18 @@ def calculate_trade_levels(
         quality = "LOW"
         reasons.append(f"⚠️ R:R {rr_ratio:.1f} below minimum {regime_min_rr:.2g} — consider skipping")
 
+    # Actual option-premium R:R at T2.
+    # Keep rr_ratio unchanged: it is the regime/spot-model R:R used
+    # by setup-quality and risk logic.
+    option_rr_ratio = None
+    if option_ltp > 0 and opt_sl is not None and opt_t2 is not None:
+        option_risk_actual = option_ltp - opt_sl
+        option_reward_actual = opt_t2 - option_ltp
+        if option_risk_actual > 0 and option_reward_actual > 0:
+            option_rr_ratio = round(
+                option_reward_actual / option_risk_actual, 2
+            )
+
     return {
         "direction":       direction,
         "trigger":         round(trigger, 1),
@@ -318,6 +413,7 @@ def calculate_trade_levels(
         "theta_per_day_used": theta_per_day,
         "risk_per_lot":    risk_per_lot,
         "rr_ratio":        rr_ratio,
+        "option_rr_ratio":  option_rr_ratio,
         "setup_quality":   quality,
         "atr":             round(atr, 1),
         "atr_pct":         round(atr_pct, 2),

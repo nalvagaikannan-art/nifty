@@ -2,10 +2,23 @@ from fastapi import APIRouter, Depends
 from app.services.option_analyzer import OptionAnalyzer
 from app.services.data_fetcher import DataFetcher
 from app.api.deps import get_fetcher
+from app.schemas import (OptionsChainAnalyticsResponse, OptionsChainAliasResponse, OptionPcrResponse, OptionMaxPainResponse)
 
 router = APIRouter()
 
-@router.get("/pcr/{symbol}")
+
+def _strikes_for_range(range_value: str):
+    value = str(range_value or "10").strip().lower()
+    if value == "full":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return 10
+    return max(1, min(n, 100))
+
+
+@router.get("/pcr/{symbol}", response_model=OptionPcrResponse)
 async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()
@@ -13,7 +26,7 @@ async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     pcr = analyzer.compute_pcr(df)
     return {"symbol": symbol, "pcr": pcr}
 
-@router.get("/maxpain/{symbol}")
+@router.get("/maxpain/{symbol}", response_model=OptionMaxPainResponse)
 async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()
@@ -21,13 +34,19 @@ async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     maxpain = analyzer.compute_max_pain(df)
     return {"symbol": symbol, "max_pain": maxpain}
 
-@router.get("/chain/{symbol}")
+@router.get("/chain/{symbol}", response_model=OptionsChainAnalyticsResponse)
 async def get_option_chain(
     symbol: str,
     expiry: str = None,
+    range: str = "10",
     fetcher: DataFetcher = Depends(get_fetcher),
 ):
-    chain = await fetcher.get_option_chain(symbol, expiry=expiry)
+    strikes_each_side = _strikes_for_range(range)
+    chain = await fetcher.get_option_chain(
+        symbol,
+        expiry=expiry,
+        strikes_each_side=strikes_each_side,
+    )
     analyzer = OptionAnalyzer()
     df = analyzer.process_option_chain(chain)
     underlying = chain.get("underlying_price", 0)
@@ -48,10 +67,11 @@ async def get_option_chain(
         "data":             chain.get("data", []),
     }
 
-@router.get("/{symbol}")
+@router.get("/{symbol}", response_model=OptionsChainAliasResponse)
 async def get_option_chain_alias(
     symbol: str,
     expiry: str = None,
+    range: str = "10",
     fetcher: DataFetcher = Depends(get_fetcher),
 ):
     """Alias for /chain/{symbol}, flattened for the terminal/beginner
@@ -60,7 +80,7 @@ async def get_option_chain_alias(
     /chain/{symbol} stays the canonical, unchanged endpoint for existing
     consumers — no duplicate chain fetch here, just reshaping.
     """
-    data = await get_option_chain(symbol, expiry, fetcher)
+    data = await get_option_chain(symbol, expiry, range, fetcher)
     oi_sum = data.get("oi_summary", {})
     data["atm_call_oi"] = oi_sum.get("atm_call_oi")
     data["atm_put_oi"]  = oi_sum.get("atm_put_oi")

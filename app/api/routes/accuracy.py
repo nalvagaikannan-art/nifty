@@ -24,12 +24,23 @@ from app.services.signal_accuracy import (
     compute_signal_accuracy, compute_premium_accuracy, calibrate_confidence, HORIZONS_MINUTES,
 )
 from app.services.error_log import record_error, recent_errors
+from app.services.ledger_performance import compute_ledger_performance
+from app.services.session_study import compute_session_study
+from app.schemas import (
+    AccuracyIndicatorsResponse,
+    AccuracySignalsResponse,
+    AccuracyPremiumResponse,
+    AccuracyLedgerPerformanceResponse,
+    SessionStudyResponse,
+    ConfidenceCalibrationResponse,
+    AccuracyStatusResponse,
+)
 import logging
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 
 # Each accuracy computation scans up to 60 days of MarketData/AnalysisResult
 # rows in-process. Left unbounded, a slow/heavy computation on Render's free
@@ -61,7 +72,7 @@ async def _run_with_timeout(coro, *, endpoint: str, sym: str, timeout_detail: st
         raise HTTPException(500, detail=error_detail)
 
 
-@router.get("/indicators/{symbol}")
+@router.get("/indicators/{symbol}", response_model=AccuracyIndicatorsResponse)
 async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
     sym = _check_symbol(symbol)
     return await _run_with_timeout(
@@ -72,7 +83,7 @@ async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
     )
 
 
-@router.get("/signals/{symbol}")
+@router.get("/signals/{symbol}", response_model=AccuracySignalsResponse)
 async def signal_accuracy(
     symbol: str,
     days: int = Query(15, ge=1, le=60),
@@ -87,7 +98,7 @@ async def signal_accuracy(
     )
 
 
-@router.get("/premium/{symbol}")
+@router.get("/premium/{symbol}", response_model=AccuracyPremiumResponse)
 async def premium_accuracy(
     symbol: str,
     days: int = Query(15, ge=1, le=60),
@@ -105,7 +116,57 @@ async def premium_accuracy(
     )
 
 
-@router.get("/calibration/{symbol}")
+@router.get("/ledger/{symbol}", response_model=AccuracyLedgerPerformanceResponse)
+async def ledger_performance(
+    symbol: str,
+    days: int = Query(15, ge=1, le=60),
+    horizon_minutes: int = Query(60, description=f"one of {HORIZONS_MINUTES}"),
+):
+    """Read-only DailySignalLedger replay.
+
+    Separates underlying/index-direction returns from selected-option
+    premium returns and reports exact rupee P&L only when the entry ledger
+    snapshot contains the frozen historical lot size.
+    """
+    sym = _check_symbol(symbol)
+    return await _run_with_timeout(
+        compute_ledger_performance(
+            sym,
+            days=days,
+            horizon_minutes=horizon_minutes,
+        ),
+        endpoint="ledger",
+        sym=sym,
+        timeout_detail=f"Ledger performance for {days} days is taking too long ? try a smaller range (7 days).",
+        error_detail="Ledger performance computation failed",
+    )
+
+
+@router.get("/session-study/{symbol}", response_model=SessionStudyResponse)
+async def session_study(
+    symbol: str,
+    days: int = Query(30, ge=1, le=90),
+):
+    """Read-only intraday Session Study.
+
+    Reports opening behaviour, closing-window coverage, and the dedicated
+    14:40 IST late-session actionable-signal bucket without changing strategy
+    scores, gates, lifecycle state, or the production DailySignalLedger.
+    """
+    sym = _check_symbol(symbol)
+    return await _run_with_timeout(
+        compute_session_study(sym, days=days),
+        endpoint="session-study",
+        sym=sym,
+        timeout_detail=(
+            f"Session Study for {days} days is taking too long — "
+            "try a smaller range (7 days)."
+        ),
+        error_detail="Session Study computation failed",
+    )
+
+
+@router.get("/calibration/{symbol}", response_model=ConfidenceCalibrationResponse)
 async def confidence_calibration(
     symbol: str,
     confidence: float = Query(..., ge=0, le=100, description="Current Signal Strength (0-100) to look up"),
@@ -128,7 +189,7 @@ async def confidence_calibration(
     )
 
 
-@router.get("/status/{symbol}")
+@router.get("/status/{symbol}", response_model=AccuracyStatusResponse)
 async def accuracy_status(symbol: str):
     """Persistence diagnostics: proves whether history is actually being stored."""
     sym = _check_symbol(symbol)

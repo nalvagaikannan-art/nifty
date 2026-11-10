@@ -61,3 +61,33 @@ def test_missing_expiry_in_chain_data_is_empty_not_fabricated():
     chain = _chain("")
     strikes = _pick_strikes(chain, is_call=True, spot=24650.0)
     assert all(s["expiry"] == "" for s in strikes)
+
+
+def test_recommended_option_sell_ce_preserves_sell_levels():
+    from app.api.routes.analysis import _pick_recommended_option
+
+    market_data = {
+        "spot": {"price": 24650.0},
+        "technicals": {"atr": 100.0},
+        "option_chain": _chain("31-Dec-2099"),
+    }
+    rec = _pick_recommended_option(market_data, {}, "SELL CE")
+
+    assert rec["available"] is True
+    assert rec["type"] == "CE"
+    assert rec["sl"] > rec["entry_price"] > rec["t1"] > rec["t2"] > rec["t3"]
+
+
+def test_recommended_option_sell_pe_preserves_sell_levels():
+    from app.api.routes.analysis import _pick_recommended_option
+
+    market_data = {
+        "spot": {"price": 24650.0},
+        "technicals": {"atr": 100.0},
+        "option_chain": _chain("08-Oct-2026"),
+    }
+    rec = _pick_recommended_option(market_data, {}, "SELL PE")
+
+    assert rec["available"] is True
+    assert rec["type"] == "PE"
+    assert rec["sl"] > rec["entry_price"] > rec["t1"] > rec["t2"] > rec["t3"]

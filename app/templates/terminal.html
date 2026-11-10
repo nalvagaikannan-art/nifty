@@ -1550,6 +1550,7 @@ font-weight: 700;
                 <button class="sym-pill on" data-sym="NIFTY">NIFTY</button>
                 <button class="sym-pill" data-sym="BANKNIFTY">BNIFTY</button>
                 <button class="sym-pill" data-sym="FINNIFTY">FINNIFTY</button>
+                <button class="sym-pill" data-sym="SENSEX">SENSEX</button>
             </div>
             <button class="refresh-btn" id="refreshBtn">⟳ Refresh</button>
         </div>
@@ -2564,8 +2565,20 @@ font-weight: 700;
         loadAll();
 
         // Auto refresh every 30s
-        setInterval(loadAll, CONFIG.REFRESH_INTERVAL);
+        function terminalIsNseMarketHoursNow(){
+            const now = new Date();
+            const ist = new Date(now.getTime() + (330 * 60000));
+            const day = ist.getUTCDay(); // 0=Sun, 6=Sat
+            if (day === 0 || day === 6) return false;
 
+            const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+            return mins >= (9 * 60 + 15) && mins < (15 * 60 + 30);
+        }
+
+        setInterval(function(){
+            if (!terminalIsNseMarketHoursNow()) return;
+            loadAll();
+        }, CONFIG.REFRESH_INTERVAL);
         /* ═══════════════════════════════════════════════
            WEBSOCKET (simulated for now)
            ═══════════════════════════════════════════════ */

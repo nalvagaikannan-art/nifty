@@ -179,7 +179,8 @@ class TechnicalIndicators:
 
     @staticmethod
     def compute_from_ohlc(highs: List[float], lows: List[float], closes: List[float],
-                           volumes: List[float] = None, period: int = 14) -> Dict:
+                           volumes: List[float] = None, period: int = 14,
+                           session_data: Dict = None) -> Dict:
         """
         TRUE OHLC-based indicators — Wilder's ADX/ATR (uses High/Low/Close,
         not close-only approximation) and a real Supertrend, plus a proper
@@ -237,11 +238,41 @@ class TechnicalIndicators:
         # ── Real Supertrend (High/Low/Close + Wilder ATR, standard formula) ─
         supertrend, st_value = TechnicalIndicators._supertrend_ohlc(h, l, c, atr_series.values)
 
-        # ── Session VWAP (typical price weighted by real volume) ───────────
+        # ── Session VWAP / Volume ─────────────────────────────────────────
+        # EMA/MACD/ADX/ATR/Supertrend above may use historical warm-up.
+        # VWAP and volume spike/ratio must use the current-session scope when
+        # explicitly supplied by the caller (5m canonical live path).
         vwap = 0.0
         volume_spike = False
         volume_ratio = 1.0
-        if volumes and len(volumes) == n and sum(volumes) > 0:
+
+        sd = session_data if isinstance(session_data, dict) else {}
+        sh = sd.get("highs") or []
+        sl = sd.get("lows") or []
+        sc = sd.get("closes") or []
+        sv = sd.get("volumes") or []
+
+        if (
+            len(sh) == len(sl) == len(sc) == len(sv)
+            and len(sv) > 0
+            and sum(sv) > 0
+        ):
+            session_h = np.array(sh, dtype=float)
+            session_l = np.array(sl, dtype=float)
+            session_c = np.array(sc, dtype=float)
+            v = np.array(sv, dtype=float)
+
+            typical = (session_h + session_l + session_c) / 3.0
+            vwap = float(np.sum(typical * v) / np.sum(v))
+
+            recent_v = v[-20:]
+            avg_vol = np.mean(recent_v[:-1]) if len(recent_v) > 1 else recent_v[-1]
+            last_vol = v[-1]
+            volume_ratio = float(last_vol / avg_vol) if avg_vol > 0 else 1.0
+            volume_spike = volume_ratio > 1.5
+
+        elif volumes and len(volumes) == n and sum(volumes) > 0:
+            # Backward-compatible fallback when no explicit session scope exists.
             typical = (h + l + c) / 3.0
             v = np.array(volumes, dtype=float)
             vwap = float(np.sum(typical * v) / np.sum(v))

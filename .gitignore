@@ -3,3 +3,14 @@ __pycache__/
 .pytest_cache/
 data/
 .env
+
+# Virtual environment
+venv/
+
+# Logs
+logs/
+
+# Backup files
+*.bak
+*.bak-*
+*.bak_*

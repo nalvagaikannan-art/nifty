@@ -9,9 +9,11 @@ BUY CE / BUY PE / SELL CE / SELL PE / WAIT
 Order placement இல்லை — Analysis + Decision Support மட்டும்.
 """
 from fastapi import APIRouter, Depends, HTTPException
+from app.schemas import StrategyRecommendationResponse, StrategyHistoryResponse
 from app.services.market_analyzer import MarketAnalyzer
 from app.services.ai_engine import AIEngine
 from app.services.strategy_engine import generate_option_strategy, generate_price_levels
+from app.services.strategy_history import record_daily_signal_ledger
 from app.services.strategy_history import (
     record_signal, get_history, load_signal_state, save_signal_state,
     record_signal_persistent, get_history_persistent,
@@ -21,45 +23,219 @@ from app.services.decision_engine import apply_persistent_signal_lifecycle
 from app.services.market_regime import classify_market_regime
 from app.services.trade_levels import calculate_trade_levels
 from app.services.risk_engine import assess_risk
+from app.services.entry_risk_authority import (
+    build_entry_risk_authority, is_entry_risk_approved,
+)
+from app.services.entry_risk_service import (
+    assess_entry_risk_authority,
+)
 from app.services.paper_trading import get_open_trades, get_daily_pnl
 from app.exceptions import MarketDataError, AIProviderError
 from app.api.deps import get_analyzer, get_ai_engine
-from app.utils.helpers import safe_float, expiry_filter, days_to_expiry as _days_to_expiry
+from app.utils.helpers import safe_float, expiry_filter, days_to_expiry as _days_to_expiry, intraday_hold_days_to_close
 from app.utils.ai_result_cache import get_ai_analysis
-from app.services.options_greeks import black_scholes_greeks, mid_price, spread_pct
+from app.services.options_greeks import black_scholes_greeks, implied_volatility_from_price, mid_price, spread_pct
 from app.config import settings
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-import logging, math
+import asyncio, logging, math, time
 
 _IST = ZoneInfo("Asia/Kolkata")
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# V3: conservative fresh-entry gates. These do not change existing HOLD state.
+# ATOMIC_LIFECYCLE_FIX_20260923
+# Multiple browser pages/devices may evaluate NIFTY simultaneously.
+# Serialize only load -> lifecycle -> persist; never hold this lock during
+# slow market-data or AI work.
+_LIFECYCLE_LOCK = asyncio.Lock()
+
+
+# V3 fresh-entry gates retain confirmation and expiry-risk requirements.
+# Normalized confluence score affects trade confidence; it is not a standalone veto.
 ENTRY_MIN_SIGNAL_STRENGTH = 55
-ENTRY_MIN_CONFLUENCE = 5
 ENTRY_MIN_AGREEMENT = 3
 EXPIRY_DAY_MIN_SIGNAL_STRENGTH = 65
-EXPIRY_DAY_MIN_CONFLUENCE = 6
 EXPIRY_DAY_MIN_AGREEMENT = 4
 EXPIRY_DAY_MIN_ADX = 20
+
+
+
+def _signal_action_for_entry(best: str, lifecycle_state: str,
+                             lifecycle_active: str,
+                             fresh_entry_allowed: bool) -> str:
+    state = str(lifecycle_state or "WAIT").strip().upper()
+    active = str(lifecycle_active or "NONE").strip().upper()
+    if state.startswith("HOLD_CALL") and active == "CALL":
+        return "HOLD CALL BIAS"
+    if state.startswith("HOLD_PUT") and active == "PUT":
+        return "HOLD PUT BIAS"
+    return str(best or "WAIT").upper() if fresh_entry_allowed else "WAIT"
+
+
+def _forward_paper_capture_eligible(
+    *,
+    action,
+    lifecycle_state,
+    fresh_entry_allowed,
+    action_blocked,
+    signal_action,
+):
+    """Fail closed unless frozen metadata represents a fresh confirmed entry."""
+    action = str(action or "").upper().strip()
+    lifecycle_state = str(lifecycle_state or "").upper().strip()
+    signal_action = str(signal_action or "").upper().strip()
+
+    return bool(
+        fresh_entry_allowed is True
+        and not action_blocked
+        and lifecycle_state in {"CONFIRMED_CALL", "CONFIRMED_PUT"}
+        and action in {"BUY CE", "BUY PE", "SELL CE", "SELL PE"}
+        and signal_action == action
+    )
+
+
+def _enforce_action_safety_gate(
+    best: str,
+    best_score,
+    candidates: dict,
+    v3_gate: dict,
+    dec: dict,
+    regime: dict,
+) -> tuple:
+    """Keep critical gates, entry-gate failures and regime blocks consistent."""
+    decision = dec if isinstance(dec, dict) else {}
+    market_regime = regime if isinstance(regime, dict) else {}
+    gate = dict(v3_gate) if isinstance(v3_gate, dict) else {}
+
+    hard_gated = bool(decision.get("hard_gated", False))
+    regime_blocked = bool(
+        market_regime.get(
+            "hard_no_trade", market_regime.get("no_trade", False)
+        )
+    )
+    entry_gate_denied = gate.get("allowed") is not True
+    action_blocked = hard_gated or regime_blocked or entry_gate_denied
+
+    if not action_blocked:
+        return best, best_score, gate, False
+
+    gate["allowed"] = False
+    gate["fresh_entry_allowed"] = False
+
+    if hard_gated:
+        gate["reason"] = (
+            "Upstream critical-data/risk hard gate requires WAIT."
+        )
+    elif regime_blocked:
+        gate["reason"] = str(
+            market_regime.get("no_trade_reason")
+            or "Market regime prohibits fresh entries."
+        )
+    else:
+        gate["reason"] = str(
+            gate.get("reason") or "Entry gate requires WAIT."
+        )
+
+    wait_score = (
+        candidates.get("WAIT", 0)
+        if isinstance(candidates, dict) else 0
+    )
+    return "WAIT", wait_score, gate, True
+
+
+def _trade_entry_confidence(
+    signal_strength: float,
+    confluence_score: float,
+    agreement_count: int,
+) -> int:
+    """Blend normalized strength/confluence with confirmation count.
+
+    This is a bounded scoring measure, not a calibrated probability.
+    Confluence is a soft input here; it does not independently veto entry.
+    """
+    strength = safe_float(signal_strength or 0) or 0.0
+    score = safe_float(confluence_score or 0) or 0.0
+    strength = max(0.0, min(100.0, strength))
+    score = max(0.0, min(100.0, score))
+
+    try:
+        agreements = max(0, int(agreement_count or 0))
+    except (TypeError, ValueError):
+        agreements = 0
+
+    combined = (
+        0.55 * strength
+        + 0.40 * score
+        + 3.0 * agreements
+    )
+    return int(min(95.0, max(0.0, combined)))
+
+
+def _metric_quality_payload(market_data: dict) -> dict:
+    """Expose source/availability without changing legacy numeric values."""
+    md = market_data if isinstance(market_data, dict) else {}
+    chain = md.get("option_chain") or {}
+    chain_valid = bool(md.get("option_chain_valid", bool(chain.get("data"))))
+
+    vix = safe_float(md.get("vix", 0))
+    vix_quality = md.get("vix_quality")
+    if isinstance(vix_quality, dict):
+        vix_quality = dict(vix_quality)
+    else:
+        vix_quality = {
+            "available": vix > 0,
+            "source": "legacy_unverified" if vix > 0 else "unavailable",
+            "fetched_at": None,
+            "observed_at": None,
+            "reason": (
+                "Provider metadata unavailable" if vix > 0
+                else "VIX unavailable"
+            ),
+        }
+    vix_quality["available"] = bool(
+        vix_quality.get("available") and vix > 0
+    )
+
+    pcr = safe_float(md.get("pcr", 0))
+    pcr_quality = md.get("pcr_quality")
+    if isinstance(pcr_quality, dict):
+        pcr_quality = dict(pcr_quality)
+    else:
+        pcr_quality = {
+            "available": chain_valid and pcr > 0,
+            "source": str(chain.get("data_source") or "unknown"),
+            "fetched_at": None,
+            "observed_at": None,
+            "reason": (
+                None if chain_valid and pcr > 0
+                else "Option-chain/PCR evidence unavailable"
+            ),
+        }
+    pcr_quality["available"] = bool(
+        pcr_quality.get("available") and chain_valid and pcr > 0
+    )
+
+    return {
+        "vix_quality": vix_quality,
+        "pcr_quality": pcr_quality,
+        "option_chain_valid": chain_valid,
+    }
 
 
 def _v3_entry_gate(dec: dict, confluence: dict, expiry_info: dict,
                    market_data: dict, lifecycle_state: str,
                    lifecycle_active: str) -> dict:
-    """Gate only fresh option entries; an existing confirmed side remains HOLD."""
+    """Hard-gate confirmation and expiry risk; confluence affects confidence."""
     if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
-        return {"allowed": True, "reason": "Existing confirmed direction — HOLD is not a fresh entry."}
+        return {"allowed": True, "fresh_entry_allowed": False, "reason": "Existing confirmed direction; HOLD is not a fresh entry."}
     if lifecycle_state not in ("CONFIRMED_CALL", "CONFIRMED_PUT"):
         return {"allowed": False, "reason": "Signal is not CONFIRMED yet."}
 
     side = "CALL" if lifecycle_state.endswith("CALL") else "PUT"
     direction = str(confluence.get("direction", "NEUTRAL")).upper()
     strength = safe_float(dec.get("signal_strength", dec.get("confidence", 0)))
-    cscore = safe_float(confluence.get("confluence_score", 0))
     agreement = int(confluence.get("agreement_count", 0) or 0)
     adx = safe_float((market_data.get("technicals") or {}).get("adx", 0))
 
@@ -71,8 +247,6 @@ def _v3_entry_gate(dec: dict, confluence: dict, expiry_info: dict,
     if days_left <= 1:
         if strength < EXPIRY_DAY_MIN_SIGNAL_STRENGTH:
             return {"allowed": False, "reason": f"Expiry-day signal strength {strength:.0f} < {EXPIRY_DAY_MIN_SIGNAL_STRENGTH}."}
-        if cscore < EXPIRY_DAY_MIN_CONFLUENCE:
-            return {"allowed": False, "reason": f"Expiry-day confluence {cscore:.1f} < {EXPIRY_DAY_MIN_CONFLUENCE}."}
         if agreement < EXPIRY_DAY_MIN_AGREEMENT:
             return {"allowed": False, "reason": f"Expiry-day agreement {agreement} < {EXPIRY_DAY_MIN_AGREEMENT}."}
         if adx < EXPIRY_DAY_MIN_ADX:
@@ -80,12 +254,10 @@ def _v3_entry_gate(dec: dict, confluence: dict, expiry_info: dict,
     else:
         if strength < ENTRY_MIN_SIGNAL_STRENGTH:
             return {"allowed": False, "reason": f"Signal strength {strength:.0f} < {ENTRY_MIN_SIGNAL_STRENGTH}."}
-        if cscore < ENTRY_MIN_CONFLUENCE:
-            return {"allowed": False, "reason": f"Confluence {cscore:.1f} < {ENTRY_MIN_CONFLUENCE}."}
         if agreement < ENTRY_MIN_AGREEMENT:
             return {"allowed": False, "reason": f"Independent agreement {agreement} < {ENTRY_MIN_AGREEMENT}."}
 
-    return {"allowed": True, "reason": "Lifecycle + direction + confluence + strength confirmed."}
+    return {"allowed": True, "fresh_entry_allowed": True, "reason": "Lifecycle + direction + strength + agreement confirmed; confluence affects confidence."}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -202,15 +374,56 @@ def _anti_whipsaw(symbol: str, new_best: str, new_score: int, persisted_state: d
     prev = persisted_state or _prev_best.get(symbol, {})
     prev_strategy = prev.get("strategy", "")
     prev_score = safe_float(prev.get("strategy_score", prev.get("score", 0)))
+
     if not prev_strategy:
         return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
+
     if new_best == prev_strategy:
         return {"strategy": new_best, "changed": False, "whipsaw_blocked": False}
+
+    # LOGIC FIX 2026-09-11:
+    # WAIT is a neutral state, not a directional strategy.
+    # A fresh BUY/SELL candidate must therefore NOT be compared against
+    # the old WAIT score. This prevents cases such as WAIT=50 and
+    # BUY PE=52 from being incorrectly blocked by the 15-point rule.
+    if prev_strategy == "WAIT" and new_best != "WAIT":
+        return {
+            "strategy": new_best,
+            "changed": True,
+            "whipsaw_blocked": False,
+            "note": "Fresh directional strategy is not blocked by previous WAIT state.",
+        }
+
+    # SAFETY FIX 2026-09-11:
+    # A directional strategy is allowed to fall back to WAIT.
+    # Safety/lifecycle/entry gates remain responsible for deciding whether
+    # a directional signal is actually valid.
+    if new_best == "WAIT" and prev_strategy != "WAIT":
+        return {
+            "strategy": new_best,
+            "changed": True,
+            "whipsaw_blocked": False,
+            "note": f"Directional strategy released to WAIT (previous: {prev_strategy}).",
+        }
+
+    # Existing strong-signal bypass is preserved.
     if new_score >= 75:
         return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
-    if new_score - prev_score < 15:
-        return {"strategy": prev_strategy, "changed": False, "whipsaw_blocked": True,
-                "note": f"Score margin ({new_score - prev_score:.0f}) < 15 — keeping {prev_strategy}"}
+
+    # Keep 15-point hysteresis only for directional-to-directional changes.
+    score_delta = new_score - prev_score
+
+    if score_delta < 15:
+        return {
+            "strategy": prev_strategy,
+            "changed": False,
+            "whipsaw_blocked": True,
+            "note": (
+                f"Score margin ({score_delta:.0f}) < 15 — "
+                f"keeping {prev_strategy}"
+            ),
+        }
+
     return {"strategy": new_best, "changed": True, "whipsaw_blocked": False}
 
 
@@ -244,6 +457,19 @@ def _classify_market_state(market_data: dict) -> str:
 
 
 # ── Strategy Candidate Scorer ─────────────────────────────────────────────
+# Score ceilings (2026-09 fix): BUY CE/PE and SELL CE/PE were compared via
+# max(candidates, key=...) even though their raw point totals have different
+# theoretical ceilings (BUY ~98 max, SELL ~75 max -- SELL simply has fewer
+# bonus categories coded). That meant SELL could never outscore a strongly
+# scoring BUY even when the SELL setup was objectively the better trade.
+# Each score is now normalized to 0-100 relative to ITS OWN achievable
+# ceiling before candidates are compared, so "80/100" means the same thing
+# (80% of that strategy's own best case) for every strategy type.
+BUY_CE_MAX_RAW  = 98
+BUY_PE_MAX_RAW  = 98
+SELL_CE_MAX_RAW = 75
+SELL_PE_MAX_RAW = 75
+
 
 def _score_candidates(market_data: dict) -> dict:
     """
@@ -255,8 +481,17 @@ def _score_candidates(market_data: dict) -> dict:
     bear       = dec.get("bear_score", 0)
     margin     = dec.get("margin", bull - bear)
     adx        = market_data.get("technicals", {}).get("adx", 0)
-    vix        = market_data.get("vix", 15)
-    pcr        = market_data.get("pcr", 0)
+    # Missing-data zero is not a volatility/PCR signal.
+    try:
+        vix = float(market_data.get("vix") or 0)
+    except (TypeError, ValueError):
+        vix = 0.0
+    try:
+        pcr = float(market_data.get("pcr") or 0)
+    except (TypeError, ValueError):
+        pcr = 0.0
+    vix_available = vix > 0
+    pcr_available = pcr > 0
     atr        = market_data.get("technicals", {}).get("atr", 0)
     spot       = market_data.get("spot", {}).get("price", 0)
     preferred  = dec.get("preferred_side", "NONE")
@@ -266,7 +501,7 @@ def _score_candidates(market_data: dict) -> dict:
     pe_max_strike = oi_sum.get("pe_max_oi_strike", 0)
     atm_iv     = oi_sum.get("atm_iv", 0)
     atr_pct    = (atr / spot * 100) if spot > 0 else 0
-    market_open = market_data.get("spot", {}).get("market_open", True)
+    market_open = market_data.get("spot", {}).get("market_open") is True
 
     # ── BUY CE Score ──────────────────────────────────────────────────────
     buy_ce = 0
@@ -275,10 +510,10 @@ def _score_candidates(market_data: dict) -> dict:
     buy_ce += min(bull * 0.4, 20)                # bull score contribution
     if adx >= 20:       buy_ce += 15             # trend confirmation
     if adx >= 25:       buy_ce += 5              # strong trend bonus
-    if vix < 16:        buy_ce += 10             # low fear
-    elif vix > 22:      buy_ce -= 15             # high IV = expensive premium
-    if pcr > 1.1:       buy_ce += 8              # put writing support
-    if pcr < 0.8:       buy_ce -= 10             # bearish PCR
+    if vix_available and vix < 16:        buy_ce += 10             # low fear
+    elif vix_available and vix > 22:      buy_ce -= 15             # high IV = expensive premium
+    if pcr_available and pcr > 1.1:       buy_ce += 8              # put writing support
+    if pcr_available and pcr < 0.8:       buy_ce -= 10             # bearish PCR
     if atm_iv > 25:     buy_ce -= 12             # overpriced premium
     if atm_iv > 35:     buy_ce -= 10             # very overpriced
     # Resistance check — CE max OI near spot = resistance, bad for buying
@@ -286,7 +521,7 @@ def _score_candidates(market_data: dict) -> dict:
         ce_dist_pct = (ce_max_strike - spot) / spot * 100
         if 0 < ce_dist_pct < 1.5:  buy_ce -= 12  # wall just above
         elif ce_dist_pct > 3:      buy_ce += 5   # wall far away
-    buy_ce = max(0, min(100, buy_ce))
+    buy_ce = max(0, min(BUY_CE_MAX_RAW, buy_ce)) / BUY_CE_MAX_RAW * 100
 
     # ── BUY PE Score ──────────────────────────────────────────────────────
     buy_pe = 0
@@ -295,10 +530,10 @@ def _score_candidates(market_data: dict) -> dict:
     buy_pe += min(bear * 0.4, 20)
     if adx >= 20:       buy_pe += 15
     if adx >= 25:       buy_pe += 5
-    if vix < 16:        buy_pe += 10
-    elif vix > 22:      buy_pe -= 15
-    if pcr < 0.8:       buy_pe += 8
-    if pcr > 1.2:       buy_pe -= 10
+    if vix_available and vix < 16:        buy_pe += 10
+    elif vix_available and vix > 22:      buy_pe -= 15
+    if pcr_available and pcr < 0.8:       buy_pe += 8
+    if pcr_available and pcr > 1.2:       buy_pe -= 10
     if atm_iv > 25:     buy_pe -= 12
     if atm_iv > 35:     buy_pe -= 10
     # Support check — PE max OI below spot = support, bad for put buying
@@ -306,7 +541,7 @@ def _score_candidates(market_data: dict) -> dict:
         pe_dist_pct = (spot - pe_max_strike) / spot * 100
         if 0 < pe_dist_pct < 1.5:  buy_pe -= 12  # floor just below
         elif pe_dist_pct > 3:      buy_pe += 5
-    buy_pe = max(0, min(100, buy_pe))
+    buy_pe = max(0, min(BUY_PE_MAX_RAW, buy_pe)) / BUY_PE_MAX_RAW * 100
 
     # ── SELL CE Score ─────────────────────────────────────────────────────
     # Strict: needs strong resistance + IV attractive + no breakout risk
@@ -317,13 +552,13 @@ def _score_candidates(market_data: dict) -> dict:
         elif 0.5 < dist <= 1.0: sell_ce += 15   # too close = breakout risk
     if atm_iv >= 18:    sell_ce += 15            # decent premium
     if atm_iv >= 25:    sell_ce += 10            # rich premium
-    if vix < 18:        sell_ce += 10            # stable VIX
+    if vix_available and vix < 18:        sell_ce += 10            # stable VIX
     if margin < -5:     sell_ce += 10            # bearish bias helps SELL CE
     if margin > 15:     sell_ce -= 25            # strong bull = breakout risk
     if adx >= 25 and preferred == "CALL":
         sell_ce -= 20                             # trending bull = don't sell CE
     if bull > 30:       sell_ce -= 10
-    sell_ce = max(0, min(100, sell_ce))
+    sell_ce = max(0, min(SELL_CE_MAX_RAW, sell_ce)) / SELL_CE_MAX_RAW * 100
 
     # ── SELL PE Score ─────────────────────────────────────────────────────
     sell_pe = 0
@@ -333,20 +568,24 @@ def _score_candidates(market_data: dict) -> dict:
         elif 0.5 < dist <= 1.0: sell_pe += 15
     if atm_iv >= 18:    sell_pe += 15
     if atm_iv >= 25:    sell_pe += 10
-    if vix < 18:        sell_pe += 10
+    if vix_available and vix < 18:        sell_pe += 10
     if margin > 5:      sell_pe += 10            # bullish bias helps SELL PE
     if margin < -15:    sell_pe -= 25            # strong bear = breakdown risk
     if adx >= 25 and preferred == "PUT":
         sell_pe -= 20
     if bear > 30:       sell_pe -= 10
-    sell_pe = max(0, min(100, sell_pe))
+    sell_pe = max(0, min(SELL_PE_MAX_RAW, sell_pe)) / SELL_PE_MAX_RAW * 100
 
-    # ── WAIT Score ────────────────────────────────────────────────────────
-    wait = 0
-    if abs(margin) < 8:         wait += 30       # no clear direction
-    if adx < 18:                wait += 20       # no trend
-    if not market_open:         wait += 50       # market closed
-    if confidence < 40:         wait += 15
+    # ?? WAIT Score ????????????????????????????????????????????????????????
+    if not market_open:
+        # Closed-market margin, ADX and confidence may be stale/placeholders.
+        # Use the market-closed baseline without stacking stale indicators.
+        wait = 50
+    else:
+        wait = 0
+        if abs(margin) < 8:         wait += 30       # no clear direction
+        if adx < 18:                wait += 20       # no trend
+        if confidence < 40:         wait += 15
     wait = max(0, min(100, wait))
 
     candidates = {
@@ -362,6 +601,17 @@ def _score_candidates(market_data: dict) -> dict:
 
     # Minimum threshold — if best < 45, default WAIT
     if candidates[best] < 45 and best != "WAIT":
+        best = "WAIT"
+
+    # HARD_GATE_ENFORCE_FIX_20260925
+    # decision_engine.py sets hard_gated=True when real intraday 5m/15m/1h
+    # MTF confirmation is unavailable — but until now this scoring function
+    # never checked that flag, so BUY CE/PE could still win on bull/bear
+    # score, ADX (possibly from daily-close fallback), PCR, IV etc. even on
+    # a day with zero real intraday confirmation all session. Enforce it here.
+    if (not market_open or dec.get("hard_gated")) and best != "WAIT":
+        # A hard gate controls the chosen action, not its score semantics.
+        # Preserve the naturally calculated WAIT score for history and UI.
         best = "WAIT"
 
     return {"candidates": candidates, "best": best, "best_score": candidates[best]}
@@ -380,11 +630,18 @@ PREFERRED_DELTA_LOW    = 0.35  # review's example liquid zone: 0.45-0.60; widene
 PREFERRED_DELTA_HIGH   = 0.65
 
 
-def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0) -> list:
+def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0, action: str = "BUY", assumed_hold_days=None) -> list:
     """`atr` (optional, underlying ATR in points): when provided, SL/targets
     are computed from real delta × ATR (mirrors trade_levels.py's model)
     instead of a flat percentage of premium — review #38: a fixed 35%/40%
     SL/target made no sense across strikes with very different deltas."""
+    # Actual snapshot → 15:30 duration is supplied by the caller.
+    # Missing duration is fail-safe rather than inventing a full-day theta.
+    hold_days = max(
+        0.0,
+        float(assumed_hold_days) if assumed_hold_days is not None else 0.0,
+    )
+
     rows = chain_data.get("data", [])
     if not rows:
         return []
@@ -400,26 +657,86 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0
     contract_expiry = chain_data.get("expiry", "")  # live from the option chain fetch — never hardcoded
     dte = _days_to_expiry(contract_expiry)
 
-    # Build lookup with liquidity check
+    # Build lookup with a coherent, explicitly sourced price quote.
     lkp = {}
+    quote_now = time.time()
+    chain_source = str(chain_data.get("data_source") or "").strip()
+    if chain_source.lower() == "angel_one":
+        rest_price_source = "angel_one_rest"
+    elif chain_source.lower().startswith("zerodha"):
+        rest_price_source = "zerodha_rest"
+    elif chain_source:
+        rest_price_source = "rest:" + chain_source
+    else:
+        rest_price_source = "rest_unknown"
+
     for r in rows:
         s = r["strikePrice"]
         side = r.get(key_oi, {}) or {}
-        ltp = safe_float(side.get("lastPrice", 0))
+        rest_ltp = safe_float(side.get("lastPrice", 0))
         oi  = safe_float(side.get("openInterest", 0))
         vol = safe_float(side.get("totalTradedVolume", 0))
         iv  = safe_float(side.get("impliedVolatility", 0))
-        bid = safe_float(side.get("bidprice", 0))
-        ask = safe_float(side.get("askPrice", 0))
-        # Liquidity check
+        rest_bid = safe_float(side.get("bidprice", 0))
+        rest_ask = safe_float(side.get("askPrice", 0))
+
+        quote = side.get("live_ws_quote")
+        if not isinstance(quote, dict):
+            quote = {}
+
+        ws_ltp = safe_float(quote.get("ltp", 0))
+        ws_bid = safe_float(quote.get("bid", 0))
+        ws_ask = safe_float(quote.get("ask", 0))
+        ws_received_at = safe_float(quote.get("received_at", 0))
+        ws_age = (
+            quote_now - ws_received_at
+            if ws_received_at > 0 else float("inf")
+        )
+
+        # A complete, recent quote must come from the expected WS source.
+        # Old flat metadata alone is not proof that a current quote exists.
+        ws_quote_valid = (
+            side.get("live_ws") is True
+            and side.get("live_ws_source") == "angel_one_websocket"
+            and quote.get("source") == "angel_one_websocket"
+            and ws_received_at > 0
+            and 0 <= ws_age <= 10.0
+            and ws_ltp > 0
+            and ws_bid > 0
+            and ws_ask >= ws_bid
+        )
+
+        if ws_quote_valid:
+            # Use all three prices from the same live quote snapshot.
+            ltp, bid, ask = ws_ltp, ws_bid, ws_ask
+            price_source = "angel_one_websocket"
+        else:
+            # Never mix a WS LTP/bid with an unrelated REST ask (or vice versa).
+            ltp, bid, ask = rest_ltp, rest_bid, rest_ask
+            price_source = rest_price_source
+
+        # Liquidity analytics remain sourced from the REST chain.
         liquid = ltp > 0 and (oi > 100 or vol > 100)
-        lkp[s] = {"ltp": ltp, "oi": oi, "volume": vol, "iv": iv,
-                  "bid": bid, "ask": ask, "liquid": liquid}
+        lkp[s] = {
+            "ltp": ltp, "oi": oi, "volume": vol, "iv": iv,
+            "bid": bid, "ask": ask, "liquid": liquid,
+            "price_source": price_source,
+            "exchange_feed_time": side.get("exchangeFeedTime"),
+            "exchange_trade_time": side.get("exchangeTradeTime"),
+            "live_ws": bool(ws_quote_valid),
+            "live_ws_received_at": ws_received_at if ws_quote_valid else None,
+            "live_ws_age_sec": round(max(0.0, ws_age), 3) if ws_quote_valid else None,
+            "live_ws_source": "angel_one_websocket" if ws_quote_valid else None,
+            "live_ws_exchange_timestamp": quote.get("exchange_timestamp") if ws_quote_valid else None,
+            "live_ws_exchange_timestamp_ms": quote.get("exchange_timestamp_ms") if ws_quote_valid else None,
+        }
 
     def make_strike(strike, label, emoji, note):
         info = lkp.get(strike, {})
         if not info.get("liquid"):
             return None
+
+        is_sell = action in ("SELL CE", "SELL PE")
         # Review #13: entry/SL/target off the executable mid-price when a
         # usable bid/ask quote exists — LTP alone can be a stale last trade
         # on a thin strike and overstate what you'd actually get filled at.
@@ -429,40 +746,186 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0
         # alone could eat the whole expected edge — don't recommend it.
         if spread is not None and spread > HARD_SPREAD_MAX_PCT:
             return None
-        # Review #15: Greeks — None (not fabricated) when spot/IV/expiry
-        # don't support a real Black-Scholes calc.
-        greeks = black_scholes_greeks(spot, strike, dte, info["iv"], "CE" if is_call else "PE")
+        # Review #15: Prefer broker IV when available. Angel One and
+        # Zerodha can return IV=0, so derive IV from the observed executable
+        # premium only when DTE is valid. Never derive IV on expiry day.
+        iv_used = info["iv"]
+        iv_source = "broker" if iv_used > 0 else "unavailable"
+
+        if iv_used <= 0 and dte > 0 and entry > 0:
+            derived_iv = implied_volatility_from_price(
+                spot=spot,
+                strike=strike,
+                days_to_expiry=dte,
+                option_price=entry,
+                option_type="CE" if is_call else "PE",
+            )
+            if derived_iv is not None and derived_iv > 0:
+                iv_used = derived_iv
+                iv_source = "derived_from_ltp"
+
+        # Greeks remain None when neither broker nor derived IV is valid.
+        greeks = black_scholes_greeks(
+            spot,
+            strike,
+            dte,
+            iv_used,
+            "CE" if is_call else "PE",
+        )
         strike_delta = greeks["delta"] if greeks else None
         theta_per_day = greeks["theta_per_day"] if greeks else None
 
-        # SL/targets: prefer real delta × ATR (review #38) over a flat %,
-        # since the same premium % target is not equally realistic across
-        # strikes with very different deltas. Falls back to the old flat-%
-        # model only when ATR or Greeks aren't available.
-        if atr > 0 and strike_delta is not None:
-            opt_risk = round(atr * abs(strike_delta), 1)
-            sl = round(entry - opt_risk, 1)
-            t1 = round(entry + opt_risk * 1.0, 1)
-            t2 = round(entry + opt_risk * 2.0, 1)
-            t3 = round(entry + opt_risk * 2.5, 1)
-            if theta_per_day is not None and theta_per_day < 0:
-                decay = round(abs(theta_per_day), 1)  # 1-day decay netted out of targets
-                t1 = round(t1 - decay, 1)
-                t2 = round(t2 - decay, 1)
-                t3 = round(t3 - decay, 1)
-            sl = max(sl, round(entry * 0.40, 1))  # never let the modelled SL go below the 40% floor
-            levels_basis = "delta×ATR, net of 1-day theta"
+        # Action-aware option-premium levels.
+        # BUY:  SL < entry < T1 < T2 < T3
+        # SELL: T3 < T2 < T1 < entry < SL
+        if is_sell:
+            if atr > 0 and strike_delta is not None:
+                opt_risk = round(atr * abs(strike_delta), 1)
+                sl = round(entry + opt_risk, 1)
+                t1 = round(entry - opt_risk * 1.0, 1)
+                t2 = round(entry - opt_risk * 2.0, 1)
+                t3 = round(entry - opt_risk * 2.5, 1)
+
+                # SELL_THETA_TARGET_PRESERVE_FIX:
+                # Keep valid pre-theta targets when theta-adjustment
+                # makes a target zero/negative or breaks the order.
+                pre_theta_t1 = t1
+                pre_theta_t2 = t2
+                pre_theta_t3 = t3
+                pre_theta_targets_valid = (
+                    pre_theta_t1 > 0
+                    and pre_theta_t2 > 0
+                    and pre_theta_t3 > 0
+                    and pre_theta_t1 < entry
+                    and pre_theta_t2 < pre_theta_t1
+                    and pre_theta_t3 < pre_theta_t2
+                )
+
+                # Negative long-option theta benefits a short option position.
+                if theta_per_day is not None and theta_per_day < 0:
+                    decay = round(abs(theta_per_day) * hold_days, 1)
+
+                    # BUY_THETA_SIGN_FIX_20260925:
+                    # Long-option theta works against the position.
+                    # Expected decay is therefore added to the target;
+                    # subtracting it artificially shrinks the reward.
+                    t1 = round(t1 + decay, 1)
+                    t2 = round(t2 + decay, 1)
+                    t3 = round(t3 + decay, 1)
+
+                # Mirror BUY-side 60% maximum adverse premium move.
+                sl = min(sl, round(entry * 1.60, 1))
+                levels_basis = "SELL: delta×ATR, theta benefit, max 60% adverse premium"
+            else:
+                sl = round(entry * 1.35, 1)
+                t1 = round(entry * 0.65, 1)
+                t2 = round(entry * 0.50, 1)
+                t3 = round(entry * 0.35, 1)
+                levels_basis = "SELL: flat % approximation (ATR/delta unavailable)"
+
+            target_order_valid = (
+                sl > entry
+                and t1 > 0
+                and t2 > 0
+                and t3 > 0
+                and t1 < entry
+                and t2 < t1
+                and t3 < t2
+            )
+            if not target_order_valid:
+                if (
+                    pre_theta_targets_valid
+                    and theta_per_day is not None
+                    and theta_per_day < 0
+                    and sl > entry
+                ):
+                    levels_basis += (
+                        " | theta adjustment invalidated targets — "
+                        "preserved valid pre-theta T1/T2/T3"
+                    )
+                    t1 = pre_theta_t1
+                    t2 = pre_theta_t2
+                    t3 = pre_theta_t3
+                else:
+                    levels_basis += " | INVALID target order after theta"
+                    t1 = t2 = t3 = None
+
+            risk = round(sl - entry, 1)
+            # R:R is quoted to T2 so SELL has the same R:R meaning as BUY.
+            # SELL: risk = SL - Entry; reward = Entry - T2.
+            reward = round(entry - t2, 1) if t2 is not None else 0.0
+            rr = round(reward / risk, 1) if risk > 0 and t2 is not None else 0
         else:
-            sl = round(entry * 0.65, 1)   # 35% SL
-            t1 = round(entry * 1.40, 1)   # T1: +40%
-            t2 = round(entry * 1.70, 1)   # T2: +70%
-            t3 = round(entry * 2.00, 1)   # T3: +100%
-            levels_basis = "flat % approximation (ATR/delta unavailable)"
-        risk   = round(entry - sl, 1)
-        reward = round(t1 - entry, 1)
-        rr     = round(reward / risk, 1) if risk > 0 else 0
+            # Existing BUY behavior preserved.
+            # BUY_FALLBACK_THETA_DEFAULTS_20260921:
+            # Keep preservation validation safe on ATR/delta fallback path.
+            pre_theta_t1 = None
+            pre_theta_t2 = None
+            pre_theta_t3 = None
+            pre_theta_targets_valid = False
+            if atr > 0 and strike_delta is not None:
+                opt_risk = round(atr * abs(strike_delta), 1)
+                sl = round(entry - opt_risk, 1)
+                t1 = round(entry + opt_risk * 1.0, 1)
+                t2 = round(entry + opt_risk * 2.0, 1)
+                t3 = round(entry + opt_risk * 2.5, 1)
+
+                # BUY_THETA_TARGET_PRESERVE_FIX_20260921:
+                # Preserve valid structural targets when negative theta
+                # alone makes the adjusted target ordering invalid.
+                pre_theta_t1 = t1
+                pre_theta_t2 = t2
+                pre_theta_t3 = t3
+                pre_theta_targets_valid = (
+                    pre_theta_t1 > entry
+                    and pre_theta_t2 > pre_theta_t1
+                    and pre_theta_t3 > pre_theta_t2
+                )
+                if theta_per_day is not None and theta_per_day < 0:
+                    decay = round(abs(theta_per_day) * hold_days, 1)
+
+                    # BUY_THETA_SIGN_FIX_20260925:
+                    # Long-option theta works against the position.
+                    # Expected decay is therefore added to the target;
+                    # subtracting it artificially shrinks the reward.
+                    t1 = round(t1 + decay, 1)
+                    t2 = round(t2 + decay, 1)
+                    t3 = round(t3 + decay, 1)
+                sl = max(sl, round(entry * 0.40, 1))
+                levels_basis = f"delta×ATR, net of {hold_days:.2f}d theta"
+            else:
+                sl = round(entry * 0.65, 1)
+                t1 = round(entry * 1.40, 1)
+                t2 = round(entry * 1.70, 1)
+                t3 = round(entry * 2.00, 1)
+                levels_basis = "flat % approximation (ATR/delta unavailable)"
+
+            target_order_valid = (sl < entry and t1 > entry and t2 > t1 and t3 > t2)
+            # BUY_TARGET_ORDER_VALID_RESTORE_20260921
+            if not target_order_valid:
+                if (
+                    pre_theta_targets_valid
+                    and theta_per_day is not None
+                    and theta_per_day < 0
+                    and sl < entry
+                ):
+                    levels_basis += (
+                        " | theta adjustment invalidated targets — "
+                        "preserved valid pre-theta T1/T2/T3"
+                    )
+                    t1 = pre_theta_t1
+                    t2 = pre_theta_t2
+                    t3 = pre_theta_t3
+                else:
+                    levels_basis += " | INVALID target order after theta"
+                    t1 = t2 = t3 = None
+
+            risk = round(entry - sl, 1)
+            reward = round(t1 - entry, 1) if t1 is not None else 0.0
+            rr = round(reward / risk, 1) if risk > 0 and t1 is not None else 0
 
         result = {
+            "symbol":  str(chain_data.get("symbol") or "").strip().upper(),
             "rank":    emoji,
             "label":   label,
             "strike":  strike,
@@ -472,10 +935,20 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0
             "entry_price": entry,          # mid-price estimate — use this for P&L math, not ltp
             "bid":     round(info["bid"], 2),
             "ask":     round(info["ask"], 2),
+            "exchange_feed_time": info.get("exchange_feed_time"),
+            "exchange_trade_time": info.get("exchange_trade_time"),
+            "price_source": info.get("price_source", "rest_unknown"),
+            "live_ws": info.get("live_ws", False),
+            "live_ws_received_at": info.get("live_ws_received_at"),
+            "live_ws_age_sec": info.get("live_ws_age_sec"),
+            "live_ws_source": info.get("live_ws_source"),
+            "live_ws_exchange_timestamp": info.get("live_ws_exchange_timestamp"),
+            "live_ws_exchange_timestamp_ms": info.get("live_ws_exchange_timestamp_ms"),
             "spread_pct": spread,
             "oi":      int(info["oi"]),
             "volume":  int(info["volume"]),
-            "iv":      round(info["iv"], 1),
+            "iv":      round(iv_used, 1) if iv_used > 0 else 0.0,
+            "iv_source": iv_source,
             "sl":      sl,
             "t1":      t1,
             "t2":      t2,
@@ -505,8 +978,12 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0
     best_pick = None
     best_delta_gap = None
     fallback_pick = None
+    seen_candidate_indices = set()
     for off in candidate_offsets:
         idx = max(0, min(atm_idx + off, len(strikes) - 1))
+        if idx in seen_candidate_indices:
+            continue
+        seen_candidate_indices.add(idx)
         cand = make_strike(strikes[idx], "Best Strike", "🥇",
                             f"Auto-selected — liquid, tight spread, delta in {PREFERRED_DELTA_LOW}-{PREFERRED_DELTA_HIGH} band")
         if cand is None:
@@ -524,16 +1001,38 @@ def _pick_strikes(chain_data: dict, is_call: bool, spot: float, atr: float = 0.0
         best_pick = fallback_pick
 
     results = [best_pick]
+    result_strikes = {best_pick.get("strike")} if best_pick else set()
+
+    def append_unique_result(strike, label, emoji, note):
+        if strike in result_strikes:
+            return
+        candidate = make_strike(strike, label, emoji, note)
+        if candidate is not None:
+            results.append(candidate)
+            result_strikes.add(strike)
+
     if is_call:
-        results.append(make_strike(strikes[min(atm_idx+2, len(strikes)-1)],
-            "Aggressive (OTM)", "🥈", "OTM — Cheaper premium, bigger move needed"))
-        results.append(make_strike(strikes[max(atm_idx-1, 0)],
-            "Conservative (ITM)", "🥉", "ITM — Safer, already has intrinsic value"))
+        append_unique_result(
+            strikes[min(atm_idx+2, len(strikes)-1)],
+            "Aggressive (OTM)", "🥈",
+            "OTM — Cheaper premium, bigger move needed",
+        )
+        append_unique_result(
+            strikes[max(atm_idx-1, 0)],
+            "Conservative (ITM)", "🥉",
+            "ITM — Safer, already has intrinsic value",
+        )
     else:
-        results.append(make_strike(strikes[max(atm_idx-2, 0)],
-            "Aggressive (OTM)", "🥈", "OTM — Cheaper premium, bigger move needed"))
-        results.append(make_strike(strikes[min(atm_idx+1, len(strikes)-1)],
-            "Conservative (ITM)", "🥉", "ITM — Safer, already has intrinsic value"))
+        append_unique_result(
+            strikes[max(atm_idx-2, 0)],
+            "Aggressive (OTM)", "🥈",
+            "OTM — Cheaper premium, bigger move needed",
+        )
+        append_unique_result(
+            strikes[min(atm_idx+1, len(strikes)-1)],
+            "Conservative (ITM)", "🥉",
+            "ITM — Safer, already has intrinsic value",
+        )
 
     return [r for r in results if r is not None]
 
@@ -558,10 +1057,195 @@ def _expected_move(spot: float, vix: float, days_to_expiry: int = 7) -> dict:
 
 # ── Main Endpoint ─────────────────────────────────────────────────────────
 
-@router.get("/recommend/{symbol}")
+
+_STRATEGY_HISTORY_LOCKS = {}
+
+async def _persist_analysis_history_if_due(
+    symbol, analyzer, ai, market_data, persisted_state,
+    ai_result=None, ai_unavailable=False,
+):
+    """Save canonical AI history using this request's existing snapshot."""
+    sym = str(symbol).upper()
+    lock = _STRATEGY_HISTORY_LOCKS.get(sym)
+    if lock is None:
+        lock = asyncio.Lock()
+        _STRATEGY_HISTORY_LOCKS[sym] = lock
+
+    async with lock:
+        try:
+            from app.services.history_service import (
+                analysis_history_due, save_analysis_result,
+            )
+            if not await analysis_history_due(sym, market_data.get("timestamp")):
+                return
+
+            from app.api.routes.analysis import build_ai_analysis
+            chain = market_data.get("option_chain") or {}
+            result = await build_ai_analysis(
+                sym, analyzer, ai,
+                expiry=chain.get("expiry") or None,
+                market_data_override=market_data,
+                ai_result_override=ai_result,
+                persisted_state_override=persisted_state,
+                ai_unavailable=ai_unavailable,
+            )
+            await save_analysis_result(sym, "ai", result)
+        except Exception:
+            logger.exception("Strategy analysis history failed for %s", sym)
+
+
+async def resolve_final_strategy_action(
+    symbol: str,
+    market_data: dict,
+    persisted_state: dict = None,
+) -> dict:
+    """Single source of truth for the final machine strategy action."""
+    dec = market_data.get("decision", {})
+    persisted_state = persisted_state or {}
+
+    time_info = _time_filter()
+    chain = market_data.get("option_chain") or {}
+    expiry_info = _expiry_filter(chain.get("expiry", ""))
+
+    scored = _score_candidates(market_data)
+    candidates = dict(scored["candidates"])
+    raw_best = scored["best"]
+    raw_score = scored["best_score"]
+
+    if time_info["penalty"] != 0:
+        for k in candidates:
+            candidates[k] = max(
+                0,
+                min(100, candidates[k] + time_info["penalty"])
+            )
+        raw_score = candidates.get(raw_best, raw_score)
+
+    whipsaw_result = _anti_whipsaw(symbol, raw_best, raw_score, persisted_state)
+    best = whipsaw_result["strategy"]
+    best_score = candidates.get(best, raw_score)
+
+    lifecycle_state = str(dec.get("signal_lifecycle", "WAIT") or "WAIT")
+    lifecycle_active = str(
+        dec.get("signal_active_side", "NONE") or "NONE"
+    ).upper()
+
+    if lifecycle_state.startswith("WATCH_") or lifecycle_state == "WAIT":
+        best = "WAIT"
+        best_score = candidates.get("WAIT", 0)
+    elif (
+        lifecycle_state.startswith("CONFIRMED_")
+        or lifecycle_state.startswith("HOLD_")
+    ) and lifecycle_active in ("CALL", "PUT"):
+        # Lifecycle confirms DIRECTION (CALL/PUT), not whether the strategy
+        # must be BUY or SELL. Preserve an already-approved BUY/SELL result
+        # from anti-whipsaw; otherwise choose the stronger strategy within
+        # the confirmed direction only.
+        if lifecycle_active == "CALL":
+              direction_strategies = ("BUY CE", "SELL PE")
+        else:
+              direction_strategies = ("BUY PE", "SELL CE")
+
+        if best not in direction_strategies:
+            best = max(
+                direction_strategies,
+                key=lambda strategy: candidates.get(strategy, 0),
+            )
+            best_score = candidates.get(best, 0)
+        else:
+            best_score = candidates.get(best, best_score)
+
+    atm_iv = safe_float((market_data.get("oi_summary") or {}).get("atm_iv", 0))
+    iv_info = _iv_filter(atm_iv, best)
+    if iv_info["penalty"] != 0:
+        best_score = max(0, best_score + iv_info["penalty"])
+        if (
+            best_score < 45
+            and best != "WAIT"
+            and not str(lifecycle_state).startswith("HOLD_")
+        ):
+            best = "WAIT"
+            best_score = candidates.get("WAIT", 0)
+
+    try:
+        confluence = run_confluence_engine(market_data)
+    except Exception:
+        confluence = {
+            "confluence_score": 0,
+            "direction": "NEUTRAL",
+            "quality": "LOW",
+            "agreement_count": 0,
+            "total_factors": 0,
+            "factors": [],
+        }
+
+    try:
+        regime = classify_market_regime(market_data, confluence)
+    except Exception:
+        regime = {
+            "regime": "UNKNOWN",
+            "confidence": "LOW",
+            "no_trade": False,
+            "preferred_strategy": "WAIT",
+            "reasons": [],
+        }
+
+    v3_gate = _v3_entry_gate(
+        dec,
+        confluence,
+        expiry_info,
+        market_data,
+        lifecycle_state,
+        lifecycle_active,
+    )
+
+    best, best_score, v3_gate, action_blocked = (
+        _enforce_action_safety_gate(
+            best, best_score, candidates, v3_gate, dec, regime
+        )
+    )
+
+    expected_active = (
+        "CALL" if lifecycle_state == "CONFIRMED_CALL" else
+        "PUT" if lifecycle_state == "CONFIRMED_PUT" else "NONE"
+    )
+    fresh_entry_allowed = (
+        lifecycle_state in ("CONFIRMED_CALL", "CONFIRMED_PUT")
+        and lifecycle_active == expected_active
+        and best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
+        and v3_gate.get("allowed") is True
+        and not action_blocked
+    )
+    v3_gate["fresh_entry_allowed"] = fresh_entry_allowed
+    signal_action = (
+        "WAIT" if action_blocked
+        else _signal_action_for_entry(
+            best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+        )
+    )
+
+    return {
+        "best_strategy": best,
+        "signal_action": signal_action,
+        "fresh_entry_allowed": fresh_entry_allowed,
+        "best_score": best_score,
+        "candidates": candidates,
+        "lifecycle": lifecycle_state,
+        "active_side": lifecycle_active,
+        "confluence": confluence,
+        "regime": regime,
+        "v3_gate": v3_gate,
+        "iv_info": iv_info,
+        "whipsaw_result": whipsaw_result,
+    }
+
+@router.get("/recommend/{symbol}", response_model=StrategyRecommendationResponse)
 async def strike_recommendation(
+
+
+
     symbol: str,
     expiry: str = None,
+    cache_bust: str = "",
     analyzer: MarketAnalyzer = Depends(get_analyzer),
     ai: AIEngine = Depends(get_ai_engine),
 ):
@@ -580,18 +1264,73 @@ async def strike_recommendation(
     expiry (previous/default behaviour).
     """
     try:
-        market_data = await analyzer.get_full_market_overview(symbol, expiry=expiry)
+        market_data = await analyzer.get_full_market_overview(
+            symbol,
+            expiry=expiry,
+            cache_bust=cache_bust,
+        )
     except MarketDataError as e:
         raise HTTPException(502, detail=f"Market data unavailable: {e}")
 
     dec        = market_data.get("decision", {})
+    # Preserve overview-level derived values before lifecycle mutation.
+    # MarketAnalyzer already computed these from the same market snapshot.
+    _overview_decision = dict(dec or {})
+    _overview_preferred_side = _overview_decision.get("preferred_side", "NONE")
+    _overview_strategy = _overview_decision.get("strategy", "")
+    _overview_price_levels = _overview_decision.get("price_levels")
+    _overview_strategy_detail = _overview_decision.get("strategy_detail")
+
 
     # Restore the authoritative signal lifecycle from the database before
     # strategy selection. This survives Render process restarts.
-    persisted_state = await load_signal_state(symbol.upper())
-    dec, persistent_state = apply_persistent_signal_lifecycle(
-        dec, persisted_state, datetime.now(timezone.utc).timestamp()
-    )
+    #
+    # ATOMIC_LIFECYCLE_FIX_20260923
+    # Multiple browser pages/devices can arrive concurrently. Serialize only
+    # the short state transition so the existing 45-second confirmation
+    # interval is evaluated against the latest persisted state.
+    async with _LIFECYCLE_LOCK:
+        persisted_state = await load_signal_state(symbol.upper())
+
+        # Lifecycle timing follows the market snapshot when available.
+        _lifecycle_now = datetime.now(timezone.utc).timestamp()
+        _snapshot_ts = market_data.get("timestamp")
+        if _snapshot_ts:
+            try:
+                _lifecycle_now = datetime.fromisoformat(
+                    str(_snapshot_ts)
+                ).timestamp()
+            except (TypeError, ValueError):
+                pass
+
+        dec, persistent_state = apply_persistent_signal_lifecycle(
+            dec, persisted_state, _lifecycle_now
+        )
+
+        # The endpoint is the final safety boundary. Never trust a persisted
+        # lifecycle or an upstream resolver as permission when the current
+        # spot payload does not explicitly confirm market_open is True.
+        _spot_status = market_data.get("spot")
+        _market_open_confirmed = (
+            isinstance(_spot_status, dict)
+            and _spot_status.get("market_open") is True
+        )
+        if not _market_open_confirmed:
+            dec["market_open"] = False
+            dec["hard_gated"] = True
+            dec["preferred_side"] = "NONE"
+            dec["signal_lifecycle"] = "WAIT"
+            dec["signal_candidate"] = "NONE"
+            dec["signal_confirmations"] = 0
+            dec["signal_reversal_confirmations"] = 0
+            dec["signal_active_side"] = "NONE"
+
+        persistent_state["symbol"] = symbol.upper()
+
+        # Persist immediately so the next concurrent request sees the
+        # updated last_evaluation_at / confirmation state before it proceeds.
+        await save_signal_state(persistent_state)
+
     market_data["decision"] = dec
 
     spot       = market_data.get("spot", {}).get("price", 0)
@@ -609,94 +1348,76 @@ async def strike_recommendation(
     days_to_exp = expiry_info.get("days_left", 7)
 
     # ── Phase 2C: Market state ────────────────────────────────────────────
-    market_state = _classify_market_state(market_data)
+    _market_is_open = market_data.get("spot", {}).get("market_open") is True
+    market_state = (
+        "MARKET CLOSED"
+        if not _market_is_open
+        else _classify_market_state(market_data)
+    )
+    # CLOSED_MARKET_WAIT_REASON_FIX_20260922
 
     # ── 5-candidate scoring (with time penalty) ───────────────────────────
-    scored     = _score_candidates(market_data)
-    candidates = scored["candidates"]
-    raw_best   = scored["best"]
-    raw_score  = scored["best_score"]
+    final_action = await resolve_final_strategy_action(
+        symbol.upper(), market_data, persistent_state
+    )
 
-    # Apply time penalty to all candidates
-    if time_info["penalty"] != 0:
-        for k in candidates:
-            candidates[k] = max(0, candidates[k] + time_info["penalty"])
-        raw_score = candidates.get(raw_best, raw_score)
+    candidates = final_action["candidates"]
+    best = final_action["best_strategy"]
+    best_score = final_action["best_score"]
+    lifecycle_state = final_action["lifecycle"]
+    lifecycle_active = final_action["active_side"]
+    confluence = final_action["confluence"]
+    regime = final_action["regime"]
+    v3_gate = final_action["v3_gate"]
+    iv_info = final_action["iv_info"]
+    whipsaw_result = final_action["whipsaw_result"]
 
-    # ── Phase 2D: Anti-whipsaw ────────────────────────────────────────────
-    whipsaw_result = _anti_whipsaw(symbol, raw_best, raw_score, persistent_state)
-    best       = whipsaw_result["strategy"]
-    best_score = candidates.get(best, raw_score)
-
-    lifecycle_state = dec.get("signal_lifecycle", "WAIT")
-    lifecycle_active = dec.get("signal_active_side", "NONE")
-    if lifecycle_state.startswith("WATCH_") or lifecycle_state == "WAIT":
-        best = "WAIT"
-        best_score = candidates.get("WAIT", 0)
-    elif lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
-        # Existing confirmed direction is a HOLD state, not a fresh entry.
-        best = "BUY CE" if lifecycle_active == "CALL" else "BUY PE"
-        best_score = candidates.get(best, best_score)
-
-    # ── Phase 2E: IV filter on best strategy ──────────────────────────────
-    iv_info    = _iv_filter(atm_iv, best)
-    if iv_info["penalty"] != 0:
-        best_score = max(0, best_score + iv_info["penalty"])
-        # If IV penalty drops best below threshold, downgrade to WAIT
-        if best_score < 45 and best != "WAIT":
-            best = "WAIT"
-            best_score = candidates["WAIT"]
-
-    # ── Market bias ───────────────────────────────────────────────────────
-    market_bias = dec.get("market_bias", "Sideways")
-    preferred   = dec.get("preferred_side", "NONE")
-
-    # ── V2: Confluence Engine ─────────────────────────────────────────────
-    confluence = {}
-    try:
-        confluence = run_confluence_engine(market_data)
-    except Exception as _ce:
-        logger.warning(f"Confluence engine error: {_ce}")
-        confluence = {"confluence_score": 0, "direction": "NEUTRAL", "quality": "LOW",
-                      "agreement_count": 0, "total_factors": 0, "factors": []}
-
-    # ── V2: Market Regime ─────────────────────────────────────────────────
-    regime = {}
-    try:
-        regime = classify_market_regime(market_data, confluence)
-    except Exception as _re:
-        logger.warning(f"Market regime error: {_re}")
-        regime = {"regime": "UNKNOWN", "confidence": "LOW", "no_trade": False,
-                  "preferred_strategy": "WAIT", "reasons": []}
-
-    # ── V2: Signal strength (rename from confidence) ──────────────────────
     signal_strength = dec.get("signal_strength", dec.get("confidence", 0))
+    market_bias = dec.get("market_bias", "Sideways")
 
     # ── V3: independent entry-quality gate ────────────────────────────────
     v3_gate = _v3_entry_gate(
         dec, confluence, expiry_info, market_data,
         lifecycle_state, lifecycle_active,
     )
-    if best in ("BUY CE", "BUY PE") and not v3_gate["allowed"] and not lifecycle_state.startswith("HOLD_"):
-        best = "WAIT"
-        best_score = candidates.get("WAIT", 0)
+    best, best_score, v3_gate, action_blocked = (
+        _enforce_action_safety_gate(
+            best, best_score, candidates, v3_gate, dec, regime
+        )
+    )
 
-    # Market signal strength and trade-entry confidence are separate.
-    if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+    expected_active = (
+        "CALL" if lifecycle_state == "CONFIRMED_CALL" else
+        "PUT" if lifecycle_state == "CONFIRMED_PUT" else "NONE"
+    )
+    fresh_entry_allowed = (
+        lifecycle_state in ("CONFIRMED_CALL", "CONFIRMED_PUT")
+        and lifecycle_active == expected_active
+        and best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
+        and v3_gate.get("allowed") is True
+        and not action_blocked
+    )
+    v3_gate["fresh_entry_allowed"] = fresh_entry_allowed
+
+    # A blocked or non-fresh action must not retain entry confidence.
+    if action_blocked:
+        trade_confidence = 0
+    elif lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
         trade_confidence = int(min(95, max(0, safe_float(signal_strength))))
-    elif v3_gate["allowed"]:
-        trade_confidence = int(min(95, max(
-            0,
-            0.55 * safe_float(signal_strength)
-            + 4.0 * safe_float(confluence.get("confluence_score", 0))
-            + 3.0 * int(confluence.get("agreement_count", 0) or 0),
-        )))
+    elif v3_gate.get("allowed") is True and fresh_entry_allowed:
+        trade_confidence = _trade_entry_confidence(
+            signal_strength,
+            confluence.get("confluence_score", 0),
+            confluence.get("agreement_count", 0),
+        )
     else:
         trade_confidence = 0
 
     # ── V2: Action label based on regime + best ───────────────────────────
     def _action_label(best_strat: str, reg: dict) -> str:
-        no_trade = reg.get("no_trade", False)
+        no_trade = reg.get(
+            "hard_no_trade", reg.get("no_trade", False)
+        )
         if no_trade:
             return "NO TRADE — " + (reg.get("no_trade_reason") or reg.get("regime", ""))
         if best_strat == "WAIT":
@@ -709,7 +1430,26 @@ async def strike_recommendation(
             return "WAIT FOR ENTRY NEAR STRIKE"
         return "WAIT"
 
-    if lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
+    regime_hard_stop = bool(
+        regime.get("hard_no_trade", regime.get("no_trade", False))
+    )
+    upstream_hard_stop = bool(dec.get("hard_gated", False))
+
+    if action_blocked and (upstream_hard_stop or regime_hard_stop):
+        if regime_hard_stop:
+            hard_stop_reason = (
+                regime.get("no_trade_reason") or regime.get("regime", "NO_TRADE")
+            )
+        else:
+            hard_stop_reason = (
+                v3_gate.get("reason") or "Critical data/risk hard gate requires WAIT."
+            )
+        action_label = "NO TRADE — " + str(hard_stop_reason)
+    elif action_blocked:
+        action_label = "WAIT — " + str(
+            v3_gate.get("reason") or "Entry gate requires WAIT."
+        )
+    elif lifecycle_state.startswith("HOLD_") and lifecycle_active in ("CALL", "PUT"):
         action_label = f"HOLD {lifecycle_active} — existing confirmed direction remains active"
     elif lifecycle_state.startswith("WATCH_"):
         action_label = "WAIT FOR CONFIRMATION"
@@ -721,9 +1461,33 @@ async def strike_recommendation(
     # ── V2: Strike picks (moved up so Trade Levels can reuse the SAME
     # recommended strike below, instead of a second, independent ATM-only
     # LTP lookup drifting from what's actually recommended) ───────────────
-    _is_call_for_picks = "CE" in best if best in ("BUY CE", "BUY PE") else True
+    _is_trade_setup = best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
+    _is_call_for_picks = "CE" in best
     _atr_for_picks = safe_float((market_data.get("technicals") or {}).get("atr", 0))
-    raw_strikes = _pick_strikes(chain, _is_call_for_picks, spot, atr=_atr_for_picks) if best in ("BUY CE", "BUY PE") else []
+
+    # AUTHORITATIVE_INTRADAY_THETA_TIME_20260925:
+    # Expected theta is based on actual remaining time to today's
+    # 15:30 IST close.
+    _intraday_hold_days = intraday_hold_days_to_close(
+        market_data.get("timestamp")
+    )
+
+    raw_strikes = (
+        _pick_strikes(
+            chain,
+            _is_call_for_picks,
+            spot,
+            atr=_atr_for_picks,
+            action=best,
+            assumed_hold_days=_intraday_hold_days,
+        )
+        if _is_trade_setup else []
+    )
+
+    # ROUTE_LOT_SIZE_PROPAGATION_20260925
+    # Exact lot size from the resolved option-chain metadata.
+    from app.services.contract_specs import resolve_lot_size
+    _contract_lot_size = resolve_lot_size(symbol, chain)
 
     # ── V2: Trade levels (only for directional setups) ────────────────────
     # Bug fix: this previously always priced levels off the ATM strike's
@@ -733,6 +1497,7 @@ async def strike_recommendation(
     # here match the strike a user would actually buy, and (review #38)
     # are computed from that strike's real delta × ATR instead of a fixed
     # 0.45 approximation.
+    _best_strike_pick = None
     v2_trade_levels = None
     try:
         if best in ("BUY CE", "BUY PE") and spot > 0:
@@ -743,36 +1508,105 @@ async def strike_recommendation(
             _theta     = _best_strike_pick.get("theta_per_day") if _best_strike_pick else None
             v2_trade_levels = calculate_trade_levels(
                 market_data, direction, spot, _opt_ltp,
+                    lot_size=_contract_lot_size,
                 delta=_delta, theta_per_day=_theta,
                 regime=regime.get("regime"),
             )
+
+            # Canonical BUY premium levels:
+            # Keep the exact Best Strike selected above as the contract,
+            # while V2 trade_levels supplies the structural premium levels.
+            # This prevents Dashboard/Analysis from mixing _pick_strikes()
+            # ATR×delta levels with V2 risk_spot×delta levels.
+            if _best_strike_pick and v2_trade_levels:
+                _best_strike_pick["entry_price"] = v2_trade_levels.get(
+                    "option_entry", _best_strike_pick.get("entry_price")
+                )
+                _best_strike_pick["sl"] = v2_trade_levels.get(
+                    "option_sl", _best_strike_pick.get("sl")
+                )
+                _best_strike_pick["t1"] = v2_trade_levels.get(
+                    "option_t1", _best_strike_pick.get("t1")
+                )
+                _best_strike_pick["t2"] = v2_trade_levels.get(
+                    "option_t2", _best_strike_pick.get("t2")
+                )
+                _best_strike_pick["t3"] = v2_trade_levels.get(
+                    "option_t3", _best_strike_pick.get("t3")
+                )
+                _delta_basis = (
+                    "real delta"
+                    if v2_trade_levels.get("delta_is_real") is True
+                    else "approx delta fallback"
+                )
+                _theta_used = v2_trade_levels.get("theta_per_day_used")
+                if v2_trade_levels.get("theta_adjustment_applied") is True:
+                    _theta_basis = "theta-adjusted"
+                elif _theta_used is None:
+                    _theta_basis = "theta unavailable"
+                else:
+                    _theta_basis = "theta supplied; adjustment not applied"
+                _best_strike_pick["levels_basis"] = (
+                    f"V2 structural risk; {_delta_basis}; {_theta_basis}"
+                )
     except Exception as _tl:
         logger.warning(f"Trade levels error: {_tl}")
 
-    # ── V2: Risk assessment ───────────────────────────────────────────────
-    v2_risk = None
-    try:
-        if v2_trade_levels and best in ("BUY CE", "BUY PE"):
-            _entry = v2_trade_levels.get("option_entry") or 0
-            _sl    = v2_trade_levels.get("option_sl") or 0
-            _rr    = v2_trade_levels.get("rr_ratio", 1.5)
-            _daily = await get_daily_pnl()
-            _open_trades = await get_open_trades(symbol)
-            v2_risk = assess_risk(
-                capital          = settings.default_capital,  # BUG FIX: from config (DEFAULT_CAPITAL env var)
-                entry_price      = _entry,
-                stop_loss_price  = _sl,
-                rr_ratio         = _rr,
-                market_regime    = regime.get("regime", "UNKNOWN"),
-                vix              = vix,
-                days_to_expiry   = days_to_exp,
-                confluence_quality = confluence.get("quality", "LOW"),
-                signal_strength  = signal_strength,
-                open_positions   = len(_open_trades),
-                daily_pnl        = _daily,
-            )
-    except Exception as _rk:
-        logger.warning(f"Risk engine error: {_rk}")
+    # ── Shared V2 risk assessment and authoritative fresh-entry approval ──
+    _authority_contract = None
+    if isinstance(_best_strike_pick, dict):
+        _authority_contract = dict(_best_strike_pick)
+        if best in ("BUY CE", "BUY PE") and isinstance(v2_trade_levels, dict):
+            _authority_contract.update({
+                "entry_price": v2_trade_levels.get("option_entry"),
+                "sl": v2_trade_levels.get("option_sl"),
+            })
+
+    _entry_risk_result = await assess_entry_risk_authority(
+        action=best,
+        symbol=symbol,
+        market_data=market_data,
+        confluence=confluence,
+        regime=regime,
+        signal_strength=signal_strength,
+        selected_contract=_authority_contract,
+        trade_levels=v2_trade_levels,
+        lot_size=_contract_lot_size,
+        # Dependency injection preserves route-level regression mocks.
+        risk_assessor=assess_risk,
+        daily_pnl_loader=get_daily_pnl,
+        open_trades_loader=get_open_trades,
+    )
+    v2_risk = _entry_risk_result["risk_assessment"]
+    _entry_risk_authority = _entry_risk_result["entry_risk_authority"]
+    _risk_approved = _entry_risk_result["risk_approved"]
+
+    if _entry_risk_result.get("assessment_error"):
+        logger.warning(
+            "Entry risk assessment unavailable for %s: %s",
+            symbol,
+            _entry_risk_result["assessment_error"],
+        )
+
+    fresh_entry_allowed = bool(fresh_entry_allowed and _risk_approved)
+    v3_gate["entry_risk_authority"] = _entry_risk_authority
+    v3_gate["risk_allowed"] = _risk_approved
+    v3_gate["fresh_entry_allowed"] = fresh_entry_allowed
+
+    if (
+        lifecycle_state in ("CONFIRMED_CALL", "CONFIRMED_PUT")
+        and best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE")
+        and not fresh_entry_allowed
+    ):
+        trade_confidence = 0
+        action_label = "WAIT — entry risk approval unavailable"
+
+    signal_action = (
+        "WAIT" if action_blocked
+        else _signal_action_for_entry(
+            best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+        )
+    )
 
     # ── Expected move ─────────────────────────────────────────────────────
     exp_move = _expected_move(spot, vix, max(days_to_exp, 1))
@@ -780,16 +1614,24 @@ async def strike_recommendation(
     # ── WAIT state ────────────────────────────────────────────────────────
     if best == "WAIT":
         wait_reasons = []
-        if dec.get("confidence", 0) < 40:
-            wait_reasons.append("Confidence குறைவு")
-        if dec.get("margin", 0) < 8 and dec.get("margin", 0) > -8:
-            wait_reasons.append("Bull/Bear score close — no clear direction")
-        tech = market_data.get("technicals", {})
-        if tech.get("adx", 0) < 18:
-            wait_reasons.append(f"ADX {tech.get('adx',0):.1f} < 18 — range bound")
-        if not market_data.get("spot", {}).get("market_open", True):
-            wait_reasons.append("Market closed")
-        if time_info.get("warning"):
+        # CLOSED_MARKET_WAIT_REASON_FIX_20260922
+        # Do not interpret zero/sentinel technical values as real market
+        # evidence while the exchange is closed.
+        if not _market_is_open:
+            wait_reasons.append(
+                "Market closed — live intraday technical data unavailable"
+            )
+        else:
+            if dec.get("confidence", 0) < 40:
+                wait_reasons.append("Confidence குறைவு")
+            if dec.get("margin", 0) < 8 and dec.get("margin", 0) > -8:
+                wait_reasons.append("Bull/Bear score close — no clear direction")
+            tech = market_data.get("technicals", {})
+            if tech.get("adx", 0) < 18:
+                wait_reasons.append(
+                    f"ADX {tech.get('adx',0):.1f} < 18 — range bound"
+                )
+        if time_info.get("warning") and time_info.get("warning") != "Market closed":
             wait_reasons.append(time_info["warning"])
         if iv_info.get("warning"):
             wait_reasons.append(iv_info["warning"])
@@ -812,17 +1654,59 @@ async def strike_recommendation(
                                  "strategy_score": candidates.get("WAIT", 0)})
         await save_signal_state(persistent_state)
         history = await get_history_persistent(symbol)
+        await _persist_analysis_history_if_due(
+            symbol,
+            analyzer,
+            ai,
+            market_data,
+            persistent_state,
+            ai_result={
+                "market_bias": dec.get("market_bias", "Sideways"),
+                "preferred_side": dec.get("preferred_side", "NONE"),
+                "bullish_probability": dec.get("bullish_probability", 50),
+                "bearish_probability": dec.get("bearish_probability", 50),
+                "confidence": dec.get("confidence", 0),
+                "bull_score": dec.get("bull_score", 0),
+                "bear_score": dec.get("bear_score", 0),
+                "risk": dec.get("risk", "Medium"),
+                "pcr": market_data.get("pcr", 0),
+                "vix": vix,
+                "reason": "Rule-engine WAIT result; AI reasoning not requested in WAIT branch.",
+                "key_factors": list(dec.get("reasons", [])[:5]),
+                "forecast": dec.get("forecast", "Neutral"),
+                "ai_agrees": None,
+                "_provider": "rule_engine_only",
+            },
+        )
 
         return {
             "symbol":        symbol,
+            "preferred_side": dec.get("preferred_side", "NONE"),
+            "raw_preferred_side": dec.get("raw_preferred_side", "NONE"),
+            "margin":        dec.get("margin", 0),
             "best_strategy": "WAIT",
             "best_score":    candidates["WAIT"],
             "candidates":    candidates,
             "market_bias":   market_bias,
             "market_state":  market_state,
             "spot":          spot,
+"spot_observed_at": (
+                market_data.get("spot", {}).get("timestamp")
+                if isinstance(market_data.get("spot"), dict) else None
+            ),
+            "spot_data_source": (
+                market_data.get("spot", {}).get("data_source")
+                if isinstance(market_data.get("spot"), dict) else None
+            ),
+            "spot_stale": bool(
+                market_data.get("spot", {}).get("stale", False)
+                if isinstance(market_data.get("spot"), dict) else False
+            ),
+                        "market_open":   market_data.get("spot", {}).get("market_open") is True,
+              "market_snapshot_timestamp": market_data.get("timestamp"),
             "expiry":        expiry,
             "all_expiries":  chain.get("all_expiries", []),
+              "lot_size":        _contract_lot_size,
             "bull_score":    dec.get("bull_score", 0),
             "bear_score":    dec.get("bear_score", 0),
             "confidence":    dec.get("confidence", 0),
@@ -830,6 +1714,7 @@ async def strike_recommendation(
             "max_pain":      max_pain,
             "pcr":           market_data.get("pcr", 0),
             "vix":           vix,
+            **_metric_quality_payload(market_data),
             "expected_move": exp_move,
             "strategy":      dec.get("strategy", ""),
             "strategy_reason": dec.get("strategy_reason", ""),
@@ -845,18 +1730,73 @@ async def strike_recommendation(
         "signal_confirmations": dec.get("signal_confirmations", 0),
         "signal_reversal_confirmations": dec.get("signal_reversal_confirmations", 0),
         "signal_active_side": dec.get("signal_active_side", "NONE"),
+          "hard_gated": dec.get("hard_gated", False),
+              "risk": dec.get("risk", "Medium"),
+              "data_completeness_pct": dec.get("data_completeness_pct", 100),
+              "technical_data_source": market_data.get(
+                  "technical_data_source", "unknown"
+              ),
+              "volatility_regime": dec.get("volatility_regime", "unknown"),
+              "volatility_label": dec.get("volatility_label", ""),
+              "market_regime_confidence": dec.get(
+                  "market_regime_confidence", "LOW"
+              ),
+              "market_regime_reasons": dec.get(
+                  "market_regime_reasons", []
+              ),
+              "market_regime_reasons_ta": dec.get(
+                  "market_regime_reasons_ta", []
+              ),
+              "market_regime_no_trade_reason_ta": dec.get(
+                  "market_regime_no_trade_reason_ta", ""
+              ),
+              "market_regime_no_trade_reason": dec.get(
+                  "market_regime_no_trade_reason", ""
+              ),
             "reversal_type":   sig.get("reversal_type", ""),
             "strikes":       [],
             "price_levels":  None,
-            "strategy_detail": None,
+              # NEUTRAL_RANGE_IC_CANDIDATE_20260925
+              # Preserve a concrete Iron Condor already built from the live
+              # option chain for genuine RANGE/LOW_VOLATILITY conditions.
+              # Never expose it during NO_TRADE / closed-market conditions.
+              "strategy_detail": (
+                  _overview_strategy_detail
+                  if (
+                      isinstance(_overview_strategy_detail, dict)
+                      and _overview_strategy_detail.get("name") == "Iron Condor"
+                      and not regime.get("no_trade", False)
+                      and str(regime.get("regime", "")).upper()
+                          in ("RANGE", "LOW_VOLATILITY")
+                  )
+                  else None
+              ),
             "ai_reason":     "No high-quality setup — WAIT.",
             "disclaimer":    "Not investment advice. Trade at your own risk.",
             # ── V2 fields ────────────────────────────────────────────────
             "confluence":        confluence,
+            "technicals":        market_data.get("technicals", {}),
+            "technicals_daily":  market_data.get("technicals_daily", {}),
+            "multi_timeframe":   market_data.get("multi_timeframe", {}),
+            "rsi":               market_data.get("rsi", 50),
+            "macd":              market_data.get("macd", {}),
             "trade_confidence":  trade_confidence,
             "entry_gate":        v3_gate,
             "market_regime":     regime,
+        "market_regime_no_trade": regime.get(
+            "hard_no_trade", regime.get("no_trade", False)
+        ),
+        "market_regime_hard_no_trade": regime.get(
+            "hard_no_trade", regime.get("no_trade", False)
+        ),
             "action":            action_label,
+            "best_strategy":     best,
+            "signal_action":     (
+                "WAIT" if action_blocked else
+                _signal_action_for_entry(
+                    best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+                )
+            ),
             "v2_trade_levels":   None,
             "v2_risk":           None,
             "win_probability":   None,
@@ -868,7 +1808,7 @@ async def strike_recommendation(
     # Reuse the picks already computed above (for BUY CE/PE, Trade Levels
     # needed them) instead of recomputing — SELL CE/PE still computes fresh.
     if not raw_strikes:
-        raw_strikes = _pick_strikes(chain, is_call, spot, atr=_atr_for_picks)
+        raw_strikes = _pick_strikes(chain, is_call, spot, atr=_atr_for_picks, action=best, assumed_hold_days=_intraday_hold_days)
     strikes = []
     liquidity_warnings = []
     for s in raw_strikes:
@@ -879,19 +1819,291 @@ async def strike_recommendation(
             liquidity_warnings.append(f"{s['strike']} {s['type']} ({s.get('expiry','')}): {liq['reason']}")
         strikes.append(s)
 
-    # ── Price levels (ATR-based) ──────────────────────────────────────────
-    price_levels = generate_price_levels(market_data)
+    # DAILY_SIGNAL_LEDGER_CAPTURE_P0
+    # Permanent evidence capture for actionable signals only.
+    # `strikes[0]` is the authoritative selected contract after the final
+    # liquidity annotations have been applied. No outcome is calculated here.
+    if best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE") and strikes:
+        _ledger_selected = strikes[0]
+        _ledger_mtf = market_data.get("multi_timeframe", {}) or {}
+        _ledger_signal_action = (
+            "WAIT" if action_blocked else
+            _signal_action_for_entry(
+                best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+            )
+        )
+        _paper_capture_eligible = _forward_paper_capture_eligible(
+            action=best,
+            lifecycle_state=lifecycle_state,
+            fresh_entry_allowed=fresh_entry_allowed,
+            action_blocked=action_blocked,
+            signal_action=_ledger_signal_action,
+        )
+        _ledger_spot_snapshot = (
+            market_data.get("spot")
+            if isinstance(market_data.get("spot"), dict) else {}
+        )
 
-    # ── Strategy detail (legs) ────────────────────────────────────────────
-    import pandas as pd
-    from app.services.option_analyzer import OptionAnalyzer
-    opt_df = pd.DataFrame()
-    try:
-        if chain.get("data"):
-            opt_df = OptionAnalyzer().process_option_chain(chain)
-    except Exception:
-        pass
-    strategy_detail = generate_option_strategy(market_data, opt_df)
+        _ledger_mtf_snapshot = {}
+        for _tf in ("5min", "15min", "1hr"):
+            _frame = _ledger_mtf.get(_tf, {}) or {}
+            _ledger_mtf_snapshot[_tf] = {
+                "fresh": bool(_frame.get("fresh", False)),
+                "freshness_minutes": _frame.get("freshness_minutes"),
+                "freshness_reason": _frame.get("freshness_reason"),
+                "last_timestamp": _frame.get("last_timestamp"),
+                "data_source": _frame.get("data_source"),
+            }
+
+        _ledger_signal_action = (
+            "WAIT" if action_blocked
+            else _signal_action_for_entry(
+                best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+            )
+        )
+        _paper_capture_eligible = _forward_paper_capture_eligible(
+            action=best,
+            lifecycle_state=lifecycle_state,
+            fresh_entry_allowed=fresh_entry_allowed,
+            action_blocked=action_blocked,
+            signal_action=_ledger_signal_action,
+        )
+
+        try:
+            await record_daily_signal_ledger(
+                symbol=symbol,
+                action=best,
+                option_type=(
+                    _ledger_selected.get("type")
+                    or ("CE" if "CE" in best else "PE")
+                ),
+                strike=float(_ledger_selected.get("strike", 0) or 0),
+                expiry=_ledger_selected.get("expiry") or expiry,
+                spot=float(spot or 0),
+                option_ltp_snapshot=(
+                    _ledger_selected.get("ltp")
+                    if _ledger_selected.get("ltp") is not None
+                    else None
+                ),
+                entry_price=(
+                    _ledger_selected.get("entry_price")
+                    if _ledger_selected.get("entry_price") is not None
+                    else None
+                ),
+                signal_strength=signal_strength,
+                confidence=dec.get("confidence", 0),
+                lifecycle=lifecycle_state,
+                confirmations=dec.get("signal_confirmations", 0),
+                market_snapshot_timestamp=market_data.get("timestamp"),
+                technical_data_source=market_data.get(
+                    "technical_data_source", "unknown"
+                ),
+                confluence=confluence,
+                mtf_freshness=_ledger_mtf_snapshot,
+                entry_snapshot={
+                    **(_ledger_selected or {}),
+                    "lot_size": _contract_lot_size,
+                    # Versioned event-time evidence. Existing ledger columns
+                    # and entry fields remain unchanged; no broker order is made.
+                    "forward_paper_capture": {
+                        "schema_version": 2,
+                        "eligible": _paper_capture_eligible,
+                        "actual_trade": False,
+                        "entry_risk_authority": _entry_risk_authority,
+                        "symbol": str(symbol or "").upper(),
+                        "action": best,
+                        "signal_action": _ledger_signal_action,
+                        "lifecycle": lifecycle_state,
+                        "event_timestamp": market_data.get("timestamp"),
+                        "event_timezone": "Asia/Kolkata",
+                        "event_timestamp_basis": "market_snapshot_timestamp",
+                        "contract": {
+                            "expiry": _ledger_selected.get("expiry") or expiry,
+                            "strike": _ledger_selected.get("strike"),
+                            "option_type": (
+                                _ledger_selected.get("type")
+                                or ("CE" if "CE" in best else "PE")
+                            ),
+                            "lot_size": _contract_lot_size,
+                        },
+                        "quote": {
+                            "ltp": _ledger_selected.get("ltp"),
+                            "entry_price": _ledger_selected.get("entry_price"),
+                            "bid": _ledger_selected.get("bid"),
+                            "ask": _ledger_selected.get("ask"),
+                            "spread_pct": _ledger_selected.get("spread_pct"),
+                            "price_source": _ledger_selected.get("price_source"),
+                            "exchange_feed_time": _ledger_selected.get(
+                                "exchange_feed_time"
+                            ),
+                            "exchange_trade_time": _ledger_selected.get(
+                                "exchange_trade_time"
+                            ),
+                            "live_ws": bool(_ledger_selected.get("live_ws", False)),
+                            "live_ws_received_at": _ledger_selected.get(
+                                "live_ws_received_at"
+                            ),
+                            "live_ws_age_sec": _ledger_selected.get(
+                                "live_ws_age_sec"
+                            ),
+                            "live_ws_exchange_timestamp": _ledger_selected.get(
+                                "live_ws_exchange_timestamp"
+                            ),
+                            "live_ws_exchange_timestamp_ms": _ledger_selected.get(
+                                "live_ws_exchange_timestamp_ms"
+                            ),
+                        },
+                        "spot": {
+                            "price": float(spot or 0),
+                            "observed_at": _ledger_spot_snapshot.get("timestamp"),
+                            "data_source": _ledger_spot_snapshot.get("data_source"),
+                            "stale": bool(
+                                _ledger_spot_snapshot.get("stale", False)
+                            ),
+                            "market_open": (
+                                _ledger_spot_snapshot.get("market_open") is True
+                            ),
+                        },
+                        "risk": {
+                            "underlying_atr": (
+                                _atr_for_picks if _atr_for_picks > 0 else None
+                            ),
+                            "sl": _ledger_selected.get("sl"),
+                            "t1": _ledger_selected.get("t1"),
+                            "t2": _ledger_selected.get("t2"),
+                            "t3": _ledger_selected.get("t3"),
+                            "levels_basis": _ledger_selected.get("levels_basis"),
+                            "delta": _ledger_selected.get("delta"),
+                            "theta_per_day": _ledger_selected.get("theta_per_day"),
+                        },
+                        "gate": {
+                            "fresh_entry_allowed": bool(fresh_entry_allowed),
+                            "entry_gate": dict(v3_gate or {}),
+                            "hard_gated": bool(dec.get("hard_gated", False)),
+                            "market_regime_no_trade": bool(
+                                regime.get(
+                                    "hard_no_trade", regime.get("no_trade", False)
+                                )
+                            ),
+                        },
+                        "data_quality": {
+                            "technical_data_source": market_data.get(
+                                "technical_data_source", "unknown"
+                            ),
+                            "data_completeness_pct": dec.get(
+                                "data_completeness_pct"
+                            ),
+                            "option_chain_valid": bool(
+                                market_data.get(
+                                    "option_chain_valid",
+                                    bool((market_data.get("option_chain") or {}).get(
+                                        "data"
+                                    )),
+                                )
+                            ),
+                            "pcr_quality": market_data.get("pcr_quality"),
+                            "vix_quality": market_data.get("vix_quality"),
+                            "mtf_freshness": _ledger_mtf_snapshot,
+                        },
+                    },
+                    # Freeze the final decision context for new ledger rows.
+                    "strategy_decision": {
+                        "metadata_version": 2,
+                        "entry_risk_authority": _entry_risk_authority,
+                        "best_strategy": best,
+                        "signal_action": (
+                            "WAIT" if action_blocked else
+                            _signal_action_for_entry(
+                                best, lifecycle_state, lifecycle_active,
+                                fresh_entry_allowed,
+                            )
+                        ),
+                        "fresh_entry_allowed": bool(fresh_entry_allowed),
+                        "lifecycle": lifecycle_state,
+                        "active_side": lifecycle_active,
+                        "entry_gate": dict(v3_gate or {}),
+                        "market_regime_no_trade": bool(
+                            regime.get(
+                                "hard_no_trade", regime.get("no_trade", False)
+                            )
+                        ),
+                        "hard_gated": bool(dec.get("hard_gated", False)),
+                    },
+                },
+                lifecycle_confirmation_at=persistent_state.get(
+                    "last_confirmation_at"
+                ),
+            )
+        except Exception as _ledger_exc:
+            logger.warning(
+                "Daily signal ledger capture failed: %s",
+                _ledger_exc,
+            )
+
+    # Price levels + Strategy detail
+    # FINAL_ACTION_DETAIL_SYNC_20261001:
+    # MarketAnalyzer builds strategy_detail before this route resolves the
+    # authoritative final action (BUY/SELL/WAIT). Never reuse a detail object
+    # whose strategy category is incompatible with `best`.
+    _can_reuse_overview_strategy = (
+        dec.get("preferred_side", "NONE") == _overview_preferred_side
+        and dec.get("strategy", "") == _overview_strategy
+        and _overview_price_levels is not None
+        and (
+            (
+                best == "BUY CE"
+                and (
+                    _overview_strategy == "Directional Call Bias"
+                    or _overview_strategy.startswith("Weak-Trend CE")
+                )
+            )
+            or (
+                best == "BUY PE"
+                and (
+                    _overview_strategy == "Directional Put Bias"
+                    or _overview_strategy.startswith("Weak-Trend PE")
+                )
+            )
+        )
+    )
+
+    if _can_reuse_overview_strategy:
+        price_levels = _overview_price_levels
+        strategy_detail = _overview_strategy_detail
+    else:
+        price_levels = generate_price_levels(market_data)
+
+        import pandas as pd
+        from app.services.option_analyzer import OptionAnalyzer
+
+        opt_df = pd.DataFrame()
+        try:
+            if chain.get("data"):
+                opt_df = OptionAnalyzer().process_option_chain(chain)
+        except Exception:
+            pass
+
+        # Final BUY actions can use the existing single-leg builder.
+        # Force only the builder category; scoring/gates/lifecycle stay untouched.
+        if best in ("BUY CE", "BUY PE"):
+            detail_decision = dict(dec)
+            detail_decision["strategy"] = (
+                "Directional Call Bias"
+                if best == "BUY CE"
+                else "Directional Put Bias"
+            )
+
+            detail_market_data = dict(market_data)
+            detail_market_data["decision"] = detail_decision
+
+            strategy_detail = generate_option_strategy(
+                detail_market_data,
+                opt_df,
+            )
+        else:
+            # The strategy_engine has no standalone SELL CE/PE builder.
+            # Never expose stale BUY/neutral legs for a final SELL action.
+            strategy_detail = None
 
     # ── AI reasoning ──────────────────────────────────────────────────────
     # BUG FIX: was calling ai.analyze_market() directly here — a SECOND,
@@ -904,11 +2116,14 @@ async def strike_recommendation(
     # JSON input" — a truncated/empty body, not a clean error). Now shared
     # via app/utils/ai_result_cache.py: whichever route asks first pays for
     # the call, the other reuses it.
+    ai_result = None
+    ai_unavailable = False
     ai_reason = ""
     try:
         ai_result = await get_ai_analysis(ai, symbol, expiry, market_data)
         ai_reason = ai_result.get("reason", "")
     except AIProviderError:
+        ai_unavailable = True
         ai_reason = "AI unavailable — rule engine decision shown."
 
     # ── Collect all warnings ──────────────────────────────────────────────
@@ -933,17 +2148,37 @@ async def strike_recommendation(
                              "strategy_score": best_score})
     await save_signal_state(persistent_state)
     history = await get_history_persistent(symbol)
+    await _persist_analysis_history_if_due(
+        symbol, analyzer, ai, market_data, persistent_state,
+        ai_result=ai_result, ai_unavailable=ai_unavailable,
+    )
 
     return {
         "symbol":          symbol,
-        "best_strategy":   best,
+        "preferred_side":  dec.get("preferred_side", "NONE"),
+        "raw_preferred_side": dec.get("raw_preferred_side", "NONE"),
+        "margin":          dec.get("margin", 0),
         "best_score":      best_score,
         "candidates":      candidates,
         "market_bias":     market_bias,
         "market_state":    market_state,
         "spot":            round(spot, 2),
+"spot_observed_at": (
+            market_data.get("spot", {}).get("timestamp")
+            if isinstance(market_data.get("spot"), dict) else None
+        ),
+        "spot_data_source": (
+            market_data.get("spot", {}).get("data_source")
+            if isinstance(market_data.get("spot"), dict) else None
+        ),
+        "spot_stale": bool(
+            market_data.get("spot", {}).get("stale", False)
+            if isinstance(market_data.get("spot"), dict) else False
+        ),
+                "market_snapshot_timestamp": market_data.get("timestamp"),
         "expiry":          expiry,
         "all_expiries":    chain.get("all_expiries", []),
+        "lot_size":        _contract_lot_size,
         "bull_score":      dec.get("bull_score", 0),
         "bear_score":      dec.get("bear_score", 0),
         "confidence":      dec.get("confidence", 0),
@@ -953,12 +2188,13 @@ async def strike_recommendation(
         "max_pain":        max_pain,
         "pcr":             market_data.get("pcr", 0),
         "vix":             vix,
+        **_metric_quality_payload(market_data),
         "expected_move":   exp_move,
         "strategy":        dec.get("strategy", ""),
         "strategy_reason": dec.get("strategy_reason", ""),
-        "strikes":         strikes,
-        "price_levels":    price_levels,
-        "strategy_detail": strategy_detail,
+        "strikes":         strikes if fresh_entry_allowed else [],
+        "price_levels":    (price_levels) if fresh_entry_allowed else None,
+        "strategy_detail": (strategy_detail) if fresh_entry_allowed else None,
         "time_session":    time_info.get("session", ""),
         "expiry_info":     expiry_info,
         "iv_info":         iv_info,
@@ -972,23 +2208,67 @@ async def strike_recommendation(
         "signal_reversal_confirmations": dec.get("signal_reversal_confirmations", 0),
         "signal_active_side": dec.get("signal_active_side", "NONE"),
         "signal_lifecycle_reason": dec.get("signal_lifecycle_reason", ""),
+        "hard_gated":      dec.get("hard_gated", False),
+        "market_open": market_data.get("spot", {}).get("market_open") is True,
+        "market_snapshot_timestamp": market_data.get("timestamp"),
+        "risk": dec.get("risk", "Medium"),
+        "data_completeness_pct": dec.get("data_completeness_pct", 100),
+        "technical_data_source": market_data.get(
+            "technical_data_source", "unknown"
+        ),
+        "volatility_regime": dec.get("volatility_regime", "unknown"),
+        "volatility_label": dec.get("volatility_label", ""),
+        "market_regime_confidence": dec.get(
+            "market_regime_confidence", "LOW"
+        ),
+        "market_regime_reasons": dec.get(
+            "market_regime_reasons", []
+        ),
+        "market_regime_reasons_ta": dec.get(
+            "market_regime_reasons_ta", []
+        ),
+        "market_regime_no_trade_reason_ta": dec.get(
+            "market_regime_no_trade_reason_ta", ""
+        ),
+        "market_regime_no_trade_reason": dec.get(
+            "market_regime_no_trade_reason", ""
+        ),
         "reversal_type":   sig.get("reversal_type", ""),
         "ai_reason":       ai_reason,
         "disclaimer":      "Not investment advice. Trade at your own risk.",
         # ── V2 fields ─────────────────────────────────────────────────────
         "confluence":        confluence,
+        "technicals":        market_data.get("technicals", {}),
+        "technicals_daily":  market_data.get("technicals_daily", {}),
+        "multi_timeframe":   market_data.get("multi_timeframe", {}),
+        "rsi":               market_data.get("rsi", 50),
+        "macd":              market_data.get("macd", {}),
         "trade_confidence":  trade_confidence,
         "entry_gate":        v3_gate,
         "market_regime":     regime,
+        "market_regime_no_trade": regime.get(
+            "hard_no_trade", regime.get("no_trade", False)
+        ),
+        "market_regime_hard_no_trade": regime.get(
+            "hard_no_trade", regime.get("no_trade", False)
+        ),
         "action":            action_label,
-        "v2_trade_levels":   v2_trade_levels,
-        "v2_risk":           v2_risk,
+            "best_strategy":     best,
+            "signal_action":     (
+                "WAIT" if action_blocked else
+                _signal_action_for_entry(
+                    best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+                )
+            ),
+        "v2_trade_levels":   (v2_trade_levels) if fresh_entry_allowed else None,
+        "v2_risk":           (v2_risk) if fresh_entry_allowed else None,
+        "entry_risk_authority": _entry_risk_authority,
         "win_probability":   None,
         "win_probability_note": "Win Probability: Not enough historical data",
     }
 
 
-@router.get("/history/{symbol}")
+@router.get("/history/{symbol}", response_model=StrategyHistoryResponse)
 async def signal_history(symbol: str):
     """Last 20 persisted strategy signals for a symbol."""
     history = await get_history_persistent(symbol.upper())

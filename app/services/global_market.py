@@ -45,6 +45,7 @@ from typing import Dict, Optional
 
 import httpx
 from curl_cffi.requests import AsyncSession as CurlAsyncSession
+from app.utils.cache import async_cache
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +226,7 @@ class GlobalMarketService:
             logger.warning(f"GIFT Nifty fetch failed: {type(e).__name__}: {e}")
             return None
 
+    @async_cache(ttl=30)
     async def get_snapshot(self) -> Dict:
         """
         Fetches all tracked global instruments concurrently.

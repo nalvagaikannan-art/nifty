@@ -8,6 +8,19 @@
         <button class="sym-tab active" data-sym="NIFTY">NIFTY</button>
         <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
         <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
+        <button class="sym-tab" data-sym="SENSEX">SENSEX</button>
+    </div>
+</div>
+
+<!-- Expiry selector -->
+<div class="card" style="margin-bottom:1rem;">
+    <div style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap;">
+        <label for="expirySelect" style="font-weight:700;">Expiry</label>
+        <select id="expirySelect"
+                style="min-width:190px;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);">
+            <option value="">Loading...</option>
+        </select>
+        <div id="chainMeta" style="font-size:0.78rem;color:var(--text2);"></div>
     </div>
 </div>
 
@@ -45,6 +58,7 @@
 <script>
 let curSym = 'NIFTY';
 let curRange = 5;
+let curExpiry = '';
 let lastChain = null;
 
 function num(v) { return v ? Number(v).toLocaleString('en-IN') : '—'; }
@@ -89,63 +103,208 @@ function renderCandidates(data) {
     $('#candidatesBody').html(candidateCard(c.ce, 'CALL') + candidateCard(c.pe, 'PUT'));
 }
 
+function escHtml(v) {
+    return String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function legOf(row, side) {
+    return row[side] || row[side.toLowerCase()] || {};
+}
+
+function strikeOf(row) {
+    const n = Number(row.strikePrice ?? row.strike ?? 0);
+    return Number.isFinite(n) ? n : 0;
+}
+
+function pickField(obj, a, b) {
+    if (obj && obj[a] !== undefined && obj[a] !== null) return obj[a];
+    return obj ? obj[b] : undefined;
+}
+
 function renderChain(data, range) {
     const rows = data.data || [];
-    const atm = data.oi_summary && data.oi_summary.atm_strike ? data.oi_summary.atm_strike : data.underlying_price;
-    let filtered = rows;
+    const summary = data.oi_summary || {};
+    const atm = Number(summary.atm_strike || data.underlying_price || 0);
+
+    let filtered = rows.filter(r => strikeOf(r) > 0);
+
     if (range !== 'full') {
         const n = Number(range);
-        filtered = rows.filter(r => Math.abs((r.strike - atm) / 50) <= n);
+        filtered = filtered.filter(r =>
+            Math.abs((strikeOf(r) - atm) / 50) <= n
+        );
     }
+
     if (!filtered.length) {
         $('#chainBody').html('<div class="error-msg">⚠ Data Unavailable</div>');
         return;
     }
-    let html = '<div style="overflow-x:auto;"><table style="width:100%;font-size:0.78rem;border-collapse:collapse;">' +
-        '<thead><tr style="color:var(--text2);"><th style="text-align:right;padding:4px;">CE OI</th><th style="text-align:right;padding:4px;">CE LTP</th>' +
-        '<th style="text-align:center;padding:4px;">Strike</th>' +
-        '<th style="text-align:left;padding:4px;">PE LTP</th><th style="text-align:left;padding:4px;">PE OI</th></tr></thead><tbody>';
+
+    let html =
+        '<div style="overflow-x:auto;">' +
+        '<table style="width:100%;font-size:0.78rem;border-collapse:collapse;min-width:820px;">' +
+        '<thead><tr style="color:var(--text2);">' +
+        '<th style="text-align:right;padding:5px;">CE OI</th>' +
+        '<th style="text-align:right;padding:5px;">CE Bid</th>' +
+        '<th style="text-align:right;padding:5px;">CE LTP</th>' +
+        '<th style="text-align:right;padding:5px;">CE Ask</th>' +
+        '<th style="text-align:center;padding:5px;">Strike</th>' +
+        '<th style="text-align:left;padding:5px;">PE Bid</th>' +
+        '<th style="text-align:left;padding:5px;">PE LTP</th>' +
+        '<th style="text-align:left;padding:5px;">PE Ask</th>' +
+        '<th style="text-align:left;padding:5px;">PE OI</th>' +
+        '</tr></thead><tbody>';
+
     filtered.forEach(r => {
-        const isAtm = Math.abs(r.strike - atm) < 25;
-        html += '<tr style="' + (isAtm ? 'background:rgba(64,196,255,0.08);font-weight:700;' : '') + '">' +
-            '<td style="text-align:right;padding:4px;" class="td-green">' + num(r.ce_oi) + '</td>' +
-            '<td style="text-align:right;padding:4px;">' + num(r.ce_ltp) + '</td>' +
-            '<td style="text-align:center;padding:4px;color:var(--primary);">' + num(r.strike) + '</td>' +
-            '<td style="text-align:left;padding:4px;">' + num(r.pe_ltp) + '</td>' +
-            '<td style="text-align:left;padding:4px;" class="td-red">' + num(r.pe_oi) + '</td>' +
+        const strike = strikeOf(r);
+        const ce = legOf(r, 'CE');
+        const pe = legOf(r, 'PE');
+
+        const ceOi = pickField(ce, 'openInterest', 'oi');
+        const peOi = pickField(pe, 'openInterest', 'oi');
+
+        const ceBid = pickField(ce, 'bidprice', 'bid');
+        const ceAsk = pickField(ce, 'askPrice', 'ask');
+        const peBid = pickField(pe, 'bidprice', 'bid');
+        const peAsk = pickField(pe, 'askPrice', 'ask');
+
+        const ceLtp = pickField(ce, 'lastPrice', 'ltp');
+        const peLtp = pickField(pe, 'lastPrice', 'ltp');
+
+        const isAtm = Math.abs(strike - atm) < 25;
+
+        html +=
+            '<tr style="' +
+            (isAtm
+                ? 'background:rgba(64,196,255,0.08);font-weight:700;'
+                : '') +
+            '">' +
+            '<td style="text-align:right;padding:5px;" class="td-green">' + num(ceOi) + '</td>' +
+            '<td style="text-align:right;padding:5px;">' + num(ceBid) + '</td>' +
+            '<td style="text-align:right;padding:5px;">' + num(ceLtp) + '</td>' +
+            '<td style="text-align:right;padding:5px;">' + num(ceAsk) + '</td>' +
+            '<td style="text-align:center;padding:5px;color:var(--primary);">' + num(strike) + '</td>' +
+            '<td style="text-align:left;padding:5px;">' + num(peBid) + '</td>' +
+            '<td style="text-align:left;padding:5px;">' + num(peLtp) + '</td>' +
+            '<td style="text-align:left;padding:5px;">' + num(peAsk) + '</td>' +
+            '<td style="text-align:left;padding:5px;" class="td-red">' + num(peOi) + '</td>' +
             '</tr>';
     });
+
     html += '</tbody></table></div>';
     $('#chainBody').html(html);
 }
 
+function populateExpirySelect(data) {
+    const exps = data.all_expiries || [];
+    const selected = String(data.expiry || '');
+
+    if (!exps.length) {
+        $('#expirySelect').html('<option value="">No expiry</option>');
+        return;
+    }
+
+    $('#expirySelect').html(
+        exps.map(e =>
+            '<option value="' + escHtml(e) + '"' +
+            (String(e) === selected ? ' selected' : '') +
+            '>' + escHtml(e) + '</option>'
+        ).join('')
+    );
+}
+
+function renderChainMeta(data) {
+    const rows = data.data || [];
+    let feed = '';
+
+    for (const r of rows) {
+        for (const side of ['CE', 'PE']) {
+            const leg = legOf(r, side);
+            if (leg.exchangeFeedTime) {
+                feed = leg.exchangeFeedTime;
+                break;
+            }
+        }
+        if (feed) break;
+    }
+
+    let meta =
+        'Source: ' + escHtml(data.data_source || '—') +
+        ' · Expiry: ' + escHtml(data.expiry || '—') +
+        ' · Strikes: ' + rows.length;
+
+    if (feed) meta += ' · Feed: ' + escHtml(feed);
+
+    $('#chainMeta').html(meta);
+}
+
 function loadOptionView(sym) {
     $('#errorBanner').hide();
-    $.get('/api/options/' + sym).done(function(data) {
-        lastChain = data;
-        renderAtm(data);
-        renderCandidates(data);
-        renderChain(data, curRange);
-    }).fail(function() {
-        $('#errorBanner').show();
-    });
+
+    const backendRange = curRange === 'full' ? 'full' : '10';
+    const params = { range: backendRange };
+
+    if (curExpiry) {
+        params.expiry = curExpiry;
+    }
+
+    $.get('/api/options/' + encodeURIComponent(sym), params)
+        .done(function(data) {
+            lastChain = data;
+            curExpiry = data.expiry || curExpiry || '';
+
+            populateExpirySelect(data);
+            renderChainMeta(data);
+            renderAtm(data);
+            renderCandidates(data);
+            renderChain(data, curRange);
+        })
+        .fail(function(xhr) {
+            $('#errorBanner').show();
+            $('#chainMeta').text(
+                'Option chain request failed' +
+                (xhr && xhr.status ? ' (HTTP ' + xhr.status + ')' : '')
+            );
+        });
 }
 
 $(document).ready(function() {
     loadOptionView(curSym);
+
     $('.sym-tabs').eq(0).find('.sym-tab').on('click', function() {
         $(this).siblings().removeClass('active');
         $(this).addClass('active');
         curSym = $(this).data('sym');
+        curExpiry = '';
         loadOptionView(curSym);
     });
+
     $('.sym-tabs').eq(1).find('.sym-tab').on('click', function() {
         $(this).siblings().removeClass('active');
         $(this).addClass('active');
         curRange = $(this).data('range');
-        if (lastChain) renderChain(lastChain, curRange);
+
+        if (curRange === 'full') {
+            loadOptionView(curSym);
+        } else if (lastChain) {
+            renderChain(lastChain, curRange);
+            renderChainMeta(lastChain);
+        }
     });
-    $('#retryBtn').on('click', function() { loadOptionView(curSym); });
+
+    $('#expirySelect').on('change', function() {
+        curExpiry = $(this).val() || '';
+        loadOptionView(curSym);
+    });
+
+    $('#retryBtn').on('click', function() {
+        loadOptionView(curSym);
+    });
 });
 </script>
 {% endblock %}

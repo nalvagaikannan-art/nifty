@@ -79,6 +79,11 @@ class AIEngine:
                 parsed["rule_market_bias"]    = decision.get("market_bias")
                 parsed["bull_score"]          = decision.get("bull_score", 0)
                 parsed["bear_score"]          = decision.get("bear_score", 0)
+                parsed["margin"]               = decision.get(
+                    "margin",
+                    (decision.get("bull_score", 0) or 0)
+                    - (decision.get("bear_score", 0) or 0),
+                )
                 parsed["rule_confidence"]     = decision.get("confidence", 0)
                 parsed["ai_agrees"]           = ai_agrees
                 parsed["_provider"]           = provider
@@ -258,7 +263,7 @@ REAL INTRADAY MULTI-TIMEFRAME DATA (actual candles, not derived from daily close
 
 YOUR TASK (JSON only, no markdown):
 1. Agree or disagree with rule engine's market bias based on data
-2. EXPLAIN in Tamil+English mix — describe what data shows, NOT a trade instruction
+2. EXPLAIN the reason and every key_factors item in natural, complete Tamil using Tamil script. Keep technical terms such as PCR, OI, VWAP, EMA, RSI, MACD, ADX, ATR and VIX in English. Do NOT write Tanglish or Tamil words using English letters. Keep JSON keys, enum values and numeric data unchanged.
 3. timeframe_trend: {"report the ACTUAL trend shown in the REAL INTRADAY MULTI-TIMEFRAME DATA above for each frame that has data — do not invent numbers for it" if have_real_tf else 'ALL THREE intraday timeframes are marked "data not available" above — you MUST output "unavailable" for all three in timeframe_trend below. Do NOT guess or infer 5min/15min/1hr values from the daily data; that would be fabricated.'}
 
 Output EXACTLY this JSON:

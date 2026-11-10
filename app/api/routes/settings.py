@@ -2,6 +2,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from app.config import settings
+from app.schemas import (
+    SettingsConfigResponse,
+    SettingsHealthResponse,
+    SettingsAngelSaveResponse,
+)
 from app.utils import health_metrics
 import os, re, logging
 
@@ -9,7 +14,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("/config")
+@router.get("/config", response_model=SettingsConfigResponse)
 async def get_config():
     return {
         "ai_provider": settings.ai_provider,
@@ -23,7 +28,7 @@ async def get_config():
     }
 
 
-@router.get("/health")
+@router.get("/health", response_model=SettingsHealthResponse)
 async def get_health():
     """
     Rolling data-source health (CODE_REVIEW.md #19/#20) — NSE/Angel One
@@ -47,12 +52,15 @@ class AngelCredsPayload(BaseModel):
     angel_totp_secret: Optional[str] = None
 
 
-@router.post("/angel")
+@router.post("/angel", response_model=SettingsAngelSaveResponse)
 async def save_angel_creds(payload: AngelCredsPayload):
     """
     Angel One credentials-ஐ .env file-ல் write செய்யும்.
     Production-ல் Render env vars மூலம் set செய்வது நல்லது.
     """
+    # SECURITY: unauthenticated endpoint - disabled unless explicitly enabled
+    if os.getenv("ALLOW_CRED_WRITE") != "1":
+        raise HTTPException(status_code=403, detail="Credential write disabled. Edit .env on the server.")
     env_path = ".env"
     updates = {
         "ANGEL_API_KEY":     payload.angel_api_key,

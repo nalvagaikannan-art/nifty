@@ -40,6 +40,7 @@ from typing import Optional, Dict, List
 
 from app.config import settings
 from app.utils.helpers import safe_float, safe_int
+from app.utils.helpers import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ class KiteSession:
             "change": last_price - prev_close,
             "change_percent": round((last_price - prev_close) / max(prev_close, 1) * 100, 2),
             "source": "zerodha",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ist().isoformat(),
         }
 
     async def get_india_vix(self) -> float:
@@ -219,9 +220,9 @@ class KiteSession:
         kite = self._client()
 
         if not to_date:
-            to_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            to_date = now_ist().strftime("%Y-%m-%d %H:%M:%S")
         if not from_date:
-            from_date = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+            from_date = (now_ist() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
 
         await self._throttle()
         try:
@@ -268,7 +269,7 @@ class KiteSession:
     NFO_SYMBOL_MAP = {"NIFTY": "NIFTY", "BANKNIFTY": "BANKNIFTY", "FINNIFTY": "FINNIFTY"}
 
     async def get_option_chain(
-        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: int = 15
+        self, symbol: str, expiry: Optional[str] = None, strikes_each_side: Optional[int] = 15
     ) -> Dict:
         """Same hand-built approach as angel_one.py's get_option_chain:
         filter the instrument master to this symbol's option rows, pick an
@@ -301,9 +302,12 @@ class KiteSession:
         if not strikes:
             raise ZerodhaError(f"No valid strikes parsed for {sym} {chosen_expiry}")
         atm_idx = min(range(len(strikes)), key=lambda i: abs(strikes[i] - spot))
-        lo = max(0, atm_idx - strikes_each_side)
-        hi = min(len(strikes), atm_idx + strikes_each_side + 1)
-        selected_strikes = set(strikes[lo:hi])
+        if strikes_each_side is None:
+            selected_strikes = set(strikes)
+        else:
+            lo = max(0, atm_idx - strikes_each_side)
+            hi = min(len(strikes), atm_idx + strikes_each_side + 1)
+            selected_strikes = set(strikes[lo:hi])
 
         selected_rows = [r for r in rows if safe_float(r.get("strike", 0)) in selected_strikes]
         keys = [f"NFO:{r['tradingsymbol']}" for r in selected_rows if r.get("tradingsymbol")]

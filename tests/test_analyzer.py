@@ -16,6 +16,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from app.services.market_analyzer import MarketAnalyzer
+from app.utils.cache import _cache
 
 
 def _mock_fetcher(spot_price: float = 24650.0, prices=None, market_open: bool = True):
@@ -60,14 +61,45 @@ def _mock_fetcher(spot_price: float = 24650.0, prices=None, market_open: bool = 
 
 @pytest.fixture(autouse=True)
 def _patch_db_and_global_calls():
-    """These three are the pipeline's only non-fetcher external calls —
-    stub them so nothing touches a real DB or the internet."""
-    with patch("app.services.market_analyzer.save_option_chain_snapshot", new=AsyncMock(return_value=None)), \
-         patch("app.services.market_analyzer.global_market_service.get_snapshot",
-               new=AsyncMock(return_value={"instruments": {}, "global_change_pct": None, "gift_nifty_change_pct": None})), \
-         patch("app.services.market_analyzer.history_service.get_oi_change_since",
-               new=AsyncMock(return_value={"available": False, "reason": "test stub"})):
+    """Keep analyzer unit tests isolated from real DB/cache/network state."""
+    _cache.clear()
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=True),
+        patch("app.utils.cache._redis_client", None),
+        patch(
+            "app.services.market_analyzer.save_option_chain_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.save_market_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+        patch(
+            "app.services.market_analyzer.global_market_service.get_snapshot",
+            new=AsyncMock(
+                return_value={
+                    "instruments": {},
+                    "global_change_pct": None,
+                    "gift_nifty_change_pct": None,
+                }
+            ),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_oi_change_since",
+            new=AsyncMock(
+                return_value={
+                    "available": False,
+                    "reason": "test stub",
+                }
+            ),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_intraday_ohlc_before",
+            new=AsyncMock(return_value=[]),
+        ),
+    ):
         yield
+    _cache.clear()
 
 
 @pytest.mark.asyncio
@@ -76,7 +108,8 @@ async def test_full_overview_runs_end_to_end_with_insufficient_history():
     path (spec §7: never fabricate indicators from data that isn't there)
     and still return a complete, well-shaped result rather than crashing."""
     analyzer = MarketAnalyzer(fetcher=_mock_fetcher(prices=[]))
-    result = await analyzer.get_full_market_overview("NIFTY")
+    with patch("app.services.market_analyzer.is_market_hours_ist", return_value=True):
+        result = await analyzer.get_full_market_overview("NIFTY")
 
     assert result["technical_data_source"] == "placeholder"
     assert result["trend"] == "sideways"
@@ -158,12 +191,12 @@ async def test_expiry_param_is_forwarded_to_option_chain_fetch():
     analyzer = MarketAnalyzer(fetcher=fetcher)
 
     await analyzer.get_full_market_overview("NIFTY", expiry="04-Sep-2025")
-    fetcher.get_option_chain.assert_called_with("NIFTY", expiry="04-Sep-2025")
+    fetcher.get_option_chain.assert_called_with("NIFTY", "04-Sep-2025")
 
     # Omitting expiry must keep the previous nearest-expiry default (None),
     # not silently reuse whatever the last call happened to pass.
     await analyzer.get_full_market_overview("BANKNIFTY")
-    fetcher.get_option_chain.assert_called_with("BANKNIFTY", expiry=None)
+    fetcher.get_option_chain.assert_called_with("BANKNIFTY", None)
 
 
 @pytest.mark.asyncio
@@ -182,3 +215,60 @@ async def test_different_expiries_do_not_share_a_cache_entry():
     # Same symbol + same expiry again, within the TTL window → cache hit, no new fetch.
     await analyzer.get_full_market_overview("NIFTY", expiry="28-Aug-2025")
     assert fetcher.get_spot.call_count == 2
+
+@pytest.mark.asyncio
+async def test_safe_multi_timeframe_excludes_current_live_5m_bucket():
+    """Live REST candles may contain the currently-forming 5-minute bar.
+
+    The live MTF frame must use only completed candles. The exact current
+    5-minute bucket must not reach 5m indicators or downstream MTF output.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    fixed_now = datetime(2026, 10, 8, 11, 7, 0, tzinfo=ist)
+
+    # 09:15 ... 11:05 inclusive.
+    timestamps = []
+    cur = datetime(2026, 10, 8, 9, 15, tzinfo=ist)
+    end = datetime(2026, 10, 8, 11, 5, tzinfo=ist)
+
+    while cur <= end:
+        timestamps.append(cur.isoformat())
+        cur += timedelta(minutes=5)
+
+    count = len(timestamps)
+    fetcher = _mock_fetcher()
+    fetcher.get_intraday_ohlc.return_value = {
+        "available": True,
+        "data_source": "angel_one_intraday",
+        "opens": [100.0 + i for i in range(count)],
+        "highs": [101.0 + i for i in range(count)],
+        "lows": [99.0 + i for i in range(count)],
+        "closes": [100.5 + i for i in range(count)],
+        "volumes": [1000] * count,
+        "timestamps": timestamps,
+    }
+
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+
+    with (
+        patch("app.services.market_analyzer.current_ist", return_value=fixed_now),
+        patch(
+            "app.services.market_analyzer.angel_live_feed.get_completed_5m_candles",
+            return_value=[],
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.save_intraday_ohlc_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        result = await analyzer._safe_multi_timeframe("NIFTY")
+
+    five = result["5min"]
+
+    assert five["timestamps"]
+    assert five["timestamps"][-1] == "2026-10-08T11:00:00+05:30"
+    assert "2026-10-08T11:05:00+05:30" not in five["timestamps"]
+

@@ -17,6 +17,7 @@ spelled out in the reasoning text so they're easy to override.
 from typing import Dict, List, Optional
 import pandas as pd
 from app.utils.helpers import safe_float
+from app.services.contract_specs import resolve_lot_size
 
 # ── Single-leg directional buying — retail rule-of-thumb risk management ──
 SINGLE_LEG_SL_PCT     = 0.35   # stop-loss at 35% premium erosion
@@ -49,116 +50,228 @@ def _leg(row: pd.Series, side: str, action: str, expiry: str = "") -> Dict:
     }
 
 
-def _single_leg(df: pd.DataFrame, spot: float, side: str, expiry: str = "") -> Optional[Dict]:
+def _single_leg(
+    df: pd.DataFrame,
+    spot: float,
+    side: str,
+    expiry: str = "",
+    lot_size: int = 1,
+) -> Optional[Dict]:
     row = _nearest_row(df, spot)
     if row is None:
         return None
+
     premium = safe_float(row.get(f"{side}_ltp", 0))
     if premium <= 0:
         return None
-    sl     = round(premium * (1 - SINGLE_LEG_SL_PCT), 1)
+
+    sl = round(premium * (1 - SINGLE_LEG_SL_PCT), 1)
     target = round(premium * (1 + SINGLE_LEG_TARGET_PCT), 1)
+
+    # STRATEGY_LOT_VALUE_FIX_20260925
+    # Option premium is quoted per index unit. Convert only the risk
+    # amount to ₹/lot using the current contract lot size.
+    max_loss_points = round(premium - sl, 1)
+    max_loss_per_lot = round(max_loss_points * lot_size, 2)
+
     expiry_note = f" ({expiry} expiry)" if expiry else ""
+
     return {
-        "name":            f"ATM {side.upper()} Buying",
-        "legs":            [_leg(row, side, "BUY", expiry)],
-        "entry_premium":   premium,
-        "stop_loss":       sl,
-        "target":          target,
-        "max_loss_per_lot": round(premium - sl, 1),
+        "name":               f"ATM {side.upper()} Buying",
+        "legs":               [_leg(row, side, "BUY", expiry)],
+        "entry_premium":      premium,
+        "stop_loss":          sl,
+        "target":             target,
+        "max_loss_points":    max_loss_points,
+        "max_loss_per_lot":   max_loss_per_lot,
+        "lot_size":           lot_size,
         "reasoning": (
             f"BUY {row['strike']:.0f} {side.upper()}{expiry_note} @ ₹{premium:.1f} LTP. "
             f"Stop-loss ₹{sl:.1f} ({int(SINGLE_LEG_SL_PCT*100)}% premium erosion), "
             f"target ₹{target:.1f} ({int(SINGLE_LEG_TARGET_PCT*100)}% gain). "
+            f"Max modeled loss = {max_loss_points:.1f} premium points "
+            f"= ₹{max_loss_per_lot:.2f}/lot. "
             f"These SL/target percentages are standard retail option-buying "
-            f"heuristics, not derived from live greeks — adjust to your own "
-            f"risk tolerance."
+            f"heuristics, not derived from live greeks."
         ),
     }
 
-
-def _straddle_or_strangle(df: pd.DataFrame, spot: float, kind: str, expiry: str = "") -> Optional[Dict]:
+def _straddle_or_strangle(
+    df: pd.DataFrame,
+    spot: float,
+    kind: str,
+    expiry: str = "",
+    lot_size: int = 1,
+) -> Optional[Dict]:
     if kind == "straddle":
         ce_row = _nearest_row(df, spot)
         pe_row = ce_row
-    else:  # strangle
+    else:
         ce_row = _nearest_row(df, spot * (1 + STRANGLE_OTM_PCT))
         pe_row = _nearest_row(df, spot * (1 - STRANGLE_OTM_PCT))
+
     if ce_row is None or pe_row is None:
         return None
+
     ce_prem = safe_float(ce_row.get("ce_ltp", 0))
     pe_prem = safe_float(pe_row.get("pe_ltp", 0))
+
     if ce_prem <= 0 or pe_prem <= 0:
         return None
-    net_debit = round(ce_prem + pe_prem, 1)
-    upper_be  = round(float(ce_row["strike"]) + net_debit, 1)
-    lower_be  = round(float(pe_row["strike"]) - net_debit, 1)
+
+    net_debit_points = round(ce_prem + pe_prem, 1)
+    net_debit_per_lot = round(net_debit_points * lot_size, 2)
+
+    upper_be = round(
+        float(ce_row["strike"]) + net_debit_points, 1
+    )
+    lower_be = round(
+        float(pe_row["strike"]) - net_debit_points, 1
+    )
+
     expiry_note = f" ({expiry} expiry)" if expiry else ""
+
     return {
-        "name":            "Long Straddle" if kind == "straddle" else "Long Strangle",
-        "legs":            [_leg(ce_row, "ce", "BUY", expiry), _leg(pe_row, "pe", "BUY", expiry)],
-        "net_debit":       net_debit,
-        "max_loss":        net_debit,
-        "breakeven_upper": upper_be,
-        "breakeven_lower": lower_be,
+        "name":               "Long Straddle" if kind == "straddle" else "Long Strangle",
+        "legs":               [
+            _leg(ce_row, "ce", "BUY", expiry),
+            _leg(pe_row, "pe", "BUY", expiry),
+        ],
+        "net_debit":          net_debit_points,
+        "net_debit_points":   net_debit_points,
+        "net_debit_per_lot":  net_debit_per_lot,
+        "max_loss":           net_debit_points,
+        "max_loss_points":    net_debit_points,
+        "max_loss_per_lot":   net_debit_per_lot,
+        "lot_size":           lot_size,
+        "breakeven_upper":    upper_be,
+        "breakeven_lower":    lower_be,
         "reasoning": (
-            f"BUY {ce_row['strike']:.0f} CE @ ₹{ce_prem:.1f} + BUY {pe_row['strike']:.0f} PE @ ₹{pe_prem:.1f}{expiry_note} "
-            f"= net debit ₹{net_debit:.1f}/lot (this is also the max loss, if spot pins "
-            f"between the breakevens at expiry). Profitable above ₹{upper_be:.1f} or "
-            f"below ₹{lower_be:.1f} — needs a move bigger than the combined premium to "
-            f"turn a profit either direction."
+            f"BUY {ce_row['strike']:.0f} CE @ ₹{ce_prem:.1f} + "
+            f"BUY {pe_row['strike']:.0f} PE @ ₹{pe_prem:.1f}{expiry_note} "
+            f"= net debit {net_debit_points:.1f} points = "
+            f"₹{net_debit_per_lot:.2f}/lot. "
+            f"This is also the maximum premium loss at expiry. "
+            f"Breakevens are {lower_be:.1f} and {upper_be:.1f} index points."
         ),
     }
 
+def _iron_condor(
+    df: pd.DataFrame,
+    spot: float,
+    expiry: str = "",
+    lot_size: int = 1,
+) -> Optional[Dict]:
+    short_ce = _nearest_row(
+        df, spot * (1 + CONDOR_SHORT_OTM_PCT)
+    )
+    long_ce = _nearest_row(
+        df, spot * (1 + CONDOR_WING_OTM_PCT)
+    )
+    short_pe = _nearest_row(
+        df, spot * (1 - CONDOR_SHORT_OTM_PCT)
+    )
+    long_pe = _nearest_row(
+        df, spot * (1 - CONDOR_WING_OTM_PCT)
+    )
 
-def _iron_condor(df: pd.DataFrame, spot: float, expiry: str = "") -> Optional[Dict]:
-    short_ce = _nearest_row(df, spot * (1 + CONDOR_SHORT_OTM_PCT))
-    long_ce  = _nearest_row(df, spot * (1 + CONDOR_WING_OTM_PCT))
-    short_pe = _nearest_row(df, spot * (1 - CONDOR_SHORT_OTM_PCT))
-    long_pe  = _nearest_row(df, spot * (1 - CONDOR_WING_OTM_PCT))
     if any(r is None for r in (short_ce, long_ce, short_pe, long_pe)):
         return None
 
-    # If the chain snapshot doesn't span far enough OTM, the "nearest strike"
-    # lookup can collapse short and long onto the same row — that's a 0-width
-    # wing, not a real condor (max_loss/net_credit would be meaningless).
-    if float(short_ce["strike"]) == float(long_ce["strike"]) or \
-       float(short_pe["strike"]) == float(long_pe["strike"]):
+    # A collapsed wing is not a valid condor.
+    if (
+        float(short_ce["strike"]) == float(long_ce["strike"])
+        or float(short_pe["strike"]) == float(long_pe["strike"])
+    ):
         return None
 
     sc = safe_float(short_ce.get("ce_ltp", 0))
     lc = safe_float(long_ce.get("ce_ltp", 0))
     sp = safe_float(short_pe.get("pe_ltp", 0))
     lp = safe_float(long_pe.get("pe_ltp", 0))
+
     if sc <= 0 or sp <= 0:
         return None
 
-    net_credit = round((sc - lc) + (sp - lp), 1)
-    ce_wing = abs(float(long_ce["strike"]) - float(short_ce["strike"]))
-    pe_wing = abs(float(short_pe["strike"]) - float(long_pe["strike"]))
-    max_loss = round(max(ce_wing, pe_wing) - net_credit, 1)
+    # STRATEGY_LOT_VALUE_FIX_20260925
+    # Premium calculations are in option-price points. Only the monetary
+    # totals are multiplied by the exact contract lot size.
+    net_credit_points = round(
+        (sc - lc) + (sp - lp), 1
+    )
+
+    ce_wing = abs(
+        float(long_ce["strike"]) - float(short_ce["strike"])
+    )
+    pe_wing = abs(
+        float(short_pe["strike"]) - float(long_pe["strike"])
+    )
+
+    max_loss_points = round(
+        max(ce_wing, pe_wing) - net_credit_points,
+        1,
+    )
+
+    net_credit_per_lot = round(
+        net_credit_points * lot_size,
+        2,
+    )
+    max_loss_per_lot = round(
+        max_loss_points * lot_size,
+        2,
+    )
+
+    breakeven_upper = round(
+        float(short_ce["strike"]) + net_credit_points,
+        1,
+    )
+    breakeven_lower = round(
+        float(short_pe["strike"]) - net_credit_points,
+        1,
+    )
+
     expiry_note = f" ({expiry} expiry)" if expiry else ""
 
     return {
         "name": "Iron Condor",
         "legs": [
-            _leg(short_ce, "ce", "SELL", expiry), _leg(long_ce, "ce", "BUY", expiry),
-            _leg(short_pe, "pe", "SELL", expiry), _leg(long_pe, "pe", "BUY", expiry),
+            _leg(short_ce, "ce", "SELL", expiry),
+            _leg(long_ce, "ce", "BUY", expiry),
+            _leg(short_pe, "pe", "SELL", expiry),
+            _leg(long_pe, "pe", "BUY", expiry),
         ],
-        "net_credit":      net_credit,
-        "max_profit":      net_credit,
-        "max_loss":        max_loss,
-        "breakeven_upper": round(float(short_ce["strike"]) + net_credit, 1),
-        "breakeven_lower": round(float(short_pe["strike"]) - net_credit, 1),
+
+        # Premium-point values
+        "lot_size":           lot_size,
+        "net_credit":         net_credit_points,
+        "net_credit_points":  net_credit_points,
+        "max_profit":         net_credit_points,
+        "max_profit_points":  net_credit_points,
+        "max_loss":           max_loss_points,
+        "max_loss_points":    max_loss_points,
+
+        # Actual ₹ amount for one complete contract lot
+        "net_credit_per_lot":  net_credit_per_lot,
+        "max_profit_per_lot":  net_credit_per_lot,
+        "max_loss_per_lot":    max_loss_per_lot,
+
+        # Underlying index levels — DO NOT multiply by lot size
+        "breakeven_upper":     breakeven_upper,
+        "breakeven_lower":     breakeven_lower,
+
         "reasoning": (
-            f"SELL {short_ce['strike']:.0f} CE @ ₹{sc:.1f} / BUY {long_ce['strike']:.0f} CE @ ₹{lc:.1f} "
-            f"(call wing) + SELL {short_pe['strike']:.0f} PE @ ₹{sp:.1f} / BUY {long_pe['strike']:.0f} PE @ ₹{lp:.1f} "
-            f"(put wing){expiry_note} = net credit ₹{net_credit:.1f}/lot. Max profit ₹{net_credit:.1f} if spot stays "
-            f"between the short strikes at expiry; max loss ₹{max_loss:.1f} if spot breaks past a wing. "
-            f"Needs margin for the short legs — check with your broker before sizing."
+            f"SELL {short_ce['strike']:.0f} CE @ ₹{sc:.1f} / "
+            f"BUY {long_ce['strike']:.0f} CE @ ₹{lc:.1f} "
+            f"(call wing) + SELL {short_pe['strike']:.0f} PE @ ₹{sp:.1f} / "
+            f"BUY {long_pe['strike']:.0f} PE @ ₹{lp:.1f} "
+            f"(put wing){expiry_note} = net credit "
+            f"{net_credit_points:.1f} points = ₹{net_credit_per_lot:.2f}/lot. "
+            f"Max profit ₹{net_credit_per_lot:.2f}/lot if spot stays "
+            f"between the short strikes at expiry; max loss "
+            f"{max_loss_points:.1f} points = ₹{max_loss_per_lot:.2f}/lot "
+            f"if spot breaks past a wing."
         ),
     }
-
 
 def generate_price_levels(market_data: Dict) -> Optional[Dict]:
     """
@@ -222,55 +335,130 @@ def generate_price_levels(market_data: Dict) -> Optional[Dict]:
     }
 
 
-def generate_option_strategy(market_data: Dict, opt_df: pd.DataFrame) -> Optional[Dict]:
+def generate_option_strategy(
+    market_data: Dict,
+    opt_df: pd.DataFrame,
+) -> Optional[Dict]:
     """
-    Fills in the decision engine's chosen strategy name
-    (market_data["decision"]["strategy"]) with concrete strikes/premiums
-    from this request's live option chain (opt_df).
+    Fill the decision engine's chosen strategy with concrete strikes and
+    premiums from the already-fetched live option chain.
 
-    Returns None when there's no chain data, no clear strategy pick
-    ("No Clear Edge — Sideways"), or the strikes needed are illiquid/missing
-    (e.g. 0 LTP far-OTM legs) — callers should treat None as "no
-    actionable strategy this cycle", not an error.
+    Monetary totals explicitly distinguish:
+      - premium/index-option points
+      - ₹ per contract lot
+
+    Suggestion only; no order placement.
     """
     if opt_df is None or opt_df.empty:
         return None
 
     decision_block = market_data.get("decision", {})
-    strategy_name   = decision_block.get("strategy", "")
+    strategy_name = decision_block.get("strategy", "")
+
     spot = market_data.get("spot", {}).get("price", 0)
     if spot <= 0:
         return None
 
-    # Live from this request's already-fetched option chain — same source
-    # every strike/premium in opt_df came from. Never hardcoded: whichever
-    # expiry the chain was fetched for (nearest by default, or whatever the
-    # caller explicitly requested) is what gets attached to every leg below.
-    expiry = market_data.get("option_chain", {}).get("expiry", "")
+    option_chain = market_data.get("option_chain") or {}
+
+    # STRATEGY_LOT_VALUE_FIX_20260925
+    # Prefer exact lotsize carried from Angel instrument master.
+    # contract_specs supplies current fallback for providers that don't expose it.
+    lot_size = resolve_lot_size(
+        str(
+            option_chain.get("symbol")
+            or market_data.get("symbol")
+            or "NIFTY"
+        ).upper(),
+        option_chain,
+    )
+
+    if lot_size <= 0:
+        return None
+
+    expiry = option_chain.get("expiry", "")
 
     if strategy_name == "Directional Call Bias":
-        return _single_leg(opt_df, spot, "ce", expiry)
+        return _single_leg(
+            opt_df, spot, "ce", expiry, lot_size
+        )
 
     if strategy_name == "Directional Put Bias":
-        return _single_leg(opt_df, spot, "pe", expiry)
+        return _single_leg(
+            opt_df, spot, "pe", expiry, lot_size
+        )
 
     if strategy_name.startswith("Weak-Trend"):
-        side = "ce" if " CE " in f" {strategy_name} " else "pe"
-        result = _single_leg(opt_df, spot, side, expiry)
+        side = (
+            "ce"
+            if " CE " in f" {strategy_name} "
+            else "pe"
+        )
+        result = _single_leg(
+            opt_df, spot, side, expiry, lot_size
+        )
         if result:
-            result["note"] = "Trend is weak (ADX < 20) — smaller size reduces exposure to a range-bound whipsaw."
+            result["note"] = (
+                "Trend is weak (ADX < 20) — smaller size reduces "
+                "exposure to a range-bound whipsaw."
+            )
         return result
 
     if strategy_name == "Long Straddle / Strangle":
-        # Strangle is cheaper (further OTM) — prefer it, fall back to
-        # straddle if the OTM strikes aren't quoting.
         return (
-            _straddle_or_strangle(opt_df, spot, "strangle", expiry)
-            or _straddle_or_strangle(opt_df, spot, "straddle", expiry)
+            _straddle_or_strangle(
+                opt_df, spot, "strangle", expiry, lot_size
+            )
+            or _straddle_or_strangle(
+                opt_df, spot, "straddle", expiry, lot_size
+            )
         )
 
     if strategy_name.startswith("Range Strategy"):
-        return _iron_condor(opt_df, spot, expiry)
+        return _iron_condor(
+            opt_df, spot, expiry, lot_size
+        )
 
-    # "No Clear Edge — Sideways" and anything unrecognised → no concrete pick.
+    # NEUTRAL_RANGE_IC_FALLBACK_20260925
+    # A genuine RANGE/LOW_VOLATILITY market can still have the
+    # neutral textual strategy "No Clear Edge — Sideways".
+    if strategy_name == "No Clear Edge — Sideways":
+        regime = str(
+            decision_block.get("market_regime", "")
+        ).upper()
+        preferred_side = str(
+            decision_block.get("preferred_side", "NONE")
+        ).upper()
+        margin = abs(
+            safe_float(decision_block.get("margin", 0))
+        )
+        market_open = bool(
+            market_data.get("spot", {}).get(
+                "market_open", True
+            )
+        )
+        no_trade = bool(
+            decision_block.get(
+                "market_regime_no_trade", False
+            )
+        )
+
+        if (
+            market_open
+            and not no_trade
+            and regime in ("RANGE", "LOW_VOLATILITY")
+            and preferred_side == "NONE"
+            and margin < 8
+        ):
+            result = _iron_condor(
+                opt_df, spot, expiry, lot_size
+            )
+            if result:
+                result["note"] = (
+                    "Neutral RANGE/LOW_VOLATILITY setup — "
+                    "four-leg Iron Condor built from the live option chain."
+                )
+            return result
+
     return None
+

@@ -70,7 +70,7 @@ services:
       - key: HISTORY_COLLECTOR_INTERVAL_MINUTES
         value: "5"
       - key: HISTORY_COLLECTOR_SYMBOLS
-        value: "NIFTY,BANKNIFTY,FINNIFTY"
+        value: "NIFTY,BANKNIFTY,FINNIFTY,SENSEX"
     # NOTE: Render's free web service disk is EPHEMERAL — anything written to
     # ./data or ./logs is wiped on every redeploy/restart. Uncomment the disk
     # block below (requires a paid plan) if you need the SQLite DB to persist,
