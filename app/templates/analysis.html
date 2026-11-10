@@ -1077,7 +1077,11 @@ function renderStrikes(d){
     if(uiBlocked){
       $('#strikes-grid,#strategy-box,#price-levels-card,#strategy-detail-card,#exp-move-box').hide();
       $('#strikes-wait').show();
-      var blockedReasons = (d.market_regime && d.market_regime.reasons) || [];
+      var blockedReasons = Array.isArray(d.market_regime_reasons_ta) ? d.market_regime_reasons_ta : [];
+      if(!blockedReasons.length && d.market_regime && Array.isArray(d.market_regime.reasons_ta))
+        blockedReasons = d.market_regime.reasons_ta;
+      if(!blockedReasons.length && d.market_regime && Array.isArray(d.market_regime.reasons))
+        blockedReasons = d.market_regime.reasons;
       if(!blockedReasons.length && Array.isArray(d.market_regime_reasons))
         blockedReasons = d.market_regime_reasons;
       if(!blockedReasons.length && Array.isArray(d.wait_reasons))
@@ -1771,12 +1775,12 @@ function renderTamilIndicators(items, data){
 
     if(placeholderTechnical && placeholderIds[id]){
       value = 'N/A';
-      explanation = 'Indicator unavailable: this snapshot uses placeholder technicals and has 0% data completeness. No current reading is verified.';
+      explanation = 'இந்த Snapshot-ல் Placeholder Technical Data மட்டுமே உள்ளது; Data Completeness 0%. சரிபார்க்கப்பட்ட தற்போதைய Indicator மதிப்பு இல்லை.';
     }
 
     if(id === 'oi_change' && oiUnavailable){
       value = 'N/A';
-      explanation = 'Open Interest change unavailable: same-session OI tracking is not available for this snapshot. Zero must not be interpreted as neutral OI flow.';
+      explanation = 'இந்த Snapshot-க்கு ஒரே வர்த்தக நாளுக்கான OI Tracking கிடைக்கவில்லை. 0 மதிப்பை Neutral OI Flow என எடுத்துக்கொள்ளக்கூடாது.';
     }
 
     return '<div class="tamil-row '+esc(it.direction||'neutral')+'">'+

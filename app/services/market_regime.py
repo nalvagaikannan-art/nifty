@@ -20,6 +20,7 @@ Output:
     no_trade_reason: str
 """
 
+import re
 from typing import Dict, List, Tuple
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
@@ -69,6 +70,89 @@ def _time_session() -> str:
     if now <= close_:
         return "CLOSING"
     return "POST_MARKET"
+
+
+def _market_reason_ta(reason):
+    text = str(reason or "").strip()
+    text = text.replace("⚠️", "").strip()
+
+    if text in ("Market is closed", "Market closed"):
+        return "சந்தை தற்போது மூடப்பட்டுள்ளது."
+
+    if text.startswith("Opening 30 min"):
+        return "சந்தை தொடங்கிய முதல் 30 நிமிடங்களில் தவறான Signal வர வாய்ப்பு உள்ளது. விலை வரம்பு தெளிவாகும் வரை காத்திருக்கவும்."
+
+    if text.startswith("Closing 30 min"):
+        return "சந்தை முடிவதற்கு முன் உள்ள கடைசி 30 நிமிடங்கள். புதிய Signal செயல்படுவதற்கான நேரம் குறைவாக இருப்பதால் புதிய Entry-ஐத் தவிர்க்கவும்."
+
+    m = re.fullmatch(r"Session: (.+) — market may be closed", text)
+    if m:
+        return f"Session: {m.group(1)} — சந்தை மூடப்பட்டிருக்கக்கூடும்."
+
+    m = re.fullmatch(r"VIX ([0-9.]+) > 30 — extreme fear, unpredictable moves", text)
+    if m:
+        return f"VIX {m.group(1)} — 30-ஐ விட அதிகம். Volatility மிக அதிகமாக உள்ளது; விலை நகர்வுகளைக் கணிப்பது கடினமாக இருக்கலாம்."
+
+    m = re.fullmatch(r"Expiry in ([0-9]+) day\(s\) — high gamma, pin risk", text)
+    if m:
+        return f"Expiry-க்கு {m.group(1)} நாட்கள் உள்ளன. Gamma தாக்கமும் குறிப்பிட்ட Strike அருகே விலை நிலைத்திருக்கும் அபாயமும் அதிகம்."
+
+    m = re.fullmatch(r"Gap up \+([0-9.]+)% — breakout possible", text)
+    if m:
+        return f"முந்தைய Close-ஐ விட {m.group(1)}% உயர்வில் சந்தை தொடங்கியுள்ளது. Breakout ஏற்படுவதற்கான வாய்ப்பு உள்ளது."
+
+    m = re.fullmatch(r"Gap down (-?[0-9.]+)% — breakdown possible", text)
+    if m:
+        return f"முந்தைய Close-ஐ விட {m.group(1)}% குறைவில் சந்தை தொடங்கியுள்ளது. Breakdown ஏற்படுவதற்கான வாய்ப்பு உள்ளது."
+
+    m = re.fullmatch(r"VIX ([0-9.]+) > 25 — high volatility regime", text)
+    if m:
+        return f"VIX {m.group(1)} — 25-ஐ விட அதிகம். சந்தையில் Volatility அதிகமாக உள்ளது; Risk-ஐ கவனத்தில் கொள்ள வேண்டும்."
+
+    m = re.fullmatch(r"Gap up \+([0-9.]+)% with ADX ([0-9.]+) — breakout", text)
+    if m:
+        return f"{m.group(1)}% Gap Up மற்றும் ADX {m.group(2)} ஆகியவை மேல்நோக்கிய Breakout சாத்தியத்தைக் காட்டுகின்றன."
+
+    m = re.fullmatch(r"Gap down (-?[0-9.]+)% with ADX ([0-9.]+) — breakdown", text)
+    if m:
+        return f"{m.group(1)}% Gap Down மற்றும் ADX {m.group(2)} ஆகியவை கீழ்நோக்கிய Breakdown சாத்தியத்தைக் காட்டுகின்றன."
+
+    m = re.fullmatch(r"ADX ([0-9.]+), \+DI ([0-9.]+) > -DI ([0-9.]+) — strong uptrend", text)
+    if m:
+        return f"ADX {m.group(1)}; +DI ({m.group(2)}), -DI ({m.group(3)})-ஐ விட அதிகம். மேல்நோக்கிய Trend வலுவாக உள்ளது."
+
+    m = re.fullmatch(r"EMA20 ([0-9.]+) > EMA50 ([0-9.]+) — trend confirmed", text)
+    if m:
+        return f"EMA20 ({m.group(1)}), EMA50 ({m.group(2)})-ஐ விட அதிகம். மேல்நோக்கிய Trend உறுதிப்படுகிறது."
+
+    m = re.fullmatch(r"ADX ([0-9.]+), -DI ([0-9.]+) > \+DI ([0-9.]+) — strong downtrend", text)
+    if m:
+        return f"ADX {m.group(1)}; -DI ({m.group(2)}), +DI ({m.group(3)})-ஐ விட அதிகம். கீழ்நோக்கிய Trend வலுவாக உள்ளது."
+
+    m = re.fullmatch(r"EMA20 ([0-9.]+) < EMA50 ([0-9.]+) — downtrend confirmed", text)
+    if m:
+        return f"EMA20 ({m.group(1)}), EMA50 ({m.group(2)})-ஐ விடக் குறைவு. கீழ்நோக்கிய Trend உறுதிப்படுகிறது."
+
+    m = re.fullmatch(r"ADX ([0-9.]+) < 18 — range bound, no trend", text)
+    if m:
+        return f"ADX {m.group(1)} — 18-க்கு கீழே உள்ளது. சந்தை ஒரு குறிப்பிட்ட வரம்பிற்குள் நகர்கிறது; தெளிவான Trend இல்லை."
+
+    m = re.fullmatch(r"Expiry in ([0-9]+) day\(s\) — gamma risk dominant", text)
+    if m:
+        return f"Expiry-க்கு {m.group(1)} நாட்கள் உள்ளன. Gamma Risk முக்கியமான தாக்கத்தை ஏற்படுத்தக்கூடும்."
+
+    m = re.fullmatch(r"VIX ([0-9.]+) low \+ ATR ([0-9.]+)% — compressed, breakout possible", text)
+    if m:
+        return f"VIX {m.group(1)} குறைவாகவும் ATR {m.group(2)}% ஆகவும் உள்ளது. விலை நகர்வு சுருங்கியுள்ளது; Breakout ஏற்பட வாய்ப்பு உள்ளது."
+
+    m = re.fullmatch(r"ADX ([0-9.]+) — no clear trend, treat as range", text)
+    if m:
+        return f"ADX {m.group(1)} — தெளிவான Trend இல்லை. சந்தையை Range-bound நிலையாகக் கருத வேண்டும்."
+
+    if text.startswith("Confluence quality LOW"):
+        return "Confluence தரம் குறைவாக உள்ளது. Risk அளவைக் குறைக்கவும் அல்லது தெளிவான உறுதிப்பாடு வரும் வரை காத்திருக்கவும்."
+
+    return "சந்தை நிலை தொடர்பான கூடுதல் தமிழ் விளக்கம் தற்போது கிடைக்கவில்லை."
 
 
 def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
@@ -124,6 +208,8 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
             "option_selling_allowed": False,
             "preferred_strategy":    "WAIT",
             "reasons":               ["Market is closed"],
+            "reasons_ta":            ["????? ??????? ???????????????."],
+            "no_trade_reason_ta":   "????? ???????????????.",
             "no_trade":              True,
             "no_trade_reason":       "Market closed",
             "session":               session,
@@ -274,8 +360,10 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
         "option_selling_allowed": option_selling_allowed,
         "preferred_strategy":     preferred_strategy,
         "reasons":                reasons,
+        "reasons_ta":             [_market_reason_ta(r) for r in reasons],
         "no_trade":               no_trade or regime in no_trade_regimes,
         "no_trade_reason":        no_trade_reason,
+        "no_trade_reason_ta":     _market_reason_ta(no_trade_reason) if no_trade_reason else "",
         "session":                session,
         "days_to_expiry":         days_to_exp,
         "atr_pct":                round(atr_pct, 2),

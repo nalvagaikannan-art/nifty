@@ -14,3 +14,13 @@ def test_ai_engine_requires_api_key(monkeypatch):
     engine = AIEngine()
 
     assert engine.order == []
+
+
+def test_prompt_requires_tamil_script_not_tanglish():
+    engine = AIEngine()
+    prompt = engine._build_prompt(
+        {"symbol": "NIFTY", "spot": {"price": 24000}},
+        {"preferred_side": "NONE"},
+    )
+    assert "using Tamil script" in prompt
+    assert "Do NOT write Tanglish" in prompt

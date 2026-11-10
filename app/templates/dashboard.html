@@ -2194,9 +2194,13 @@ function ltRenderSignal(d){
           ? 'சந்தை மூடப்பட்டுள்ளது — புதிய Entry இல்லை'
           : 'காத்திருக்கவும் — Entry confirmation தேவை';
       }
-      var sr = (d.market_regime && d.market_regime.reasons) ? d.market_regime.reasons : [];
+      var sr = Array.isArray(d.market_regime_reasons_ta) ? d.market_regime_reasons_ta : [];
+      if(!sr.length && d.market_regime && Array.isArray(d.market_regime.reasons_ta))
+        sr = d.market_regime.reasons_ta;
+      if(!sr.length && d.market_regime && Array.isArray(d.market_regime.reasons))
+        sr = d.market_regime.reasons;
       var waitR = d.wait_reasons || [];
-      var lines = waitR.concat(sr).slice(0,4);
+      var lines = sr.concat(waitR).slice(0,4);
       if(!lines.length) lines = ['Direction confirmation-க்கு காத்திருக்கவும்'];
       trigs.innerHTML = lines.map(function(r){
         return '<div class="lt-trigger-row">→ <span>' + ltEsc(r) + '</span></div>';

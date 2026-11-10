@@ -36,6 +36,208 @@ def _item(id_, icon, title, value, direction, explanation):
     }
 
 
+
+def _tamil_indicator_explanation(item, md):
+    ident = str(item.get("id", ""))
+    direction = item.get("direction", "neutral")
+    display = str(item.get("value_display", "N/A"))
+
+    spot_data = md.get("spot", {}) or {}
+    spot = _tamil_display_number(spot_data.get("price"))
+    tech = md.get("technicals", {}) or {}
+    oi = md.get("oi_summary", {}) or {}
+    macd = md.get("macd", {}) or {}
+
+    if ident == "pcr":
+        pcr = _tamil_display_number(md.get("pcr"))
+        if pcr <= 0:
+            return "PCR தரவு தற்போது கிடைக்கவில்லை. Option Chain தகவல் இல்லாததால் திசையை உறுதிப்படுத்த முடியாது."
+        if direction == "bull":
+            return f"PCR {pcr:.2f}. Put side OI, Call side OI-ஐ விட அதிகமாக உள்ளது. இது மேல்நோக்கிய சந்தைச் சாய்வைக் காட்டுகிறது."
+        if direction == "bear":
+            return f"PCR {pcr:.2f}. Call side OI, Put side OI-ஐ விட அதிகமாக உள்ளது. இது கீழ்நோக்கிய சந்தைச் சாய்வைக் காட்டுகிறது."
+        return f"PCR {pcr:.2f}. Put மற்றும் Call பக்கங்களின் OI நிலை சமநிலையில் உள்ளது. தெளிவான திசைச் சாய்வு இல்லை."
+
+    if ident == "oi_change":
+        if display == "N/A":
+            return "OI Change தரவு கிடைக்கவில்லை. ஒரே வர்த்தக நாளுக்கான Reference Data முழுமையாக இல்லை. 0 மதிப்பை Neutral OI Flow என்பதற்கான ஆதாரமாகக் கருதக்கூடாது."
+        if direction == "bull":
+            return f"இன்றைய Put side மற்றும் Call side Open Interest மாற்றம்: {display}. Put side-ல் அதிகரிப்பு அதிகமாக உள்ளது. இது Support பகுதியில் வாங்கும் தரப்பின் நிலைப்பாட்டைக் காட்டுகிறது."
+        if direction == "bear":
+            return f"இன்றைய Put side மற்றும் Call side Open Interest மாற்றம்: {display}. Call side-ல் அதிகரிப்பு அதிகமாக உள்ளது. இது Resistance பகுதியில் விற்பனைத் தரப்பின் நிலைப்பாட்டைக் காட்டுகிறது."
+        return f"CE/PE Open Interest மாற்றம்: {display}. இரு பக்கங்களிலும் தெளிவான ஆதிக்கம் இல்லை."
+
+    if ident == "max_pain":
+        pain = _tamil_display_number(md.get("max_pain"))
+        if pain <= 0:
+            return "Max Pain தரவு தற்போது கிடைக்கவில்லை."
+        if spot > pain:
+            return f"தற்போதைய Spot ({spot:,.0f}), Max Pain ({pain:,.0f})-ஐ விட அதிகமாக உள்ளது. Expiry நெருங்கும்போது Max Pain பக்கம் நகரும் வாய்ப்பைக் கவனிக்க வேண்டும்."
+        if spot < pain:
+            return f"தற்போதைய Spot ({spot:,.0f}), Max Pain ({pain:,.0f})-ஐ விடக் குறைவாக உள்ளது. Expiry நெருங்கும்போது Max Pain பக்கம் மேல்நோக்கி நகரும் வாய்ப்பு இருக்கலாம்."
+        return f"தற்போதைய Spot ({spot:,.0f}), Max Pain ({pain:,.0f}) அருகில் உள்ளது."
+
+    if ident == "call_writing":
+        strike = _tamil_display_number(oi.get("ce_max_oi_strike"))
+        if strike <= 0:
+            return "Call Writing தரவு தற்போது கிடைக்கவில்லை."
+        if direction == "bear":
+            return f"{strike:,.0f} strike-ல் அதிகமான Call OI உள்ளது. இது Spot விலைக்கு அருகில் இருப்பதால் Resistance ஆகச் செயல்படலாம்."
+        if direction == "bull":
+            return f"அதிகமான Call OI உள்ள {strike:,.0f} strike, Spot-இலிருந்து தொலைவில் உள்ளது. அருகிலுள்ள Resistance அழுத்தம் குறைவாக இருக்கலாம்."
+        return f"{strike:,.0f} strike-இல் உள்ள Call Writing அமைப்பு தெளிவான திசைச் சிக்னலை வழங்கவில்லை."
+
+    if ident == "put_writing":
+        strike = _tamil_display_number(oi.get("pe_max_oi_strike"))
+        if strike <= 0:
+            return "Put Writing தரவு தற்போது கிடைக்கவில்லை."
+        if direction == "bull":
+            return f"{strike:,.0f} strike-ல் அதிகமான Put OI உள்ளது. இது Spot விலைக்கு அருகில் இருப்பதால் Support ஆகச் செயல்படலாம்."
+        if direction == "bear":
+            return f"அதிகமான Put OI உள்ள {strike:,.0f} strike, Spot-இலிருந்து தொலைவில் உள்ளது. அருகிலுள்ள Support பலவீனமாக இருக்கலாம்."
+        return f"{strike:,.0f} strike-இல் உள்ள Put Writing அமைப்பு தெளிவான திசைச் சிக்னலை வழங்கவில்லை."
+
+    if ident == "futures_premium":
+        if md.get("futures_premium_status") != "live":
+            return "Futures Premium தரவு தற்போது கிடைக்கவில்லை. 0 மதிப்பு நடுநிலையைக் குறிக்காது."
+        premium = _tamil_display_number(md.get("futures_premium"))
+        if premium > 0:
+            return f"Futures Premium +{premium:.0f}. Futures விலை Spot விலையை விட அதிகமாக உள்ளது. இது Long Buildup இருக்கக்கூடிய சூழலைக் காட்டுகிறது."
+        if premium < 0:
+            return f"Futures Discount {premium:.0f}. Futures விலை Spot விலையை விடக் குறைவாக உள்ளது. இது Short Buildup இருக்கக்கூடிய சூழலைக் காட்டுகிறது."
+        return "Futures மற்றும் Spot விலைகளுக்கு இடையே குறிப்பிடத்தக்க வித்தியாசம் இல்லை."
+
+    if ident == "vwap":
+        vwap = _tamil_display_number(tech.get("vwap"))
+        if vwap <= 0:
+            return "VWAP தரவு தற்போது கிடைக்கவில்லை."
+        if direction == "bull":
+            return f"Spot ({spot:,.0f}), VWAP ({vwap:,.0f})-க்கு மேலே வர்த்தகமாகிறது. Buyers தரப்பின் அழுத்தம் அதிகமாக இருக்கலாம்."
+        if direction == "bear":
+            return f"Spot ({spot:,.0f}), VWAP ({vwap:,.0f})-க்கு கீழே வர்த்தகமாகிறது. Sellers தரப்பின் அழுத்தம் அதிகமாக இருக்கலாம்."
+        return f"Spot, VWAP ({vwap:,.0f}) அருகில் உள்ளது. வாங்குதல் மற்றும் விற்பனை அழுத்தம் சமநிலையில் இருக்கலாம்."
+
+    if ident in ("ema20", "ema50"):
+        key = ident
+        ema = _tamil_display_number(tech.get(key))
+        if ema <= 0:
+            return f"{key.upper()} தரவு தற்போது கிடைக்கவில்லை."
+        period = "குறுகியகால" if ident == "ema20" else "நடுத்தரகால"
+        if direction == "bull":
+            return f"Spot ({spot:,.0f}), {key.upper()} ({ema:,.0f})-க்கு மேலே உள்ளது. {period} Trend மேல்நோக்கி உள்ளது."
+        if direction == "bear":
+            return f"Spot ({spot:,.0f}), {key.upper()} ({ema:,.0f})-க்கு கீழே உள்ளது. {period} Trend கீழ்நோக்கி உள்ளது."
+        return f"Spot, {key.upper()} ({ema:,.0f}) அருகில் உள்ளது. தெளிவான விலை விலகல் இல்லை."
+
+    if ident == "rsi":
+        rsi = _tamil_display_number(md.get("rsi", 50))
+        if rsi >= 70:
+            return f"RSI {rsi:.1f} — Overbought பகுதியில் உள்ளது. விலை வேகமாக உயர்ந்திருக்கலாம்; சிறிய சரிவு ஏற்படும் வாய்ப்பைக் கவனிக்க வேண்டும்."
+        if rsi >= 60:
+            return f"RSI {rsi:.1f} — மேல்நோக்கிய Momentum வலுவாக உள்ளது."
+        if rsi <= 30:
+            return f"RSI {rsi:.1f} — Oversold பகுதியில் உள்ளது. விலை வேகமாகக் குறைந்திருக்கலாம்; மீட்பு ஏற்படும் வாய்ப்பு உள்ளது."
+        if rsi <= 40:
+            return f"RSI {rsi:.1f} — கீழ்நோக்கிய Momentum காணப்படுகிறது."
+        return f"RSI {rsi:.1f} — நடுநிலைப் பகுதியில் உள்ளது. தெளிவான Momentum இல்லை."
+
+    if ident == "macd":
+        m = _tamil_display_number(macd.get("macd"))
+        signal = _tamil_display_number(macd.get("signal"))
+        hist = _tamil_display_number(macd.get("histogram"))
+        if m > signal and hist > 0:
+            return f"MACD ({m:.1f}), Signal line ({signal:.1f})-க்கு மேலே உள்ளது; Histogram நேர்மறையாக உள்ளது. மேல்நோக்கிய Momentum வலுப்பெறுகிறது."
+        if m < signal and hist < 0:
+            return f"MACD ({m:.1f}), Signal line ({signal:.1f})-க்கு கீழே உள்ளது; Histogram எதிர்மறையாக உள்ளது. கீழ்நோக்கிய Momentum வலுப்பெறுகிறது."
+        return f"MACD ({m:.1f})-ல் தெளிவான Crossover உறுதியாகவில்லை."
+
+    if ident == "adx":
+        adx = _tamil_display_number(tech.get("adx"))
+        plus = _tamil_display_number(tech.get("di_plus"))
+        minus = _tamil_display_number(tech.get("di_minus"))
+        if adx <= 0:
+            return "ADX தரவு தற்போது கிடைக்கவில்லை."
+        if adx < 20:
+            return f"ADX {adx:.1f} — 20-க்கு கீழே உள்ளது. சந்தை ஒரு குறிப்பிட்ட விலை வரம்பிற்குள் நகர்கிறது; தெளிவான Trend இல்லை."
+        if plus > minus:
+            return f"ADX {adx:.1f}; +DI ({plus:.1f}), -DI ({minus:.1f})-ஐ விட அதிகம். மேல்நோக்கிய Trend வலுவாக உள்ளது."
+        return f"ADX {adx:.1f}; -DI ({minus:.1f}), +DI ({plus:.1f})-ஐ விட அதிகம். கீழ்நோக்கிய Trend வலுவாக உள்ளது."
+
+    if ident == "atr":
+        atr = _tamil_display_number(tech.get("atr"))
+        if atr <= 0 or spot <= 0:
+            return "ATR தரவு தற்போது கிடைக்கவில்லை."
+        pct = atr / spot * 100
+        level = "அதிகமாக" if pct > 1.5 else "குறைவாக"
+        return f"ATR {atr:.0f} ({pct:.1f}%) — Volatility {level} உள்ளது. ATR விலை நகர்வின் Range/Risk அளவைக் காட்டுகிறது; சந்தையின் திசையைக் காட்டாது."
+
+    if ident == "supertrend":
+        if direction == "bull":
+            return "Supertrend Indicator BUY signal காட்டுகிறது. தற்போதைய Trend மேல்நோக்கி உள்ளது."
+        if direction == "bear":
+            return "Supertrend Indicator SELL signal காட்டுகிறது. தற்போதைய Trend கீழ்நோக்கி உள்ளது."
+        return "Supertrend Indicator தெளிவான BUY அல்லது SELL signal வழங்கவில்லை."
+
+    if ident == "volume":
+        ratio = _tamil_display_number(tech.get("volume_ratio", 1.0), 1.0)
+        if tech.get("volume_spike") and ratio > 1.5:
+            return f"Trading Volume சராசரியை விட {ratio:.1f} மடங்கு அதிகமாக உள்ளது. சந்தைப் பங்கேற்பு அதிகரித்துள்ளது. Volume மட்டும் திசையை உறுதிப்படுத்தாது."
+        return f"Volume ratio {ratio:.1f}x — வழக்கமான வர்த்தகச் செயல்பாடு. குறிப்பிடத்தக்க Volume Spike இல்லை."
+
+    if ident == "vix":
+        vix = _tamil_display_number(md.get("vix", 15))
+        if vix <= 0:
+            return "India VIX தரவு தற்போது கிடைக்கவில்லை. 0-ஐ குறைந்த Volatility எனக் கருதக்கூடாது."
+        if vix > 22:
+            return f"India VIX {vix:.1f} — Volatility அதிகமாக உள்ளது. விலை எந்தத் திசையிலும் வேகமாக மாறலாம்; Risk-ஐ கவனிக்க வேண்டும்."
+        if vix < 12:
+            return f"India VIX {vix:.1f} — Volatility குறைவாக உள்ளது. இது Bullish என்பதைக் குறிக்காது; சந்தை அமைதியாக இருப்பதையே குறிக்கிறது."
+        return f"India VIX {vix:.1f} — இயல்பான அல்லது மிதமான Volatility வரம்பில் உள்ளது. VIX சந்தையின் திசையைக் காட்டாது."
+
+    if ident == "global_market":
+        pct = _tamil_display_number(md.get("global_change_pct"))
+        if md.get("global_status") != "live":
+            return "Global Market தகவல் தற்போது கிடைக்கவில்லை. 0% என்பது சந்தை மாற்றமின்றி இருப்பதைக் குறிக்காது."
+        if pct > 0.5:
+            return f"Global markets (US/Asia) {pct:+.2f}% உயர்வில் உள்ளன. சர்வதேச சந்தைகளின் ஆதரவு உள்ளூர் சந்தைக்கும் சாதகமாக இருக்கலாம்."
+        if pct < -0.5:
+            return f"Global markets {pct:+.2f}% சரிவில் உள்ளன. சர்வதேச சந்தைகளின் பலவீனம் உள்ளூர் சந்தையிலும் அழுத்தத்தை ஏற்படுத்தலாம்."
+        return f"Global markets {pct:+.2f}% — பெரிய மாற்றம் இல்லை. சர்வதேச சந்தை நிலை நடுநிலையாக உள்ளது."
+
+    if ident == "gift_nifty":
+        pct = _tamil_display_number(md.get("gift_nifty_change_pct"))
+        if md.get("gift_status") != "live":
+            return "Gift Nifty தரவு தற்போது கிடைக்கவில்லை. 0% என்பதை மாற்றமில்லாத Opening எனக் கருதக்கூடாது."
+        if pct > 0.3:
+            return f"Gift Nifty {pct:+.2f}% உயர்வில் வர்த்தகமாகிறது. NIFTY உயர்வுடன் தொடங்குவதற்கான சாத்தியம் உள்ளது."
+        if pct < -0.3:
+            return f"Gift Nifty {pct:+.2f}% சரிவில் வர்த்தகமாகிறது. NIFTY சரிவுடன் தொடங்குவதற்கான சாத்தியம் உள்ளது."
+        return f"Gift Nifty {pct:+.2f}% — பெரிய மாற்றம் இல்லை. NIFTY தொடக்கத்தில் பெரிய இடைவெளி இல்லாமல் இருக்கலாம்."
+
+    if ident in ("fii", "dii"):
+        is_fii = ident == "fii"
+        label = "FII" if is_fii else "DII"
+        status = md.get("fii_status" if is_fii else "dii_status")
+        amount = _tamil_display_number(md.get("fii_net_cr" if is_fii else "dii_net_cr"))
+        investor = "வெளிநாட்டு முதலீட்டாளர்கள்" if is_fii else "உள்நாட்டு நிறுவன முதலீட்டாளர்கள்"
+        if status != "live":
+            return f"{label} தரவு தற்போது கிடைக்கவில்லை. ₹0 Cr என்பதை உண்மையான Net Zero முதலீடாகக் கருதக்கூடாது."
+        if amount > 500:
+            return f"{label} ({investor}) ₹{amount:,.0f} Cr Net Buying செய்துள்ளனர். முதலீட்டு வரவு அதிகமாக உள்ளது."
+        if amount < -500:
+            return f"{label} ({investor}) ₹{abs(amount):,.0f} Cr Net Selling செய்துள்ளனர். முதலீட்டு வெளியேற்றம் அதிகமாக உள்ளது."
+        return f"{label} Net Flow ₹{amount:,.0f} Cr — பெரிய அளவிலான முதலீட்டு நகர்வு இல்லை."
+
+    return "இந்த Indicator-க்கான தமிழ் விளக்கம் தற்போது கிடைக்கவில்லை."
+
+
+def _tamil_display_number(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def build_tamil_indicators(market_data: Dict, decision: Dict) -> List[Dict]:
     spot_data  = market_data.get("spot", {})
     spot       = spot_data.get("price", 0)
@@ -356,4 +558,6 @@ def build_tamil_indicators(market_data: Dict, decision: Dict) -> List[Dict]:
         d, ex = "neutral", f"DII net flow ₹{dii_cr:,.0f} Cr (live) — பெரிய activity இல்ல."
     out.append(_item("dii", "🏛️", "டிஐஐ (DII Net Flow)", f"₹{dii_cr:,.0f} Cr" if dii_status == "live" else "N/A", d, ex))
 
+    for item in out:
+        item["explanation_ta"] = _tamil_indicator_explanation(item, market_data)
     return out

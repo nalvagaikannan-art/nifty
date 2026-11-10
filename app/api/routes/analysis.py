@@ -642,6 +642,8 @@ async def build_ai_analysis(
     result["market_regime"]          = dec.get("market_regime", "unknown")
     result["market_regime_confidence"] = dec.get("market_regime_confidence", "LOW")
     result["market_regime_reasons"]  = dec.get("market_regime_reasons", [])
+    result["market_regime_reasons_ta"] = dec.get("market_regime_reasons_ta", [])
+    result["market_regime_no_trade_reason_ta"] = dec.get("market_regime_no_trade_reason_ta", "")
     result["volatility_label"]       = dec.get("volatility_label", "")
     result["oi_change_tracked"]      = market_data.get("oi_change_tracked", {"available": False})
     result["support_resistance"]     = market_data.get("support_resistance", {})

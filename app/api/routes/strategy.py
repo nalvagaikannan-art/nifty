@@ -1744,6 +1744,12 @@ async def strike_recommendation(
               "market_regime_reasons": dec.get(
                   "market_regime_reasons", []
               ),
+              "market_regime_reasons_ta": dec.get(
+                  "market_regime_reasons_ta", []
+              ),
+              "market_regime_no_trade_reason_ta": dec.get(
+                  "market_regime_no_trade_reason_ta", ""
+              ),
               "market_regime_no_trade_reason": dec.get(
                   "market_regime_no_trade_reason", ""
               ),
@@ -2217,6 +2223,12 @@ async def strike_recommendation(
         ),
         "market_regime_reasons": dec.get(
             "market_regime_reasons", []
+        ),
+        "market_regime_reasons_ta": dec.get(
+            "market_regime_reasons_ta", []
+        ),
+        "market_regime_no_trade_reason_ta": dec.get(
+            "market_regime_no_trade_reason_ta", ""
         ),
         "market_regime_no_trade_reason": dec.get(
             "market_regime_no_trade_reason", ""

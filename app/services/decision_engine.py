@@ -2177,6 +2177,8 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "market_regime_confidence": regime_info.get("confidence", "LOW"),
         "session_context":       session_context,
         "market_regime_reasons": regime_info.get("reasons", []),
+        "market_regime_reasons_ta": regime_info.get("reasons_ta", []),
+        "market_regime_no_trade_reason_ta": regime_info.get("no_trade_reason_ta", ""),
         "market_regime_no_trade": regime_info.get("no_trade", False),
         "market_regime_no_trade_reason": regime_info.get("no_trade_reason", ""),
         "margin":                margin,

@@ -177,6 +177,7 @@ class AIAnalysisRouteResponse(BaseModel):
     market_regime: str
     market_regime_confidence: str
     market_regime_reasons: List[str]
+    market_regime_reasons_ta: List[str] = []
     market_snapshot_timestamp: Optional[str] = None
     market_trend: str
     max_pain: float
@@ -259,7 +260,9 @@ class StrategyRecommendationResponse(BaseModel):
     market_regime_confidence: str
     market_regime_no_trade: bool
     market_regime_no_trade_reason: str
+    market_regime_no_trade_reason_ta: str = ""
     market_regime_reasons: List[str]
+    market_regime_reasons_ta: List[str] = []
     market_snapshot_timestamp: Optional[str] = None
     market_state: str
     max_pain: float
