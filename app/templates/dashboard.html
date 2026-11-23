@@ -1107,6 +1107,19 @@
       </div>
     </div>
 
+    <!-- ── F&O STOCK MARKET MOVERS ── -->
+    <div class="lt-all-signals" style="margin-top:12px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <div class="lt-all-signals-title">NSE F&O STOCK MOVERS</div>
+        <button type="button" class="lt-sym-btn" onclick="ltRefreshFnoStockScan(true)">↻ Scan stocks</button>
+      </div>
+      <div class="lt-all-signals-note">Live cash-market price movement from Angel One batch quotes. This is a market-mover list only — not a CE/PE recommendation. News, fundamentals, relative-volume validation and option-entry checks are not included yet.</div>
+      <div id="lt-fno-stock-scan-status" class="lt-all-signals-note">Waiting for stock scan...</div>
+      <div class="lt-all-signals-grid" id="lt-fno-stock-movers">
+        <div class="lt-all-signal-card wait"><div class="lt-all-signal-symbol">F&O STOCKS</div><div class="lt-all-signal-action">LOADING...</div><div class="lt-all-signal-meta">Awaiting verified quote batch</div></div>
+      </div>
+    </div>
+
     <!-- DESKTOP GRID START -->
     <div class="lt-desktop-grid">
 
@@ -1536,8 +1549,40 @@ function ltRenderAllSignalBoard(results){
   }).join('');
 }
 
+function ltRefreshFnoStockScan(forceRefresh){
+  var root = document.getElementById('lt-fno-stock-movers');
+  var status = document.getElementById('lt-fno-stock-scan-status');
+  if(!root || root.dataset.loading === '1') return Promise.resolve();
+  root.dataset.loading = '1';
+  if(status) status.textContent = 'Scanning broker-verified NSE F&O cash quotes...';
+  return fetch('/api/market/fno-stock-scan', {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP '+r.status); return r.json(); })
+    .then(function(data){
+      var rows = Array.isArray(data.rows) ? data.rows.filter(function(x){return x && x.available && Number.isFinite(Number(x.change_percent));}) : [];
+      var gainers = rows.slice().sort(function(a,b){return Number(b.change_percent)-Number(a.change_percent);}).slice(0,5);
+      var losers = rows.slice().sort(function(a,b){return Number(a.change_percent)-Number(b.change_percent);}).slice(0,5);
+      function card(row, side){
+        var pct = Number(row.change_percent);
+        var sign = pct > 0 ? '+' : '';
+        return '<div class="lt-all-signal-card wait"><div class="lt-all-signal-symbol">'+ltEsc(row.symbol)+'</div><div class="lt-all-signal-action">'+sign+pct.toFixed(2)+'%</div><div class="lt-all-signal-meta">LTP ₹'+Number(row.ltp).toLocaleString('en-IN',{maximumFractionDigits:2})+' · '+(side === 'up' ? 'Top gainer' : 'Top decliner')+'</div></div>';
+      }
+      var html = '<div style="grid-column:1/-1;font-size:11px;font-weight:700;color:var(--lt-text3);">TOP GAINERS</div>';
+      html += gainers.length ? gainers.map(function(r){return card(r,'up');}).join('') : '<div class="lt-all-signals-note">No valid gainers quote</div>';
+      html += '<div style="grid-column:1/-1;font-size:11px;font-weight:700;color:var(--lt-text3);margin-top:8px;">TOP DECLINERS</div>';
+      html += losers.length ? losers.map(function(r){return card(r,'down');}).join('') : '<div class="lt-all-signals-note">No valid decliners quote</div>';
+      root.innerHTML = html;
+      if(status) status.textContent = 'Quoted '+Number(data.quoted_count||0)+' / '+Number(data.universe_count||0)+' F&O stocks · Missing '+Number(data.missing_count||0)+' · Observed '+ltEsc(data.observed_at||'time unavailable')+(data.cache_hit ? ' · cached snapshot' : '');
+    })
+    .catch(function(err){
+      root.innerHTML = '<div class="lt-all-signals-note">Stock scan unavailable: '+ltEsc(err.message||err)+'</div>';
+      if(status) status.textContent = 'No stock scan data — no estimates shown.';
+    })
+    .finally(function(){ root.dataset.loading = '0'; });
+}
+
 function ltRefreshAllSignals(forceRefresh, refreshToken){
   var seq = ++ltAllSignalSeq;
+  ltRefreshFnoStockScan(false);
   if(typeof refreshToken === 'undefined'){
     refreshToken = forceRefresh ? String(Date.now()) : '';
   }
