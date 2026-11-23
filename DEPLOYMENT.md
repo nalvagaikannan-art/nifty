@@ -42,7 +42,17 @@ QA CI வெற்றி மட்டும் live market-data validation அ�
 | Web Service | `nifty-pro-analyzer` | `nifty-pro-qa` |
 | PostgreSQL | `nifty-pro-db` | தனி NIFTY-PRO DB |
 
-Blueprint-ல் தற்போது Free plans குறிப்பிடப்பட்டுள்ளன. அவை production market-data collector மற்றும் தொடர்ச்சியான paper-history சேமிப்புக்கு ஏற்றவை என்று கருதக்கூடாது. Free service sleep, database expiry, retention, backup, uptime மற்றும் persistent storage தேவைகள் தீர்மானிக்கப்பட வேண்டும்.
+Blueprint-ல் தற்போது Free plans குறிப்பிடப்பட்டுள்ளன. அவை QA/preview-க்கு மட்டுமே; production market-data collector அல்லது தொடர்ச்சியான paper-history சேமிப்புக்கு ஏற்றவை அல்ல.
+
+Render அதிகாரப்பூர்வ Free-tier ஆவணப்படி:
+- Free Web Service 15 நிமிட inbound traffic இல்லையெனில் spin down ஆகும்; மீண்டும் எழுவதற்கு சுமார் ஒரு நிமிடம் ஆகலாம்.
+- Free Web Service filesystem ephemeral; restart/redeploy/spin-down-இல் உள்ளூர் கோப்புகள் இழக்கப்படும்.
+- Free PostgreSQL 1 GB வரம்பு, உருவாக்கிய 30 நாட்களில் expiry, மேலும் backup வசதி இல்லை.
+- Free PostgreSQL expiry-க்கு பின் 14 நாள் upgrade grace period; அதன் பின் database/data நீக்கப்படும்.
+
+ஆதாரம்: https://render.com/docs/free
+
+எனவே இந்த Free resources-ஐ நீண்டகால QA paper-ledger ஆதாரமாகவோ production database ஆகவோ பயன்படுத்தக்கூடாது. Persistent QA/production validation-க்கு ஏற்ற plan மற்றும் backup முறையைத் தேர்வு செய்ய வேண்டும்.
 
 **செலவு அனுமதி இல்லாமல் paid plan தேர்வு செய்யவோ, Free plan-ஐ production-க்கு ஏற்றது எனக் கருதவோ கூடாது.** Render plan/pricing/limits-ஐ deployment நாளில் அதிகாரப்பூர்வ ஆவணத்தில் மீண்டும் சரிபார்க்க வேண்டும்.
 
