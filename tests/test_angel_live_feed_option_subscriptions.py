@@ -125,3 +125,28 @@ def test_option_subscription_successfully_replaces_old_tokens(monkeypatch):
         assert old_token not in feed._option_token_meta
         assert old_token not in feed._option_ticks
         assert new_token in feed._option_token_meta
+
+def test_option_subscription_uses_nfo_for_nse_indices_and_bfo_for_sensex(
+    monkeypatch,
+):
+    ws = FakeWebSocket()
+    feed = make_feed(monkeypatch, ws)
+
+    asyncio.run(feed._refresh_option_subscriptions())
+
+    exchange_by_symbol = {
+        "NIFTY": feed.OPTION_EXCHANGE_TYPE,
+        "BANKNIFTY": feed.OPTION_EXCHANGE_TYPE,
+        "FINNIFTY": feed.OPTION_EXCHANGE_TYPE,
+        "SENSEX": feed.BFO_OPTION_EXCHANGE_TYPE,
+    }
+    observed = {}
+    for operation, args in ws.calls:
+        if operation != "subscribe":
+            continue
+        token_group = args[2][0]
+        token = token_group["tokens"][0]
+        symbol = token.removeprefix("new-")
+        observed[symbol] = token_group["exchangeType"]
+
+    assert observed == exchange_by_symbol
