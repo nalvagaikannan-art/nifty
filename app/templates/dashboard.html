@@ -1542,7 +1542,14 @@ function ltRefreshAllSignals(forceRefresh, refreshToken){
     refreshToken = forceRefresh ? String(Date.now()) : '';
   }
 
-  var requests = LT_SIGNAL_SYMBOLS.map(function(sym){
+  // Keep the four index comparison signals, and add only the currently
+  // selected F&O stock. Never fan out requests across the full stock universe.
+  var signalSymbols = LT_SIGNAL_SYMBOLS.slice();
+  if(ltSym && signalSymbols.indexOf(ltSym) === -1){
+    signalSymbols.push(ltSym);
+  }
+
+  var requests = signalSymbols.map(function(sym){
     var url = '/api/strategy/recommend/' + sym;
 
     if(refreshToken){
