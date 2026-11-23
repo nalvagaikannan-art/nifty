@@ -9,7 +9,8 @@ BUG FIX (2026-08-16):
   code-ல் மட்டும் "3.x" versions-ஆக தவறா type ஆயிருந்தது.
   Fix: gemini-2.5-flash → gemini-2.5-flash-lite → gemini-2.0-flash
 """
-import os, json, re, logging
+import os, json, re, logging, time
+from datetime import datetime
 from typing import Dict
 import google.generativeai as genai
 from openai import AsyncOpenAI
@@ -17,6 +18,8 @@ from pydantic import ValidationError
 from app.config import settings
 from app.exceptions import AIProviderError
 from app.schemas import AIAnalysisResponse
+from app.database import AsyncSessionLocal
+from app.models import AIProviderEvent
 
 logger = logging.getLogger(__name__)
 
@@ -86,62 +89,105 @@ class AIEngine:
             "note": "Readiness only; a successful live provider response is recorded separately when an analysis request invokes AI.",
         }
 
+    @staticmethod
+    def _error_category(exc: Exception) -> str:
+        """Return a low-cardinality category; never persist exception text."""
+        name = type(exc).__name__.lower()
+        message = str(exc).lower()
+        if "timeout" in name or "timeout" in message:
+            return "timeout"
+        if any(token in message for token in ("429", "rate limit", "resource exhausted")):
+            return "rate_limited"
+        if any(token in message for token in ("401", "403", "unauthorized", "api key", "permission")):
+            return "authentication"
+        if isinstance(exc, (json.JSONDecodeError, ValidationError)):
+            return "invalid_response"
+        if isinstance(exc, AIProviderError):
+            return "provider_error"
+        return "provider_error"
+
+    async def _record_provider_event(
+        self, provider: str, outcome: str, latency_ms: float,
+        error_category: str = None, attempt_number: int = 1,
+    ) -> None:
+        """Best-effort durable telemetry. A telemetry outage never blocks analysis."""
+        try:
+            async with AsyncSessionLocal() as session:
+                session.add(AIProviderEvent(
+                    timestamp=datetime.utcnow(),
+                    provider=str(provider)[:24],
+                    outcome=outcome,
+                    latency_ms=max(0.0, float(latency_ms)),
+                    error_category=error_category,
+                    attempt_number=max(1, int(attempt_number)),
+                ))
+                await session.commit()
+                # Bound storage to the latest 2,000 events / 30 days.
+                from sqlalchemy import delete, select
+                cutoff = datetime.utcnow().replace(microsecond=0)
+                cutoff = cutoff.fromtimestamp(cutoff.timestamp() - 30 * 86400)
+                await session.execute(
+                    delete(AIProviderEvent).where(AIProviderEvent.timestamp < cutoff)
+                )
+                stale_ids = (
+                    select(AIProviderEvent.id)
+                    .order_by(AIProviderEvent.timestamp.desc(), AIProviderEvent.id.desc())
+                    .offset(2000)
+                )
+                await session.execute(
+                    delete(AIProviderEvent).where(AIProviderEvent.id.in_(stale_ids))
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.warning("AI provider telemetry persistence failed (%s)", type(exc).__name__)
+
     async def analyze_market(self, market_data: Dict) -> Dict:
         if not self.order:
             raise AIProviderError("No AI provider API key configured")
         decision = market_data.get("decision", {})
-        prompt   = self._build_prompt(market_data, decision)
+        prompt = self._build_prompt(market_data, decision)
 
         errors = {}
-        for provider in self.order:
+        for attempt_number, provider in enumerate(self.order, start=1):
+            started = time.perf_counter()
             try:
-                text   = await self._call(provider, prompt)
+                text = await self._call(provider, prompt)
                 parsed = self._parse(text)
                 ai_agrees = parsed.get("market_bias", "") == decision.get("market_bias", "").upper()
-                parsed["rule_market_bias"]    = decision.get("market_bias")
-                parsed["bull_score"]          = decision.get("bull_score", 0)
-                parsed["bear_score"]          = decision.get("bear_score", 0)
-                parsed["margin"]               = decision.get(
+                parsed["rule_market_bias"] = decision.get("market_bias")
+                parsed["bull_score"] = decision.get("bull_score", 0)
+                parsed["bear_score"] = decision.get("bear_score", 0)
+                parsed["margin"] = decision.get(
                     "margin",
                     (decision.get("bull_score", 0) or 0)
                     - (decision.get("bear_score", 0) or 0),
                 )
-                parsed["rule_confidence"]     = decision.get("confidence", 0)
-                parsed["ai_agrees"]           = ai_agrees
-                parsed["_provider"]           = provider
-                # AI is a validator/explainer, not a confidence calculator.
-                # Never manufacture +5/-8 confidence from model agreement.
-                parsed["confidence"]          = decision.get("confidence", 0)
-                parsed["market_bias"]         = decision.get("market_bias", parsed.get("market_bias", "Sideways"))
+                parsed["rule_confidence"] = decision.get("confidence", 0)
+                parsed["ai_agrees"] = ai_agrees
+                parsed["_provider"] = provider
+                parsed["confidence"] = decision.get("confidence", 0)
+                parsed["market_bias"] = decision.get("market_bias", parsed.get("market_bias", "Sideways"))
                 parsed["bullish_probability"] = decision.get("bullish_probability", 50)
                 parsed["bearish_probability"] = decision.get("bearish_probability", 50)
-                parsed["preferred_side"]      = decision.get("preferred_side", "NONE")
-                parsed["forecast"]            = decision.get("forecast", "Neutral")
-                parsed["risk"]                = decision.get("risk", parsed.get("risk", "Medium"))
-                parsed["disclaimer"]          = "Informational analysis only — not investment advice."
+                parsed["preferred_side"] = decision.get("preferred_side", "NONE")
+                parsed["forecast"] = decision.get("forecast", "Neutral")
+                parsed["risk"] = decision.get("risk", parsed.get("risk", "Medium"))
+                parsed["disclaimer"] = "Informational analysis only — not investment advice."
 
-                # timeframe_trend: previously the AI was asked to invent a
-                # 5min/15min/1hr reading from daily-close data alone (it had
-                # no real intraday candles to look at). Now that real
-                # intraday OHLC is fetched (see MarketAnalyzer._safe_multi_timeframe),
-                # always prefer that ground truth over whatever the AI
-                # guessed — same pattern as overriding market_bias/confidence
-                # with the rule engine's numbers above. Frames neither broker
-                # could fetch are marked "unavailable", not silently
-                # backfilled with the AI's guess.
                 multi_tf = market_data.get("multi_timeframe", {})
                 if multi_tf:
                     parsed["timeframe_trend"] = {
                         label: multi_tf.get(label, {}).get("trend", "unavailable")
                         for label in ("5min", "15min", "1hr")
                     }
-                _real_tf_sources = ("angel_one_intraday", "zerodha_intraday")
-                _tf_source = next(
-                    (multi_tf.get(l, {}).get("data_source") for l in ("5min", "15min", "1hr")
-                     if multi_tf.get(l, {}).get("data_source") in _real_tf_sources),
+                real_tf_sources = ("angel_one_intraday", "zerodha_intraday")
+                tf_source = next(
+                    (multi_tf.get(label, {}).get("data_source")
+                     for label in ("5min", "15min", "1hr")
+                     if multi_tf.get(label, {}).get("data_source") in real_tf_sources),
                     None,
                 )
-                parsed["timeframe_data_source"] = _tf_source or "unavailable"
+                parsed["timeframe_data_source"] = tf_source or "unavailable"
 
                 try:
                     AIAnalysisResponse(
@@ -158,15 +204,30 @@ class AIEngine:
                         confidence=parsed["confidence"],
                     )
                 except ValidationError as ve:
-                    logger.warning(f"Schema validation warning: {ve}")
+                    logger.warning("AI response schema validation warning (%s)", type(ve).__name__)
 
-                logger.info(f"AI provider {provider} succeeded")
+                latency_ms = (time.perf_counter() - started) * 1000
+                await self._record_provider_event(
+                    provider, "success", latency_ms, attempt_number=attempt_number
+                )
+                logger.info("AI provider %s succeeded", provider)
                 return parsed
-            except Exception as e:
-                logger.warning(f"AI provider {provider} failed: {e}")
-                errors[provider] = str(e)
+            except Exception as exc:
+                latency_ms = (time.perf_counter() - started) * 1000
+                category = self._error_category(exc)
+                await self._record_provider_event(
+                    provider, "failure", latency_ms,
+                    error_category=category, attempt_number=attempt_number,
+                )
+                logger.warning(
+                    "AI provider %s failed (category=%s, exception=%s)",
+                    provider, category, type(exc).__name__,
+                )
+                errors[provider] = category
 
-        raise AIProviderError(f"All AI providers failed: {errors}")
+        raise AIProviderError(
+            "All configured AI providers failed; see sanitized provider telemetry"
+        )
 
     async def _call(self, provider: str, prompt: str) -> str:
         if provider == "gemini":
