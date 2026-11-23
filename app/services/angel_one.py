@@ -837,14 +837,60 @@ class AngelOneSession:
     # under that so a whole trading session reuses one download.
     _INSTRUMENT_MASTER_TTL = 24 * 3600  # hard upper bound; actual refresh is calendar-day based
 
-    # Persistent cache contains ONLY the filtered NFO rows actually needed by
-    # this application (~3k rows), not the 30-40MB raw Angel master.
-    # This prevents every service restart from re-downloading the full master.
+    # Persistent cache contains only index derivatives plus the current
+    # NSE F&O stock universe (OPTSTK/FUTSTK) and their NSE cash EQ rows.
+    # The schema version invalidates older index-only caches automatically.
+    _INSTRUMENT_CACHE_SCHEMA_VERSION = 2
     _INSTRUMENT_CACHE_FILE = (
         Path(__file__).resolve().parents[2]
         / "data"
         / "angel_instrument_master_filtered.json"
     )
+
+    @classmethod
+    def _filter_instrument_master_rows(cls, rows: List[Dict]) -> List[Dict]:
+        """
+        Keep the four supported index derivative families and the live NSE
+        F&O stock universe. Stock EQ rows are retained only when the same
+        underlying has an OPTSTK/FUTSTK contract, avoiding the full cash
+        equity master and preventing arbitrary non-F&O stocks being treated
+        as supported derivatives.
+        """
+        index_names = set(cls.NFO_SYMBOL_MAP.values())
+        index_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and row.get("name") in index_names
+            and row.get("exch_seg") == cls.DERIVATIVE_EXCHANGE_MAP.get(
+                row.get("name"), "NFO"
+            )
+            and row.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+            and row.get("expiry")
+            and row.get("token")
+        ]
+
+        stock_derivative_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "NFO"
+            and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
+            and row.get("name")
+            and row.get("expiry")
+            and row.get("token")
+        ]
+        stock_names = {str(row["name"]).strip().upper()
+                       for row in stock_derivative_rows}
+
+        stock_cash_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "NSE"
+            and str(row.get("instrumenttype") or "").strip() in ("", "EQ")
+            and str(row.get("symbol") or "").upper().endswith("-EQ")
+            and str(row.get("name") or "").strip().upper() in stock_names
+            and row.get("token")
+        ]
+        return index_rows + stock_derivative_rows + stock_cash_rows
 
     async def _ensure_instruments(self) -> None:
         """
@@ -852,13 +898,12 @@ class AngelOneSession:
 
         Cache layers:
           1. in-memory cache for normal requests;
-          2. same-day persistent disk cache across service restarts;
-          3. Angel One download only when the daily disk cache is missing,
-             stale, corrupt, or invalid.
+          2. same-day versioned persistent cache across service restarts;
+          3. Angel One download only when the daily cache is missing,
+             stale, corrupt, or from an older index-only schema.
 
-        The persistent cache stores only NIFTY/BANKNIFTY/FINNIFTY NFO
-        options/futures rows, so it remains small and avoids retaining the
-        full 150k+ raw instrument master in memory.
+        The filtered cache retains index derivatives, NSE F&O stock
+        derivatives, and only the matching NSE cash EQ rows.
         """
         now = time.time()
         today = now_ist().date()
@@ -941,27 +986,15 @@ class AngelOneSession:
             if not isinstance(loaded, list) or not loaded:
                 raise AngelOneError("Instrument master download returned no rows")
 
-            # Keep only the instruments this application actually resolves.
-            _wanted_names = set(self.NFO_SYMBOL_MAP.values())
-            _wanted_exchanges = set(self.DERIVATIVE_EXCHANGE_MAP.values())
-
-            def _filter(rows):
-                return [
-                    r for r in rows
-                    if isinstance(r, dict)
-                    and r.get("exch_seg") in _wanted_exchanges
-                    and r.get("name") in _wanted_names
-                    and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
-                    and r.get("expiry")
-                ]
-
-            # Offload the 150k-row filter from the event loop.
-            loaded = await asyncio.to_thread(_filter, loaded)
+            # Filter the raw 150k+ row master off the event loop.
+            loaded = await asyncio.to_thread(
+                self._filter_instrument_master_rows, loaded
+            )
 
             if not loaded:
                 raise AngelOneError(
-                    "Instrument master download returned no matching "
-                    "NIFTY/BANKNIFTY/FINNIFTY rows after filtering"
+                    "Instrument master download returned no supported "
+                    "index or NSE F&O stock rows after filtering"
                 )
 
             self._instruments = loaded
@@ -985,9 +1018,8 @@ class AngelOneSession:
                 )
 
             logger.info(
-                "Angel One instrument master cached — %d rows "
-                "(filtered to NIFTY/BANKNIFTY/FINNIFTY), "
-                "cache_day=%s",
+                "Angel One instrument master cached — %d filtered "
+                "index/F&O-stock rows, cache_day=%s",
                 len(loaded),
                 today,
             )
@@ -1005,43 +1037,63 @@ class AngelOneSession:
             return None
 
         cached_day = payload.get("cache_day")
+        schema_version = payload.get("schema_version")
         rows = payload.get("rows")
 
-        if cached_day != today.isoformat():
+        if (
+            cached_day != today.isoformat()
+            or schema_version != AngelOneSession._INSTRUMENT_CACHE_SCHEMA_VERSION
+        ):
             return None
 
         if not isinstance(rows, list) or not rows:
             return None
 
-        # Validate the shape enough to avoid treating arbitrary/stale JSON
-        # as a valid instrument master.
         valid_rows = [
-            r for r in rows
+            row for row in rows
             if (
-                isinstance(r, dict)
-                and r.get("exch_seg") in ("NFO", "BFO")
-                and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
-                and r.get("expiry")
-                and r.get("name")
-                and r.get("token")
+                isinstance(row, dict)
+                and row.get("token")
+                and row.get("name")
+                and (
+                    (
+                        row.get("exch_seg") in ("NFO", "BFO")
+                        and row.get("instrumenttype") in (
+                            "OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK"
+                        )
+                        and row.get("expiry")
+                    )
+                    or (
+                        row.get("exch_seg") == "NSE"
+                        and str(row.get("symbol") or "").upper().endswith("-EQ")
+                    )
+                )
             )
         ]
 
-
-        # Reject an older same-day cache that contains only NFO rows.
-        # The current instrument schema must include real SENSEX BFO
-        # derivatives so SENSEX can resolve without NSE/NFO substitution.
+        # Never accept an index-only or incomplete cache as the new schema.
         has_sensex_bfo = any(
-            isinstance(r, dict)
-            and r.get("name") == "SENSEX"
-            and r.get("exch_seg") == "BFO"
-            and r.get("instrumenttype") in ("OPTIDX", "FUTIDX")
-            and r.get("expiry")
-            and r.get("token")
-            for r in valid_rows
+            row.get("name") == "SENSEX"
+            and row.get("exch_seg") == "BFO"
+            and row.get("instrumenttype") in ("OPTIDX", "FUTIDX")
+            and row.get("expiry")
+            for row in valid_rows
         )
+        stock_names = {
+            str(row.get("name") or "").strip().upper()
+            for row in valid_rows
+            if row.get("exch_seg") == "NFO"
+            and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
+            and row.get("expiry")
+        }
+        cash_names = {
+            str(row.get("name") or "").strip().upper()
+            for row in valid_rows
+            if row.get("exch_seg") == "NSE"
+            and str(row.get("symbol") or "").upper().endswith("-EQ")
+        }
 
-        if not has_sensex_bfo:
+        if not has_sensex_bfo or not stock_names.intersection(cash_names):
             return None
         return valid_rows or None
 
@@ -1056,6 +1108,7 @@ class AngelOneSession:
 
         payload = {
             "cache_day": today.isoformat(),
+            "schema_version": AngelOneSession._INSTRUMENT_CACHE_SCHEMA_VERSION,
             "rows": rows,
         }
 
