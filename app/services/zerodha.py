@@ -73,6 +73,8 @@ class KiteSession:
         self._last_call_ts: float = 0.0
         self._instruments: Optional[List[Dict]] = None
         self._instruments_ts: float = 0.0
+        self._nse_instruments: Optional[List[Dict]] = None
+        self._nse_instruments_ts: float = 0.0
         self._instruments_lock = asyncio.Lock()
 
     @property
@@ -161,9 +163,10 @@ class KiteSession:
     async def get_ltp(self, symbol: str) -> Dict:
         """Live spot quote via Kite's quote() endpoint (fuller than ltp() —
         includes ohlc block, which get_spot needs for high/low/open/prev_close)."""
-        token = self.INDEX_TOKENS.get(symbol.upper())
+        normalized = str(symbol or "").strip().upper()
+        token = self.INDEX_TOKENS.get(normalized)
         if not token:
-            raise ZerodhaError(f"Unknown symbol: {symbol}")
+            token = await self._resolve_nse_equity_token(normalized)
         kite = self._client()
         await self._throttle()
         key = f"NSE:{self.INDEX_TRADINGSYMBOL.get(symbol.upper(), symbol.upper())}"
@@ -178,7 +181,7 @@ class KiteSession:
         last_price = safe_float(row.get("last_price"))
         prev_close = safe_float(ohlc.get("close"))
         return {
-            "symbol": symbol.upper(),
+            "symbol": normalized,
             "price": last_price,
             "open": safe_float(ohlc.get("open")),
             "high": safe_float(ohlc.get("high")),
@@ -214,9 +217,10 @@ class KiteSession:
         data_fetcher.py's Zerodha wrappers translate between the two so the
         rest of the app doesn't need to know either provider's exact
         vocabulary)."""
-        token = self.INDEX_TOKENS.get(symbol.upper())
+        normalized = str(symbol or "").strip().upper()
+        token = self.INDEX_TOKENS.get(normalized)
         if not token:
-            raise ZerodhaError(f"Unknown symbol: {symbol}")
+            token = await self._resolve_nse_equity_token(normalized)
         kite = self._client()
 
         if not to_date:
@@ -243,6 +247,41 @@ class KiteSession:
             }
             for r in (rows or [])
         ]
+
+    async def _resolve_nse_equity_token(self, symbol: str) -> int:
+        """Resolve an exact NSE cash EQ instrument; never guess tokens."""
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or not normalized.replace("&", "").replace("-", "").isalnum():
+            raise ZerodhaError(f"Invalid NSE equity symbol: {symbol}")
+
+        if not self._nse_instruments or (time.time() - self._nse_instruments_ts) >= 86400:
+            async with self._instruments_lock:
+                if not self._nse_instruments or (time.time() - self._nse_instruments_ts) >= 86400:
+                    kite = self._client()
+                    await self._throttle()
+                    try:
+                        rows = await asyncio.to_thread(kite.instruments, "NSE")
+                    except Exception as e:
+                        raise ZerodhaError(f"NSE instrument list fetch failed: {e}")
+                    if not isinstance(rows, list) or not rows:
+                        raise ZerodhaError("Unexpected NSE instrument list response")
+                    self._nse_instruments = rows
+                    self._nse_instruments_ts = time.time()
+
+        matches = [
+            row for row in (self._nse_instruments or [])
+            if isinstance(row, dict)
+            and str(row.get("exchange", "")).upper() == "NSE"
+            and str(row.get("segment", "")).upper() == "NSE"
+            and str(row.get("instrument_type", "")).upper() == "EQ"
+            and str(row.get("tradingsymbol", "")).upper() == normalized
+            and int(safe_float(row.get("instrument_token", 0))) > 0
+        ]
+        if len(matches) != 1:
+            raise ZerodhaError(
+                f"Expected one NSE EQ instrument for {normalized}; found {len(matches)}"
+            )
+        return int(matches[0]["instrument_token"])
 
     # ── Instrument master (needed for option-chain strike → token lookup,
     # same reason Angel One needs one — Kite has no single "option chain"
