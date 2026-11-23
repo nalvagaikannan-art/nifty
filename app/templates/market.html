@@ -9,6 +9,9 @@
         <button class="sym-tab" data-sym="BANKNIFTY">BANKNIFTY</button>
         <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
         <button class="sym-tab" data-sym="SENSEX">SENSEX</button>
+        <select id="market-stock-select" aria-label="NSE F&O Stock" style="margin-left:.5rem;min-width:150px;">
+            <option value="">NSE F&O Stocks…</option>
+        </select>
     </div>
 </div>
 
@@ -160,6 +163,19 @@ $(document).ready(function() {
     loadSectorPerformance();
     loadGlobalMarkets();
     loadFiiDii();
+    $.getJSON('/api/market/symbols').done(function(universe){
+        if(universe && universe.stocks_available && Array.isArray(universe.stocks)){
+            universe.stocks.forEach(function(sym){
+                $('<option>').val(sym).text(sym).appendTo('#market-stock-select');
+            });
+        }
+    });
+    $('#market-stock-select').on('change', function(){
+        if(!this.value) return;
+        $('.sym-tab').removeClass('active');
+        curSym=this.value;
+        loadMarket(curSym);
+    });
     $('.sym-tab').on('click', function() {
         $('.sym-tab').removeClass('active');
         $(this).addClass('active');
