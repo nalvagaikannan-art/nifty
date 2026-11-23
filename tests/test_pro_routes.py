@@ -18,7 +18,10 @@ from tests.pro_helpers import make_chain
 
 class FakeFetcher:
     async def get_option_chain(self, symbol, expiry=None, strikes_each_side=10):
-        return make_chain(iv=14.0)
+        chain = make_chain(iv=14.0)
+        chain["symbol"] = symbol
+        chain.pop("lot_size", None)  # exercise the symbol-specific fallback
+        return chain
 
     async def get_volatility_info(self):
         return {"value": 15.0, "available": True}
@@ -56,6 +59,21 @@ async def test_status_and_overview(client):
     d = (await client.get("/api/pro/overview/NIFTY?adx=15")).json()
     assert d["iv"]["reliable"] and d["signals"], d["wait_reasons"]
     assert d["lot_size"] == 65 and d["metrics"]["ok"]
+
+
+
+@pytest.mark.parametrize(
+    ("symbol", "expected_lot_size"),
+    [("NIFTY", 65), ("BANKNIFTY", 30), ("FINNIFTY", 60), ("SENSEX", 20)],
+)
+async def test_pro_overview_supports_all_four_index_contract_sizes(
+    client, symbol, expected_lot_size
+):
+    response = await client.get(f"/api/pro/overview/{symbol}")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == symbol
+    assert payload["lot_size"] == expected_lot_size
 
 
 async def test_unknown_symbol_400(client):
