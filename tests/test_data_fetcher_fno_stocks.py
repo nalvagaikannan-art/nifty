@@ -59,3 +59,21 @@ async def test_market_symbol_universe_uses_broker_master_and_keeps_index_set(mon
     assert result["indices"] == ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
     assert result["stocks"] == ["HDFCBANK", "RELIANCE", "SBIN"]
     assert result["stocks_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_supported_market_symbol_requires_derivative_master_membership(monkeypatch):
+    import app.services.angel_one as angel_module
+
+    class FakeAngel:
+        is_configured = True
+
+        async def get_fno_stock_symbols(self):
+            return ["RELIANCE", "HDFCBANK"]
+
+    monkeypatch.setattr(angel_module, "angel_session", FakeAngel())
+    fetcher = DataFetcher()
+
+    assert await fetcher.is_supported_market_symbol("RELIANCE")
+    assert not await fetcher.is_supported_market_symbol("INFY")
+    assert not await fetcher.is_supported_market_symbol("RELIANCE-EQ")
