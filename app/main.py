@@ -275,6 +275,12 @@ app.include_router(paper_trade_routes.router, prefix="/api/paper-trade", tags=["
 app.include_router(accuracy.router,        prefix="/api/accuracy",   tags=["Accuracy"])
 app.include_router(pro_routes.router,      prefix="/api/pro",        tags=["Pro (sell signals / orders)"])
 
+# Public Render health probe; no application data is exposed.
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
 # Frontend pages
 @app.get("/sw.js")
 async def service_worker():
