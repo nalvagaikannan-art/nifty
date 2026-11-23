@@ -2324,11 +2324,28 @@ class DataFetcher:
     # 40s guarantees at least one full refresh cycle is served from cache,
     # cutting this endpoint's Angel One call volume meaningfully without
     # making the option chain noticeably less fresh.
+    async def is_supported_market_symbol(self, symbol: str) -> bool:
+        """Allow core indices and only current NSE F&O stocks in the master."""
+        sym = str(symbol or "").strip().upper()
+        if sym in {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}:
+            return True
+        if not sym or len(sym) > 30:
+            return False
+        try:
+            from app.services.angel_one import angel_session
+            if not angel_session.is_configured:
+                return False
+            return bool(await angel_session._resolve_cash_instrument(sym))
+        except Exception as exc:
+            logger.warning("F&O universe validation failed for %s: %s", sym, exc)
+            return False
+
     @async_cache(ttl=40)
     async def _get_option_chain_cached(self, symbol: str, expiry: Optional[str] = None, strikes_each_side: Optional[int] = 10) -> Dict:
-        sym = symbol.upper()
-        if sym not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
-            raise ValueError(f"Unsupported symbol: {symbol}")
+        sym = str(symbol or "").strip().upper()
+        is_index = sym in {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
+        if not is_index and not await self.is_supported_market_symbol(sym):
+            raise ValueError(f"Unsupported or unavailable NSE F&O stock: {symbol}")
 
         # Reuse the same cached/single-flight spot fetch used by the
         # market overview. This prevents Angel option-chain code from
@@ -2352,9 +2369,19 @@ class DataFetcher:
         if angel_result is not None:
             return angel_result
 
-        zerodha_result = await self._try_zerodha_option_chain(sym, expiry, strikes_each_side=strikes_each_side)
-        if zerodha_result is not None:
-            return zerodha_result
+        if is_index:
+            zerodha_result = await self._try_zerodha_option_chain(sym, expiry, strikes_each_side=strikes_each_side)
+            if zerodha_result is not None:
+                return zerodha_result
+
+        # Stock derivatives are broker instrument-master contracts, not
+        # NSE index-chain contracts. Never send a stock symbol to the
+        # NSE option-chain-indices endpoint.
+        if not is_index:
+            raise MarketDataError(
+                f"Live Angel One stock option chain unavailable for {sym}; "
+                "NSE index-chain fallback is disabled"
+            )
 
         # SENSEX is a BSE/BFO instrument. Never fall through to
         # the NSE/NFO option-chain path when broker sources fail.
