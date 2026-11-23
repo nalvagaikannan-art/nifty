@@ -1976,6 +1976,13 @@ async def strike_recommendation(
                             "delta": _ledger_selected.get("delta"),
                             "theta_per_day": _ledger_selected.get("theta_per_day"),
                         },
+                        "market_regime": {
+                            "regime": str(regime.get("regime", "UNKNOWN")),
+                            "confidence": str(regime.get("confidence", "LOW")),
+                            "no_trade": bool(regime.get("no_trade", False)),
+                            "hard_no_trade": bool(regime.get("hard_no_trade", False)),
+                            "preferred_strategy": str(regime.get("preferred_strategy", "WAIT")),
+                        },
                         "gate": {
                             "fresh_entry_allowed": bool(fresh_entry_allowed),
                             "entry_gate": dict(v3_gate or {}),
