@@ -1011,6 +1011,9 @@
       <button class="lt-sym-btn" data-sym="BANKNIFTY" onclick="ltSetSym(this,'BANKNIFTY')">BANK</button>
       <button class="lt-sym-btn" data-sym="FINNIFTY" onclick="ltSetSym(this,'FINNIFTY')">FIN</button>
       <button class="lt-sym-btn" data-sym="SENSEX" onclick="ltSetSym(this,'SENSEX')">SENSEX</button>
+      <select id="lt-stock-select" aria-label="NSE F&O Stock" onchange="if(this.value)ltSetSym(null,this.value)" style="margin-left:.5rem;max-width:190px;">
+        <option value="">NSE F&O Stocks…</option>
+      </select>
     </div>
 
     <!-- ── WARNINGS ── -->
@@ -1632,10 +1635,21 @@ function pad2(n){ return n < 10 ? '0'+n : ''+n; }
 setInterval(ltClock, 1000);
 ltClock();
 
+// Fetch the broker-master-backed F&O universe once; do not poll all stocks.
+fetch('/api/market/symbols').then(function(r){return r.json();}).then(function(u){
+  var sel=document.getElementById('lt-stock-select');
+  if(!sel || !u || !u.stocks_available || !Array.isArray(u.stocks)) return;
+  u.stocks.forEach(function(sym){
+    var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
+  });
+}).catch(function(){ /* index selector remains usable if the stock master is unavailable */ });
+
 // ── Symbol selector ──
 function ltSetSym(btn, sym){
   document.querySelectorAll('.lt-sym-btn').forEach(function(b){ b.classList.remove('active'); });
-  btn.classList.add('active');
+  if(btn) btn.classList.add('active');
+  var stockSelect = document.getElementById('lt-stock-select');
+  if(stockSelect && stockSelect.value !== sym) stockSelect.value = '';
   ltSym = sym;
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
   // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
