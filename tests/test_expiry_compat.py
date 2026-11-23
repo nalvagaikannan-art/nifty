@@ -102,3 +102,39 @@ def test_persistence_helper_passes_canonical_expiry_to_writer():
             data_fetcher._OPTION_SNAPSHOT_PERSIST_LAST_SAVED = old_last
 
     asyncio.run(scenario())
+
+
+def test_angel_option_expiries_use_ist_calendar_date_before_utc_midnight(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services import angel_one
+
+    # 01:00 IST on Nov 23 is still Nov 22 in UTC. The Nov 23 contract
+    # must remain valid because Indian exchange expiry dates use IST.
+    monkeypatch.setattr(
+        angel_one,
+        "now_ist",
+        lambda: datetime(2026, 11, 23, 1, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    assert angel_one._valid_option_expiries([
+        "20NOV2026", "23NOV2026", "24NOV2026", "INVALID"
+    ]) == ["23NOV2026", "24NOV2026"]
+
+
+def test_angel_option_expiries_roll_forward_after_ist_expiry_date(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.services import angel_one
+
+    monkeypatch.setattr(
+        angel_one,
+        "now_ist",
+        lambda: datetime(2026, 11, 24, 0, 5, tzinfo=ZoneInfo("Asia/Kolkata")),
+    )
+
+    assert angel_one._valid_option_expiries([
+        "23NOV2026", "24NOV2026", "26NOV2026"
+    ]) == ["24NOV2026", "26NOV2026"]
