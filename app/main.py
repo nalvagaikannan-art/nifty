@@ -7,6 +7,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine, Base
+from app.db_lifecycle import initialize_database_schema
 from app.api.routes import dashboard, market, options, analysis, angel, positions, strategy, market_intel, accuracy
 from app.api.routes import pro as pro_routes  # NIFTY-PRO
 import app.services.iv_history  # noqa: F401 — registers pro_iv_history table
@@ -81,12 +82,7 @@ async def lifespan(app: FastAPI):
     # be dropped along with them.
     logging.getLogger("uvicorn.access").addFilter(_HealthCheckFilter())
     logger.info("Starting AI NIFTY Option Analyzer Pro")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        # SQLite: safer concurrent reads/writes while dashboard is polling.
-        if engine.url.drivername == "sqlite+aiosqlite":
-            await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
+    await initialize_database_schema(engine, Base.metadata)
     fetcher = DataFetcher()
     app.state.data_fetcher = fetcher
     app.state.market_analyzer = MarketAnalyzer(fetcher=fetcher)
