@@ -14,10 +14,11 @@ needed:
       at 5/10/15/30/60-minute horizons (signal_accuracy.py, new).
 """
 import asyncio
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select, func
 from app.database import AsyncSessionLocal
-from app.models import MarketData, AnalysisResult, OptionData
+from app.models import MarketData, AnalysisResult, OptionData, AIProviderEvent
 
 from app.services.accuracy_engine import compute_indicator_accuracy
 from app.services.signal_accuracy import (
@@ -212,6 +213,43 @@ async def adaptive_learning_report(
         timeout_detail="Adaptive learning report is taking too long.",
         error_detail="Adaptive learning report failed",
     )
+
+
+@router.get("/ai-provider-events")
+async def ai_provider_events(
+    limit: int = Query(50, ge=1, le=100),
+    hours: int = Query(24, ge=1, le=168),
+):
+    """Recent sanitized provider attempts; no prompts, credentials, or raw errors."""
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(AIProviderEvent)
+                .where(AIProviderEvent.timestamp >= cutoff)
+                .order_by(AIProviderEvent.timestamp.desc(), AIProviderEvent.id.desc())
+                .limit(limit)
+            )
+            events = result.scalars().all()
+            return {
+                "window_hours": hours,
+                "returned": len(events),
+                "events": [
+                    {
+                        "timestamp_utc": event.timestamp.isoformat() + "Z",
+                        "provider": event.provider,
+                        "outcome": event.outcome,
+                        "latency_ms": round(float(event.latency_ms or 0), 2),
+                        "error_category": event.error_category,
+                        "attempt_number": event.attempt_number,
+                    }
+                    for event in events
+                ],
+                "note": "Only actual provider attempts are listed. Empty events means no recorded attempt in this window, not a successful connection.",
+            }
+    except Exception as exc:
+        logger.exception("AI provider telemetry query failed (%s)", type(exc).__name__)
+        raise HTTPException(500, detail="AI provider telemetry is unavailable")
 
 
 @router.get("/status/{symbol}", response_model=AccuracyStatusResponse)
