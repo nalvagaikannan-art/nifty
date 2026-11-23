@@ -20,6 +20,8 @@ async def get_market_symbols(fetcher: DataFetcher = Depends(get_fetcher)):
 async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     try:
         return await fetcher.get_spot(symbol)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -52,8 +54,13 @@ async def get_candles(
 
 @router.get("/option-chain/{symbol}", response_model=MarketOptionChainResponse)
 async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fetcher: DataFetcher = Depends(get_fetcher)):
+    sym = symbol.strip().upper()
+    if not await fetcher.is_supported_market_symbol(sym):
+        raise HTTPException(status_code=400, detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}")
     try:
-        return await fetcher.get_option_chain(symbol, expiry)
+        return await fetcher.get_option_chain(sym, expiry)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
