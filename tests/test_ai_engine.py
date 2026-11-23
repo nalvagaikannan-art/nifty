@@ -102,3 +102,94 @@ def test_gemini_key_alone_is_not_ready_when_gemini_disabled(monkeypatch):
     assert status["gemini_enabled"] is False
     assert status["ready"] is False
     assert status["effective_provider_order"] == []
+
+
+@pytest.mark.asyncio
+async def test_provider_runtime_telemetry_records_success_without_payload(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    monkeypatch.setattr(settings, "openai_api_key", "secret-not-for-logs")
+    monkeypatch.setattr(settings, "deepseek_api_key", None)
+    monkeypatch.setattr(settings, "ai_provider", "openai")
+    engine = AIEngine()
+    recorded = []
+
+    async def fake_call(provider, prompt):
+        assert provider == "openai"
+        return "provider-response"
+
+    async def fake_record(provider, outcome, latency_ms, error_category=None, attempt_number=1):
+        recorded.append((provider, outcome, error_category, attempt_number))
+
+    monkeypatch.setattr(engine, "_call", fake_call)
+    monkeypatch.setattr(engine, "_parse", lambda raw: {
+        "market_bias": "SIDEWAYS", "risk": "Medium",
+        "bullish_probability": 50, "bearish_probability": 50,
+        "preferred_side": "NONE", "reason": "test",
+    })
+    monkeypatch.setattr(engine, "_record_provider_event", fake_record)
+
+    result = await engine.analyze_market({"decision": {"market_bias": "SIDEWAYS"}})
+
+    assert result["_provider"] == "openai"
+    assert recorded == [("openai", "success", None, 1)]
+    assert "secret-not-for-logs" not in str(recorded)
+
+
+@pytest.mark.asyncio
+async def test_provider_runtime_telemetry_records_fallback_and_sanitized_failure(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    monkeypatch.setattr(settings, "openai_api_key", "openai-secret")
+    monkeypatch.setattr(settings, "deepseek_api_key", "deepseek-secret")
+    monkeypatch.setattr(settings, "ai_provider", "openai")
+    engine = AIEngine()
+    recorded = []
+
+    async def fake_call(provider, prompt):
+        if provider == "openai":
+            raise RuntimeError("request failed with api_key=openai-secret")
+        return "provider-response"
+
+    async def fake_record(provider, outcome, latency_ms, error_category=None, attempt_number=1):
+        recorded.append((provider, outcome, error_category, attempt_number))
+
+    monkeypatch.setattr(engine, "_call", fake_call)
+    monkeypatch.setattr(engine, "_parse", lambda raw: {
+        "market_bias": "SIDEWAYS", "risk": "Medium",
+        "bullish_probability": 50, "bearish_probability": 50,
+        "preferred_side": "NONE", "reason": "test",
+    })
+    monkeypatch.setattr(engine, "_record_provider_event", fake_record)
+
+    result = await engine.analyze_market({"decision": {"market_bias": "SIDEWAYS"}})
+
+    assert result["_provider"] == "deepseek"
+    assert recorded[0] == ("openai", "failure", "provider_error", 1)
+    assert recorded[1] == ("deepseek", "success", None, 2)
+    assert "openai-secret" not in str(recorded)
+
+
+@pytest.mark.asyncio
+async def test_all_provider_failures_do_not_expose_raw_errors(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    monkeypatch.setattr(settings, "openai_api_key", "openai-secret")
+    monkeypatch.setattr(settings, "deepseek_api_key", None)
+    monkeypatch.setattr(settings, "ai_provider", "openai")
+    engine = AIEngine()
+
+    async def fake_call(provider, prompt):
+        raise RuntimeError("api_key=openai-secret")
+
+    async def ignore_record(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(engine, "_call", fake_call)
+    monkeypatch.setattr(engine, "_record_provider_event", ignore_record)
+
+    with pytest.raises(AIProviderError) as exc:
+        await engine.analyze_market({"decision": {"market_bias": "SIDEWAYS"}})
+
+    assert "openai-secret" not in str(exc.value)
+    assert "api_key" not in str(exc.value)
