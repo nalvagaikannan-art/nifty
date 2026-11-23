@@ -10,6 +10,7 @@ class _FakeConnection:
 
     async def run_sync(self, callback):
         self.schema_callbacks.append(callback)
+        callback(object())
 
     async def exec_driver_sql(self, statement):
         self.statements.append(statement)
@@ -50,7 +51,7 @@ async def test_schema_is_created_once_for_postgresql_without_sqlite_pragmas():
 
     await initialize_database_schema(engine, metadata)
 
-    assert metadata.create_all_calls == 0
+    assert metadata.create_all_calls == 1
     assert len(engine.connection.schema_callbacks) == 1
     assert engine.connection.statements == []
 
