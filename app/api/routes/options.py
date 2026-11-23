@@ -1,10 +1,20 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from app.services.option_analyzer import OptionAnalyzer
 from app.services.data_fetcher import DataFetcher
 from app.api.deps import get_fetcher
 from app.schemas import (OptionsChainAnalyticsResponse, OptionsChainAliasResponse, OptionPcrResponse, OptionMaxPainResponse)
 
 router = APIRouter()
+
+
+async def _require_supported_symbol(symbol: str, fetcher: DataFetcher) -> str:
+    sym = str(symbol or "").strip().upper()
+    if not await fetcher.is_supported_market_symbol(sym):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}",
+        )
+    return sym
 
 
 def _strikes_for_range(range_value: str):
@@ -20,6 +30,7 @@ def _strikes_for_range(range_value: str):
 
 @router.get("/pcr/{symbol}", response_model=OptionPcrResponse)
 async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
+    symbol = await _require_supported_symbol(symbol, fetcher)
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()
     df = analyzer.process_option_chain(chain)
@@ -28,6 +39,7 @@ async def get_pcr(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
 
 @router.get("/maxpain/{symbol}", response_model=OptionMaxPainResponse)
 async def get_maxpain(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
+    symbol = await _require_supported_symbol(symbol, fetcher)
     chain = await fetcher.get_option_chain(symbol)
     analyzer = OptionAnalyzer()
     df = analyzer.process_option_chain(chain)
@@ -41,6 +53,7 @@ async def get_option_chain(
     range: str = "10",
     fetcher: DataFetcher = Depends(get_fetcher),
 ):
+    symbol = await _require_supported_symbol(symbol, fetcher)
     strikes_each_side = _strikes_for_range(range)
     chain = await fetcher.get_option_chain(
         symbol,
