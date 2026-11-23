@@ -254,9 +254,9 @@ class AIEngine:
                     return text
                 raise AIProviderError(f"Empty response from {m}")
             except Exception as e:
-                logger.debug(f"Gemini model {m} failed: {e}")
+                logger.debug("Gemini model %s failed (%s)", m, type(e).__name__)
                 last = e
-        raise AIProviderError(f"Gemini failed: {last}")
+        raise AIProviderError("Gemini provider attempts failed")
 
     async def _openai(self, prompt: str) -> str:
         c = AsyncOpenAI(api_key=self.keys["openai"])
