@@ -498,21 +498,47 @@ class AngelOneSession:
             call_name,
         )
 
-    async def get_ltp(self, symbol: str) -> Dict:
-        """Live LTP fetch — Angel One SmartAPI with one invalid-token recovery."""
-        await self.ensure_session()
-        info = self.SYMBOL_TOKENS.get(symbol.upper())
-        if not info:
-            raise AngelOneError(f"Unknown symbol: {symbol}")
+    async def _resolve_cash_instrument(self, symbol: str) -> Optional[Dict]:
+        """Resolve an NSE F&O stock's cash EQ instrument without broker quotes."""
+        sym = str(symbol or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9&_-]{1,30}", sym):
+            return None
+        await self._ensure_instruments()
+        target = f"{sym}-EQ"
+        rows = [
+            row for row in (self._instruments or [])
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "NSE"
+            and str(row.get("symbol") or "").strip().upper() == target
+            and str(row.get("token") or "").strip()
+        ]
+        if len(rows) != 1:
+            if len(rows) > 1:
+                logger.warning("Ambiguous NSE cash token for %s; refusing resolution", sym)
+            return None
+        row = rows[0]
+        return {"exchange": "NSE", "token": str(row["token"]).strip(),
+                "tradingsymbol": target, "name": sym}
 
-        symbol_upper = symbol.upper()
+    async def get_ltp(self, symbol: str) -> Dict:
+        """Live LTP for supported indices or NSE F&O stock cash instruments."""
+        await self.ensure_session()
+        symbol_upper = str(symbol or "").strip().upper()
+        info = self.SYMBOL_TOKENS.get(symbol_upper)
+        if info:
+            ltp_symbol = symbol_upper
+        else:
+            info = await self._resolve_cash_instrument(symbol_upper)
+            if not info:
+                raise AngelOneError(f"Unknown or unsupported symbol: {symbol}")
+            ltp_symbol = info["tradingsymbol"]
 
         async def _call_ltp():
             await self._throttle(call_name=f"get_ltp:{symbol_upper}")
             return await asyncio.to_thread(
                 self._obj.ltpData,
                 info["exchange"],
-                symbol_upper,
+                ltp_symbol,
                 info["token"],
             )
 
@@ -1293,11 +1319,12 @@ class AngelOneSession:
             symbol.upper(), "NFO"
         )
 
+        instrument_type = "OPTIDX" if symbol.upper() in self.NFO_SYMBOL_MAP else "OPTSTK"
         rows = [
             r for r in self._instruments
             if isinstance(r, dict)
-            and r.get("name") == sym
-            and r.get("instrumenttype") == "OPTIDX"
+            and str(r.get("name") or "").strip().upper() == sym
+            and r.get("instrumenttype") == instrument_type
             and r.get("exch_seg") == derivative_exchange
             and r.get("expiry")
         ]
@@ -1452,11 +1479,12 @@ class AngelOneSession:
         derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
             symbol.upper(), "NFO"
         )
+        instrument_type = "OPTIDX" if symbol.upper() in self.NFO_SYMBOL_MAP else "OPTSTK"
         rows = [
             r for r in self._instruments
             if isinstance(r, dict)
-            and r.get("name") == sym
-            and r.get("instrumenttype") == "OPTIDX"
+            and str(r.get("name") or "").strip().upper() == sym
+            and r.get("instrumenttype") == instrument_type
             and r.get("exch_seg") == derivative_exchange
             and r.get("expiry")
         ]
@@ -1920,16 +1948,19 @@ class AngelOneSession:
         docstring.
         """
         await self.ensure_session()
-        info = self.SYMBOL_TOKENS.get(symbol.upper())
+        symbol_upper = str(symbol or "").strip().upper()
+        info = self.SYMBOL_TOKENS.get(symbol_upper)
         if not info:
-            raise AngelOneError(f"Unknown symbol: {symbol}")
+            info = await self._resolve_cash_instrument(symbol_upper)
+        if not info:
+            raise AngelOneError(f"Unknown or unsupported symbol: {symbol}")
         return await self._fetch_candles(
             info["exchange"],
             info["token"],
             interval,
             from_date,
             to_date,
-            label=symbol.upper(),
+            label=symbol_upper,
             fail_fast_rate_limit=fail_fast_rate_limit,
         )
 
@@ -1973,11 +2004,12 @@ class AngelOneSession:
         derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
             symbol.upper(), "NFO"
         )
+        instrument_type = "FUTIDX" if symbol.upper() in self.NFO_SYMBOL_MAP else "FUTSTK"
         rows = [
             r for r in self._instruments
             if isinstance(r, dict)
-            and r.get("name") == sym
-            and r.get("instrumenttype") == "FUTIDX"
+            and str(r.get("name") or "").strip().upper() == sym
+            and r.get("instrumenttype") == instrument_type
             and r.get("exch_seg") == derivative_exchange
             and r.get("expiry")
         ]
