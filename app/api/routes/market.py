@@ -10,6 +10,12 @@ router = APIRouter()
 VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 VALID_INTERVALS = {"ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE", "ONE_HOUR"}
 
+@router.get("/symbols")
+async def get_market_symbols(fetcher: DataFetcher = Depends(get_fetcher)):
+    """Current supported indices and broker-master-verified NSE F&O stocks."""
+    return await fetcher.get_market_symbol_universe()
+
+
 @router.get("/spot/{symbol}", response_model=MarketSpotResponse)
 async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
     try:
