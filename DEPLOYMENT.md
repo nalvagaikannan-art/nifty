@@ -10,7 +10,7 @@
 - Render database பெயர்: `nifty-pro-db`
 - Application mode: paper-only
 - Broker live order placement: தடைசெய்யப்பட்டுள்ளது
-- QA CI: 604 passed, 0 failed, 1 warning (2026-11-23 run #45124591499; commit `78c8cc97919efadd2abeac73744373eea987e7d6`)
+- QA CI: 604 passed, 0 failed, 1 warning (2026-11-23 run #45125010717; commit `2ed10cabb5baac1378e419b7595152ef60fb2376`)
 - Render resources: இன்னும் உருவாக்கப்படவில்லை
 - Production deployment: செய்யப்படவில்லை
 
@@ -46,7 +46,16 @@ Blueprint-ல் தற்போது Free plans குறிப்பிடப
 
 **செலவு அனுமதி இல்லாமல் paid plan தேர்வு செய்யவோ, Free plan-ஐ production-க்கு ஏற்றது எனக் கருதவோ கூடாது.** Render plan/pricing/limits-ஐ deployment நாளில் அதிகாரப்பூர்வ ஆவணத்தில் மீண்டும் சரிபார்க்க வேண்டும்.
 
-## 3. முதல் deploy-க்கு முன் தேவையான secrets
+## 3. Database schema மற்றும் persistence நிலை
+
+- Startup-இல் தற்போது SQLAlchemy `Base.metadata.create_all` பயன்படுத்தப்படுகிறது.
+- Repository-யில் Alembic அல்லது versioned migration framework கண்டறியப்படவில்லை.
+- இதனால் புதிய, காலியான PostgreSQL database-ஐ உருவாக்கும் ஆரம்ப schema setup மட்டுமே source-ல் உறுதியாகத் தெரிகிறது; ஏற்கெனவே உள்ள database-க்கு எதிர்கால schema மாற்றங்களை migrate செய்வதற்கான நடைமுறை நிரூபிக்கப்படவில்லை.
+- SQLite test suite வெற்றி என்பது Render PostgreSQL-ல் உண்மையான connection, schema creation, concurrent writes, restart persistence, backup/restore ஆகியவை வெற்றி என்பதற்குச் சமமல்ல.
+
+**Deploy gate:** தனி QA PostgreSQL instance-இல் schema creation, paper-ledger write/read, service restart persistence, backup மற்றும் restore ஆகியவற்றைச் சோதித்து ஆதாரம் பதிவு செய்ய வேண்டும். இந்த gate முடியும் வரை production deployment தடை.
+
+## 4. முதல் deploy-க்கு முன் தேவையான secrets
 
 Render Dashboard-ல் secrets ஆக மட்டும் அமைக்க வேண்டும்; Git-ல் உண்மையான values சேர்க்கக்கூடாது.
 
@@ -58,7 +67,7 @@ Render Dashboard-ல் secrets ஆக மட்டும் அமைக்க 
 
 Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகிர வேண்டாம். Production authentication secrets இல்லையெனில் middleware fail-closed ஆக இருக்க வேண்டும்.
 
-## 4. கட்டாய safety configuration
+## 5. கட்டாய safety configuration
 
 கீழே உள்ள மதிப்புகள் deploy candidate-ல் மாற்றமின்றி இருக்க வேண்டும்:
 
@@ -75,7 +84,7 @@ Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகி�
 
 `/healthz` மட்டும் public health endpoint. மற்ற application routes Basic Authentication மூலம் பாதுகாக்கப்பட வேண்டும். `/healthz` response மட்டும் app readiness, DB readiness அல்லது market-feed readiness நிரூபிக்காது.
 
-## 5. Deploy approval gates — அனைத்தும் PASS ஆக வேண்டும்
+## 6. Deploy approval gates — அனைத்தும் PASS ஆக வேண்டும்
 
 - [ ] Latest candidate SHA-க்கு GitHub Actions full suite PASS.
 - [ ] Auth tests: unauthenticated request 401; production credentials missing 503.
@@ -92,7 +101,7 @@ Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகி�
 
 ஏதேனும் ஒரு symbol தோல்வியடைந்தால் deploy நிறுத்தப்பட வேண்டும். Deploy பிந்தைய முதல் 10 trading days real-money trading செய்யக்கூடாது; நான்கு symbols-ல் ஏதேனும் ஒன்று தோல்வியடைந்தால் rollback செய்ய வேண்டும். Paper validation முடியும் வரை project status `Preparation` ஆகவே இருக்கும்.
 
-## 6. Deployment செய்யும் நாளில் மட்டும்
+## 7. Deployment செய்யும் நாளில் மட்டும்
 
 மேலுள்ள எல்லா gates-க்கும் ஆதாரம் கிடைத்து, செலவு/வள ஒப்புதல் கிடைத்த பின்:
 
@@ -104,7 +113,7 @@ Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகி�
 6. Deploy முடிந்ததும் auth, DB, health, four-symbol live-feed மற்றும் paper-ledger smoke tests செய்யவும்.
 7. தோல்வி ஏற்பட்டால் உடனடியாக rollback; பழைய Oracle/Render service-ஐத் தொடவோ மாற்றவோ கூடாது.
 
-## 7. பழைய வழிமுறைகள் செல்லாது
+## 8. பழைய வழிமுறைகள் செல்லாது
 
 இந்த NIFTY-PRO split-க்கு கீழே உள்ள பழைய பொதுவான வழிமுறைகளைப் பயன்படுத்த வேண்டாம்:
 
