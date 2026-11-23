@@ -392,7 +392,6 @@ PAPER_CAPTURE_CLOSED_RECHECK_SEC = 60.0
 
 async def _run_strategy_recommendation_for_capture(
     analyzer: MarketAnalyzer,
-    ai: AIEngine,
     symbol: str,
 ) -> bool:
     # Import lazily to avoid router/service import cycles during app startup.
@@ -406,7 +405,8 @@ async def _run_strategy_recommendation_for_capture(
             expiry=None,
             cache_bust="",
             analyzer=analyzer,
-            ai=ai,
+            ai=None,
+            _capture_only=True,
         )
         if isinstance(result, dict):
             logger.info(
@@ -459,7 +459,6 @@ async def run_periodic_paper_capture(analyzer: MarketAnalyzer) -> None:
     )
     await asyncio.sleep(PAPER_CAPTURE_START_DELAY_SEC)
 
-    ai = None
     cycle_index = 0
     while True:
         if not is_market_hours_ist():
@@ -468,13 +467,10 @@ async def run_periodic_paper_capture(analyzer: MarketAnalyzer) -> None:
 
         symbol = symbols[cycle_index % len(symbols)]
         cycle_index += 1
-        if ai is None:
-            ai = AIEngine()
-
         started = asyncio.get_running_loop().time()
         try:
             ok = await _run_strategy_recommendation_for_capture(
-                analyzer, ai, symbol
+                analyzer, symbol
             )
         except asyncio.CancelledError:
             logger.info("Forward paper-capture scheduler stopped")
