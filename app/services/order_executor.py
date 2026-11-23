@@ -80,22 +80,17 @@ def set_kill_switch(on: bool) -> bool:
 
 
 def status() -> Dict:
-    live_ready = settings.trading_mode == "live" and settings.live_trading_enabled and bool(settings.order_pin)
-    return {"mode": "live" if live_ready else "paper", "configured_mode": settings.trading_mode,
-            "live_enabled": settings.live_trading_enabled, "pin_configured": bool(settings.order_pin),
+    # This build is intentionally paper-only. Environment flags must never
+    # advertise or enable broker execution.
+    return {"mode": "paper", "configured_mode": settings.trading_mode,
+            "live_enabled": False, "pin_configured": False,
             "kill_switch": kill_switch_on(), "max_lots_per_order": settings.max_lots_per_order,
             "max_orders_per_day": settings.max_orders_per_day, "allow_naked_sell": settings.allow_naked_sell}
 
 
 def _is_live(pin: Optional[str]) -> bool:
-    """True only if EVERY live gate is open. Wrong/missing PIN in live mode -> reject (never silently paper)."""
-    if not (settings.trading_mode == "live" and settings.live_trading_enabled):
-        return False
-    if not settings.order_pin:
-        raise OrderRejected("PIN_NOT_CONFIGURED", "ORDER_PIN அமைக்கப்படவில்லை — live order தடை.")
-    if pin != settings.order_pin:
-        raise OrderRejected("BAD_PIN", "X-Order-Pin தவறு.")
-    return True
+    """Fail closed: broker execution is not supported in this paper-only build."""
+    raise OrderRejected("PAPER_ONLY", "இந்த build paper-only. Broker live order execution நிரந்தரமாக முடக்கப்பட்டுள்ளது.")
 
 
 def build_orders(signal: Dict, lots: int, include_hedge: bool = True) -> List[Dict]:
@@ -154,6 +149,8 @@ async def _free_cash() -> float:
 
 
 async def _angel_place(o: Dict, symbol: str, spot: float = 0.0) -> Dict:
+    # Defense in depth: even accidental direct calls cannot reach Angel One.
+    raise OrderRejected("PAPER_ONLY", "Broker live order execution is disabled in this paper-only build.")
     from app.services.angel_one import angel_session, _normalize_expiry
     await angel_session.ensure_session()
     meta = await angel_session.resolve_option_tokens(symbol, o["expiry"], strikes_each_side=None, spot_price=spot or None)
@@ -175,6 +172,7 @@ async def _angel_place(o: Dict, symbol: str, spot: float = 0.0) -> Dict:
 
 
 async def execute_signal(signal: Dict, lots: int = 1, include_hedge: bool = True, pin: Optional[str] = None) -> Dict:
+    # Reject before DB access, token lookup, margin lookup, or broker calls.
     live = _is_live(pin)
     today = await _orders_today()
     orders = validate(signal, lots, include_hedge, today)
