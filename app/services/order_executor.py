@@ -76,8 +76,14 @@ def status() -> Dict:
 
 
 def _is_live(pin: Optional[str]) -> bool:
-    """Fail closed: broker execution is not supported in this paper-only build."""
-    raise OrderRejected("PAPER_ONLY", "இந்த build paper-only. Broker live order execution நிரந்தரமாக முடக்கப்பட்டுள்ளது.")
+    """Reject live-mode configuration; otherwise use the isolated paper ledger.
+
+    A PIN alone never enables live trading. Broker routing remains blocked by
+    _angel_place even if this guard is bypassed accidentally.
+    """
+    if str(settings.trading_mode).lower() == "live" or bool(settings.live_trading_enabled):
+        raise OrderRejected("PAPER_ONLY", "இந்த build paper-only. Broker live order execution நிரந்தரமாக முடக்கப்பட்டுள்ளது.")
+    return False
 
 
 def build_orders(signal: Dict, lots: int, include_hedge: bool = True) -> List[Dict]:
