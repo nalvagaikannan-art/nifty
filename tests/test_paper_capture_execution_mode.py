@@ -1,5 +1,3 @@
-import asyncio
-
 import pytest
 
 
@@ -54,7 +52,9 @@ async def test_paper_capture_scheduler_uses_capture_only_route(monkeypatch, symb
 
 @pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
 @pytest.mark.asyncio
-async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monkeypatch, symbol):
+async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(
+    monkeypatch, symbol
+):
     import app.api.routes.strategy as strategy
 
     class FakeAnalyzer:
@@ -91,8 +91,8 @@ async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monke
 
     saved_states = []
 
-    async def fake_load(symbol):
-        assert symbol == symbol
+    async def fake_load(requested_symbol):
+        assert requested_symbol == symbol
         return None
 
     def fake_lifecycle(decision, persisted_state, now):
