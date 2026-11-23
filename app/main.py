@@ -14,6 +14,7 @@ import app.services.order_executor  # noqa: F401 — registers pro_orders table
 from app.api.routes import settings as settings_routes
 from app.api.routes import paper_trade as paper_trade_routes
 from app.utils.logging import setup_logging
+from app.utils.helpers import is_market_hours_ist
 from app.services.data_fetcher import DataFetcher
 import app.services.paper_trading  # noqa: F401 — registers PaperTrade + TradeJournal models
 from app.services.market_analyzer import MarketAnalyzer, _snapshot_persistence_enabled
