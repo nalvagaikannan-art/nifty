@@ -267,3 +267,20 @@ class ForwardPaperOutcome(Base):
             "target_timestamp", "status",
         ),
     )
+
+
+class AIProviderEvent(Base):
+    """Sanitized runtime telemetry for AI provider attempts; never stores prompts or secrets."""
+    __tablename__ = "ai_provider_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    provider = Column(String(24), nullable=False, index=True)
+    outcome = Column(String(16), nullable=False, index=True)
+    latency_ms = Column(Float, nullable=False, default=0)
+    error_category = Column(String(40), nullable=True)
+    attempt_number = Column(Integer, nullable=False, default=1)
+
+    __table_args__ = (
+        Index("ix_ai_provider_events_timestamp_id", "timestamp", "id"),
+    )
