@@ -1369,19 +1369,32 @@ class AngelLiveFeed:
             tick_count = len(self._ticks)
             tick_age_sec = {}
             exchange_age_sec = {}
+            symbol_status = {}
 
             for symbol in self.SYMBOL_TOKENS:
                 received_at = self._last_tick_received_at.get(symbol, 0.0)
                 exchange_ts = self._last_exchange_timestamp.get(symbol, 0.0)
+                received_age = now - received_at if received_at > 0 else None
+                exchange_age = now - exchange_ts if exchange_ts > 0 else None
+                fresh = (
+                    received_age is not None
+                    and exchange_age is not None
+                    and 0 <= received_age <= self.LIVE_TICK_MAX_AGE_SEC
+                    and 0 <= exchange_age <= self.LIVE_TICK_MAX_AGE_SEC
+                )
 
                 tick_age_sec[symbol] = (
-                    round(now - received_at, 1)
-                    if received_at > 0 else None
+                    round(received_age, 1) if received_age is not None else None
                 )
                 exchange_age_sec[symbol] = (
-                    round(now - exchange_ts, 1)
-                    if exchange_ts > 0 else None
+                    round(exchange_age, 1) if exchange_age is not None else None
                 )
+                symbol_status[symbol] = {
+                    "has_tick": symbol in self._ticks,
+                    "fresh": fresh,
+                    "tick_age_sec": tick_age_sec[symbol],
+                    "exchange_age_sec": exchange_age_sec[symbol],
+                }
 
         return {
             "running": bool(
@@ -1392,12 +1405,10 @@ class AngelLiveFeed:
             "symbols_with_ticks": tick_count,
             "fresh_tick_symbols": [
                 symbol
-                for symbol in self.SYMBOL_TOKENS
-                if tick_age_sec.get(symbol) is not None
-                and tick_age_sec[symbol] <= self.LIVE_TICK_MAX_AGE_SEC
-                and exchange_age_sec.get(symbol) is not None
-                and exchange_age_sec[symbol] <= self.LIVE_TICK_MAX_AGE_SEC
+                for symbol, details in symbol_status.items()
+                if details["fresh"]
             ],
+            "symbol_status": symbol_status,
             "tick_age_sec": tick_age_sec,
             "exchange_age_sec": exchange_age_sec,
             "watchdog_interval_sec": self.WATCHDOG_INTERVAL_SEC,
