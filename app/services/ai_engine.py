@@ -64,6 +64,28 @@ class AIEngine:
         # wraps in try/except AIProviderError.
         self.order = order
 
+    def readiness_status(self) -> Dict:
+        """Safe provider readiness metadata; never exposes API key values."""
+        configured = {
+            "gemini": bool(self.keys.get("gemini")),
+            "openai": bool(self.keys.get("openai")),
+            "deepseek": bool(self.keys.get("deepseek")),
+        }
+        return {
+            "configured": configured,
+            "gemini_enabled": GEMINI_ENABLED,
+            "primary_provider": str(settings.ai_provider or "").lower(),
+            "effective_provider_order": list(self.order),
+            "ready": bool(self.order),
+            "mode": "ai_validator_and_explainer" if self.order else "rule_engine_only",
+            "models": {
+                "gemini": list(GEMINI_MODELS) if "gemini" in self.order else [],
+                "openai": [OPENAI_MODEL] if "openai" in self.order else [],
+                "deepseek": [DEEPSEEK_MODEL] if "deepseek" in self.order else [],
+            },
+            "note": "Readiness only; a successful live provider response is recorded separately when an analysis request invokes AI.",
+        }
+
     async def analyze_market(self, market_data: Dict) -> Dict:
         if not self.order:
             raise AIProviderError("No AI provider API key configured")
