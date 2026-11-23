@@ -498,6 +498,20 @@ class AngelOneSession:
             call_name,
         )
 
+    async def get_fno_stock_symbols(self) -> List[str]:
+        """Return the current NSE F&O stock universe from the cached master."""
+        await self.ensure_session()
+        await self._ensure_instruments()
+        index_names = set(self.NFO_SYMBOL_MAP.values())
+        return sorted({
+            str(row.get("name") or "").strip().upper()
+            for row in (self._instruments or [])
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "NFO"
+            and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
+            and str(row.get("name") or "").strip().upper() not in index_names
+        })
+
     async def _resolve_cash_instrument(self, symbol: str) -> Optional[Dict]:
         """Resolve an NSE F&O stock's cash EQ instrument without broker quotes."""
         sym = str(symbol or "").strip().upper()
