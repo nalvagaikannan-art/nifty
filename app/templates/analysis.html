@@ -9,6 +9,9 @@
     <button class="sym-tab" data-sym="BANKNIFTY">BNIFTY</button>
     <button class="sym-tab" data-sym="FINNIFTY">FINNIFTY</button>
   <button class="sym-tab" data-sym="SENSEX">SENSEX</button>
+    <select id="fno-stock-select" aria-label="NSE F&O Stock" style="min-width:150px;">
+      <option value="">NSE F&O Stocks…</option>
+    </select>
     <select id="expiry-select" style="display:none;" title="Expiry-ஐ மாற்றி அந்த expiry-க்கான suggestion பாருங்க">
       <option value="">Nearest Expiry</option>
     </select>
@@ -1883,6 +1886,22 @@ function renderDataQuality(dq){
 
 var t=null;
 $('#refresh-btn').on('click',function(){ clearTimeout(t); t=setTimeout(function(){loadAll(curSym,true,curExpiry);},300); });
+$.getJSON('/api/market/symbols').done(function(universe){
+  if(universe && universe.stocks_available && Array.isArray(universe.stocks)){
+    universe.stocks.forEach(function(sym){
+      $('<option>').val(sym).text(sym).appendTo('#fno-stock-select');
+    });
+  }
+});
+$('#fno-stock-select').on('change',function(){
+  if(!this.value) return;
+  $('.sym-tab').removeClass('active');
+  curSym=this.value;
+  curExpiry='';
+  $('#expiry-select').hide().val('');
+  $('#expiry-resolved-label').text('');
+  loadAll(curSym,true,'');
+});
 $('.sym-tab').on('click',function(){
   $('.sym-tab').removeClass('active'); $(this).addClass('active');
   curSym=$(this).data('sym');
