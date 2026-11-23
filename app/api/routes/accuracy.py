@@ -26,6 +26,7 @@ from app.services.signal_accuracy import (
 from app.services.error_log import record_error, recent_errors
 from app.services.ledger_performance import compute_ledger_performance
 from app.services.session_study import compute_session_study
+from app.services.adaptive_learning import compute_shadow_learning_report
 from app.schemas import (
     AccuracyIndicatorsResponse,
     AccuracySignalsResponse,
@@ -194,6 +195,22 @@ async def confidence_calibration(
         endpoint="calibration", sym=sym,
         timeout_detail=f"Calibration for {days} days is taking too long — try a smaller range.",
         error_detail="Calibration computation failed",
+    )
+
+
+@router.get("/adaptive-learning")
+async def adaptive_learning_report(
+    symbol: str = Query(None),
+    days: int = Query(60, ge=1, le=60),
+):
+    """Read-only shadow learner: regime/action outcome cohorts, no live reweighting."""
+    sym = await _check_symbol(symbol) if symbol else None
+    return await _run_with_timeout(
+        compute_shadow_learning_report(symbol=sym, days=days),
+        endpoint="adaptive-learning",
+        sym=sym or "ALL",
+        timeout_detail="Adaptive learning report is taking too long.",
+        error_detail="Adaptive learning report failed",
     )
 
 
