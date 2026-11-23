@@ -50,6 +50,15 @@ services:
         sync: false
       - key: DEEPSEEK_API_KEY
         sync: false
+      # Angel One market-data login — secrets are entered only in Render dashboard.
+      - key: ANGEL_API_KEY
+        sync: false
+      - key: ANGEL_CLIENT_ID
+        sync: false
+      - key: ANGEL_PASSWORD
+        sync: false
+      - key: ANGEL_TOTP_SECRET
+        sync: false
       - key: SQLITE_DB_PATH
         value: ./data/analyzer_pro.db   # only used as a fallback if DATABASE_URL below is ever removed
       - key: DATABASE_URL
