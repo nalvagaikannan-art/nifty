@@ -144,22 +144,19 @@ async def test_direct_angel_place_is_blocked(monkeypatch):
     assert called["angel"] == 0
 
 
-async def test_angel_place_rejects_wrong_expiry(monkeypatch):
+async def test_angel_place_is_disabled_even_with_valid_option_payload(monkeypatch):
     import app.services.angel_one as ao
 
     class Fake:
-        DERIVATIVE_EXCHANGE_MAP = {"NIFTY": "NFO"}
-        _obj = None
+        async def ensure_session(self):
+            raise AssertionError("Angel One session must not be opened")
 
-        async def ensure_session(self): pass
-
-        async def resolve_option_tokens(self, *a, **k):   # silently returns NEAREST expiry (real behaviour)
-            return [{"strike": 22850.0, "optionType": "CE", "expiry": "10NOV2026", "token": "1", "tradingsymbol": "NIFTY10NOV2622850CE"}]
     monkeypatch.setattr(ao, "angel_session", Fake())
-    o = {"expiry": "17NOV2026", "strike": 22850.0, "option_type": "CE", "side": "SELL", "price": 10, "quantity": 65}
+    o = {"expiry": "17NOV2026", "strike": 22850.0, "option_type": "CE",
+         "side": "SELL", "price": 10, "quantity": 65}
     with pytest.raises(ox.OrderRejected) as e:
         await ox._angel_place(o, "NIFTY")
-    assert e.value.code == "EXPIRY_MISMATCH"
+    assert e.value.code == "PAPER_ONLY"
 
 
 async def test_iv_history_roundtrip():
