@@ -41,3 +41,21 @@ async def test_stock_option_chain_fails_closed_without_angel_chain():
         with pytest.raises(MarketDataError, match="stock option chain unavailable"):
             await fetcher._get_option_chain_cached("RELIANCE", "31DEC2099")
         nse_get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_symbol_universe_uses_broker_master_and_keeps_index_set(monkeypatch):
+    import app.services.angel_one as angel_module
+
+    class FakeAngel:
+        is_configured = True
+
+        async def get_fno_stock_symbols(self):
+            return ["HDFCBANK", "RELIANCE", "SBIN"]
+
+    monkeypatch.setattr(angel_module, "angel_session", FakeAngel())
+    result = await DataFetcher().get_market_symbol_universe()
+
+    assert result["indices"] == ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+    assert result["stocks"] == ["HDFCBANK", "RELIANCE", "SBIN"]
+    assert result["stocks_available"] is True
