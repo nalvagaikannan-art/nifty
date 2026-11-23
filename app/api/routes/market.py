@@ -18,8 +18,11 @@ async def get_market_symbols(fetcher: DataFetcher = Depends(get_fetcher)):
 
 @router.get("/spot/{symbol}", response_model=MarketSpotResponse)
 async def get_spot(symbol: str, fetcher: DataFetcher = Depends(get_fetcher)):
+    sym = symbol.strip().upper()
+    if not await fetcher.is_supported_market_symbol(sym):
+        raise HTTPException(400, detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}")
     try:
-        return await fetcher.get_spot(symbol)
+        return await fetcher.get_spot(sym)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except MarketDataError as e:
