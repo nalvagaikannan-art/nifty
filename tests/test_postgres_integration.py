@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import asyncpg
@@ -20,7 +21,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from app.database import Base
 from app.db_lifecycle import initialize_database_schema
-from app.models import DailySignalLedger  # registers the production ledger table
+from app.models import DailySignalLedger, ForwardPaperOutcome  # register production tables
 
 
 @pytest.mark.asyncio
@@ -223,6 +224,82 @@ async def test_postgres_concurrent_duplicate_ledger_key_is_rejected():
                 .where(DailySignalLedger.ledger_key == ledger_key)
             )
             assert count == 1
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                delete(DailySignalLedger).where(
+                    DailySignalLedger.ledger_key == ledger_key
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_postgres_forward_outcome_foreign_key_cascade():
+    """Forward paper outcomes must not outlive their source ledger row."""
+    database_url = os.getenv("POSTGRES_TEST_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_TEST_URL is not configured")
+
+    ledger_key = f"qa-postgres-fk-{uuid.uuid4().hex}"
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        await initialize_database_schema(engine, Base.metadata)
+        async with sessions() as session:
+            ledger = DailySignalLedger(
+                symbol="FINNIFTY",
+                action="BUY CE",
+                option_type="CE",
+                strike=25000.0,
+                spot=25000.0,
+                signal_strength=58.0,
+                confidence=58.0,
+                lifecycle="CONFIRMED_CALL",
+                confirmations=3,
+                ledger_key=ledger_key,
+                entry_snapshot={"paper_only": True, "actual_trade": False},
+            )
+            session.add(ledger)
+            await session.flush()
+            outcome = ForwardPaperOutcome(
+                ledger_id=ledger.id,
+                symbol="FINNIFTY",
+                horizon_minutes=15,
+                event_timestamp=datetime(2026, 11, 23, 9, 30),
+                target_timestamp=datetime(2026, 11, 23, 9, 45),
+                status="pending",
+                details={"paper_only": True, "actual_trade": False},
+            )
+            session.add(outcome)
+            await session.commit()
+            outcome_id = outcome.id
+            ledger_id = ledger.id
+
+        async with sessions() as session:
+            persisted = await session.get(ForwardPaperOutcome, outcome_id)
+            assert persisted is not None
+            assert persisted.ledger_id == ledger_id
+            assert persisted.details == {
+                "paper_only": True,
+                "actual_trade": False,
+            }
+
+        # The database-level ON DELETE CASCADE must remove dependent outcomes.
+        async with sessions() as session:
+            await session.execute(
+                delete(DailySignalLedger).where(
+                    DailySignalLedger.id == ledger_id
+                )
+            )
+            await session.commit()
+
+        async with sessions() as session:
+            orphan = await session.get(ForwardPaperOutcome, outcome_id)
+            assert orphan is None
     finally:
         async with sessions() as session:
             await session.execute(
