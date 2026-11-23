@@ -33,9 +33,9 @@ async def get_candles(
     when no intraday-capable provider is configured — same "honest
     unavailable, never fabricated" convention used everywhere else in this
     app, so the frontend can show a clear message instead of a broken chart."""
-    sym = symbol.upper()
-    if sym not in VALID_SYMBOLS:
-        raise HTTPException(400, detail=f"Unsupported symbol: {symbol}")
+    sym = symbol.strip().upper()
+    if not await fetcher.is_supported_market_symbol(sym):
+        raise HTTPException(400, detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}")
     iv = interval.upper()
     if iv not in VALID_INTERVALS:
         raise HTTPException(400, detail=f"Unsupported interval: {interval}")
