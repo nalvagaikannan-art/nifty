@@ -336,7 +336,20 @@ let currentSymbol = 'NIFTY';
 let currentDays = 15;
 let accuracyLoadGeneration = 0;
 
+function loadFnoAccuracySymbols() {
+    $.getJSON('/api/market/symbols').done(function(universe) {
+        const stocks = (universe && universe.stocks_available && Array.isArray(universe.stocks))
+            ? universe.stocks : [];
+        const select = $('#symbol-select');
+        let group = select.find('optgroup[data-fno-stocks="1"]');
+        if (!group.length) group = $('<optgroup label="NSE F&O Stocks" data-fno-stocks="1"></optgroup>').appendTo(select);
+        group.empty();
+        stocks.forEach(function(sym) { $('<option>').val(sym).text(sym).appendTo(group); });
+    });
+}
+
 $(document).ready(function() {
+    loadFnoAccuracySymbols();
     loadAll();
     $('#symbol-select').on('change', function() { currentSymbol = $(this).val(); loadAll(); });
     $('#days-select').on('change', function() { currentDays = parseInt($(this).val(), 10); loadAll(); });
