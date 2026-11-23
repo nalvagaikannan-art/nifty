@@ -2338,7 +2338,7 @@ class DataFetcher:
             return {"indices": indices, "stocks": [], "stocks_available": False}
 
     async def is_supported_market_symbol(self, symbol: str) -> bool:
-        """Allow core indices and only current NSE F&O stocks in the master."""
+        """Allow core indices and only current broker-master-verified NSE F&O stocks."""
         sym = str(symbol or "").strip().upper()
         if sym in {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}:
             return True
@@ -2348,7 +2348,8 @@ class DataFetcher:
             from app.services.angel_one import angel_session
             if not angel_session.is_configured:
                 return False
-            return bool(await angel_session._resolve_cash_instrument(sym))
+            stock_symbols = await angel_session.get_fno_stock_symbols()
+            return sym in {str(item).strip().upper() for item in stock_symbols}
         except Exception as exc:
             logger.warning("F&O universe validation failed for %s: %s", sym, exc)
             return False
