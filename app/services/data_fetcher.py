@@ -2324,6 +2324,19 @@ class DataFetcher:
     # 40s guarantees at least one full refresh cycle is served from cache,
     # cutting this endpoint's Angel One call volume meaningfully without
     # making the option chain noticeably less fresh.
+    async def get_market_symbol_universe(self) -> Dict:
+        """Return fixed indices plus the current broker-verified F&O stock list."""
+        indices = ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
+        try:
+            from app.services.angel_one import angel_session
+            if not angel_session.is_configured:
+                return {"indices": indices, "stocks": [], "stocks_available": False}
+            stocks = await angel_session.get_fno_stock_symbols()
+            return {"indices": indices, "stocks": stocks, "stocks_available": True}
+        except Exception as exc:
+            logger.warning("Unable to load current F&O stock universe: %s", exc)
+            return {"indices": indices, "stocks": [], "stocks_available": False}
+
     async def is_supported_market_symbol(self, symbol: str) -> bool:
         """Allow core indices and only current NSE F&O stocks in the master."""
         sym = str(symbol or "").strip().upper()
