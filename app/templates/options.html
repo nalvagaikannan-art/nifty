@@ -69,7 +69,20 @@
     let currentSymbol = 'NIFTY';
     let currentExpiry = '';
 
+    function loadFnoStockOptions(selector) {
+        $.getJSON('/api/market/symbols').done(function(universe) {
+            const stocks = (universe && universe.stocks_available && Array.isArray(universe.stocks))
+                ? universe.stocks : [];
+            const select = $(selector);
+            let group = select.find('optgroup[data-fno-stocks="1"]');
+            if (!group.length) group = $('<optgroup label="NSE F&O Stocks" data-fno-stocks="1"></optgroup>').appendTo(select);
+            group.empty();
+            stocks.forEach(function(sym) { $('<option>').val(sym).text(sym).appendTo(group); });
+        });
+    }
+
     $(document).ready(function() {
+        loadFnoStockOptions('#symbol-select');
         loadOptionChain(currentSymbol, '');
         $('#symbol-select').on('change', function() {
             currentSymbol = $(this).val();
