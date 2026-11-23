@@ -1,22 +1,9 @@
 """
-NIFTY-PRO — guarded order executor (blueprint §5)
-==================================================
-The ORIGINAL app deliberately had NO order placement. This module adds it with
-layered safety. Everything defaults to PAPER (no broker call at all).
-
-Gates for a LIVE order (all must pass, otherwise nothing is sent):
-  1. TRADING_MODE=live  AND  LIVE_TRADING_ENABLED=true
-  2. ORDER_PIN configured and sent as header X-Order-Pin
-  3. Kill switch OFF  (file KILL_SWITCH_FILE absent, runtime flag off)
-  4. qty is a multiple of the exchange lot size; lots <= MAX_LOTS_PER_ORDER
-  5. orders today < MAX_ORDERS_PER_DAY
-  6. naked SELL blocked unless ALLOW_NAKED_SELL=true (BUY hedge legs go FIRST)
-  7. free cash >= MIN_FREE_CASH_PER_SELL_LOT x lots  (configurable guard, NOT exact SPAN margin)
-Broker routing: NFO/BFO index options -> Angel One SmartAPI only. MCX commodity
-signals are IDEAS only in this build (no MCX order placement).
-Static-IP: brokers reject orders from unregistered IPs — register your server's IP
-in the broker portal. A broker rejection is returned as-is and logged.
-⚠ Broker order calls are not exercised against a live account in this build.
+NIFTY-PRO — paper-only order ledger
+=====================================
+This build records simulated paper fills only. Live broker execution is
+permanently disabled in code: environment flags and PINs cannot enable it.
+Angel One order-routing helpers fail closed before opening a broker session.
 """
 import asyncio
 import logging
@@ -172,7 +159,10 @@ async def _angel_place(o: Dict, symbol: str, spot: float = 0.0) -> Dict:
 
 
 async def execute_signal(signal: Dict, lots: int = 1, include_hedge: bool = True, pin: Optional[str] = None) -> Dict:
-    # Reject before DB access, token lookup, margin lookup, or broker calls.
+    # Preserve the emergency stop as the first gate, then reject all live
+    # execution before DB access, token lookup, margin lookup, or broker calls.
+    if kill_switch_on():
+        raise OrderRejected("KILL_SWITCH", "Kill switch ON — எல்லா ஆர்டர்களும் நிறுத்தப்பட்டுள்ளன.")
     live = _is_live(pin)
     today = await _orders_today()
     orders = validate(signal, lots, include_hedge, today)
