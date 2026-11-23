@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_USER: nifty_qa
           POSTGRES_PASSWORD: nifty_qa_only
@@ -45,6 +45,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes postgresql-client
+          pg_dump --version
+          pg_restore --version
       - name: Install application and test dependencies
         run: |
           python -m pip install --upgrade pip
