@@ -10,7 +10,7 @@ BUG FIX (2026-08-16):
   Fix: gemini-2.5-flash → gemini-2.5-flash-lite → gemini-2.0-flash
 """
 import os, json, re, logging, time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict
 import google.generativeai as genai
 from openai import AsyncOpenAI
@@ -124,8 +124,7 @@ class AIEngine:
                 await session.commit()
                 # Bound storage to the latest 2,000 events / 30 days.
                 from sqlalchemy import delete, select
-                cutoff = datetime.utcnow().replace(microsecond=0)
-                cutoff = cutoff.fromtimestamp(cutoff.timestamp() - 30 * 86400)
+                cutoff = datetime.utcnow() - timedelta(days=30)
                 await session.execute(
                     delete(AIProviderEvent).where(AIProviderEvent.timestamp < cutoff)
                 )
