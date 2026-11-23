@@ -11,17 +11,24 @@
 # from this Blueprint (no manual dashboard step needed), and
 # requirements.txt now installs asyncpg unconditionally so the connection
 # actually works the first time (review #17's exact complaint).
+#
+# IMPORTANT: Free plans below are QA/preview only, NOT production suitable:
+# Free web services spin down after 15 minutes idle and have ephemeral local
+# filesystems; Free Postgres is limited to 1 GB, expires after 30 days, and
+# has no backups. Keep these plans unchanged until explicit cost approval;
+# complete persistent QA/production validation on an approved suitable plan.
+# Source: https://render.com/docs/free
 databases:
   - name: nifty-pro-db
-    plan: free      # Render's free Postgres — fine for this app's volume;
-                     # upgrade if signal frequency/retention grows a lot.
+    plan: free      # QA/preview only: 1 GB, 30-day expiry, no backups.
+                     # Not suitable for durable paper-history/production use.
     region: singapore
 
 services:
   - type: web
     name: nifty-pro-analyzer
     runtime: python
-    plan: free
+    plan: free      # QA/preview only: spins down after 15m idle; ephemeral FS.
     region: singapore
     branch: nifty-pro-qa
     buildCommand: "pip install -r requirements.txt"
