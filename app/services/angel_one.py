@@ -875,6 +875,7 @@ class AngelOneSession:
             and row.get("exch_seg") == "NFO"
             and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
             and row.get("name")
+            and row.get("name") not in index_names
             and row.get("expiry")
             and row.get("token")
         ]
