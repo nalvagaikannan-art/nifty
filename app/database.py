@@ -6,6 +6,15 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def _normalize_async_database_url(database_url: str) -> str:
+    """Convert plain PostgreSQL URLs to SQLAlchemy's asyncpg dialect."""
+    if database_url.startswith("postgres://"):
+        return "postgresql+asyncpg://" + database_url[len("postgres://"):]
+    if database_url.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + database_url[len("postgresql://"):]
+    return database_url
+
+
 DATABASE_URL = settings.database_url
 _is_sqlite = not DATABASE_URL or DATABASE_URL.startswith("sqlite")
 
@@ -23,10 +32,7 @@ elif not _is_sqlite:
     # just one layer deeper — the driver was missing there, the DIALECT
     # marker is missing here). Rewrite to the asyncpg dialect transparently
     # so a bare Render/Heroku-style URL just works.
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len("postgres://"):]
-    elif DATABASE_URL.startswith("postgresql://"):
-        DATABASE_URL = "postgresql+asyncpg://" + DATABASE_URL[len("postgresql://"):]
+    DATABASE_URL = _normalize_async_database_url(DATABASE_URL)
 
 engine_kwargs = {"echo": False}
 if _is_sqlite:
