@@ -1,6 +1,7 @@
 """DataFetcher F&O-stock routing tests; no live broker/network access."""
 import pytest
 from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
 
 from app.exceptions import MarketDataError
 from app.services.data_fetcher import DataFetcher
@@ -19,8 +20,9 @@ async def test_supported_market_symbol_rejects_stock_when_instrument_master_unav
     fetcher = DataFetcher()
 
     with patch(
-        "app.services.angel_one.angel_session.is_configured",
-        False,
+        "app.services.data_fetcher.angel_session",
+        SimpleNamespace(is_configured=False),
+        create=True,
     ):
         assert not await fetcher.is_supported_market_symbol("RELIANCE")
 
