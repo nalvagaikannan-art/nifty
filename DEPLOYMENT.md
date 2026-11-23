@@ -1,188 +1,116 @@
-# GitHub + Render Deployment Guide — AI NIFTY Option Analyzer Pro
+# NIFTY-PRO — QA மற்றும் Production Deployment Gate
 
-இந்த guide உங்கள் project-ஐ **GitHub-க்கு push** செய்து, **Render-ல் live-ஆக deploy** செய்ய தேவையான அனைத்து steps-ஐயும் கொடுக்கிறது. இரண்டு Render deploy methods கொடுக்கப்பட்டுள்ளன — Blueprint (fast, recommended) மற்றும் Manual (full control).
+இந்த ஆவணம் `nalvagaikannan-art/nifty` repository-யின் `nifty-pro-qa` branch-க்கானது.
+இது பழைய Oracle production service அல்லது பழைய Render service-ஐ மாற்றுவதற்கான வழிமுறை அல்ல.
 
----
+## தற்போதைய நிலை
 
-## தேவையானவை (Prerequisites)
+- QA branch: `nifty-pro-qa`
+- Render Blueprint service பெயர்: `nifty-pro-analyzer`
+- Render database பெயர்: `nifty-pro-db`
+- Application mode: paper-only
+- Broker live order placement: தடைசெய்யப்பட்டுள்ளது
+- QA CI: 590 passed, 0 failed, 1 warning (2026-11-23 run #45121152611)
+- Render resources: இன்னும் உருவாக்கப்படவில்லை
+- Production deployment: செய்யப்படவில்லை
 
-- [GitHub](https://github.com) account
-- [Render](https://render.com) account (GitHub-உடன் நேரடியாக sign up செய்யலாம்)
-- குறைந்தது ஒரு AI provider API key — Gemini/OpenAI/DeepSeek-ல் ஏதேனும் ஒன்று
-  (Gemini key இலவசமாக [aistudio.google.com/apikey](https://aistudio.google.com/apikey)-ல் கிடைக்கும்)
-- `git` உங்கள் கணினியில் install செய்யப்பட்டிருக்க வேண்டும் (`git --version` எனச் சரிபார்க்கவும்)
+**முக்கியம்:** இந்த ஆவணத்தைப் படிப்பது அல்லது GitHub-ல் commit செய்வது deploy அனுமதி அல்ல. கீழே உள்ள gates அனைத்தும் நிறைவேறும் வரை Render Dashboard-ல் Blueprint-க்கு Apply செய்யக்கூடாது; புதிய service/database உருவாக்கக்கூடாது.
 
----
+## 1. GitHub source சரிபார்ப்பு
 
-## Part 1 — GitHub-க்கு Push செய்தல்
+Repository: `nalvagaikannan-art/nifty`
 
-### Step 1.1 — Local-ல் Git repo initialize செய்யவும்
+Deploy செய்ய வேண்டிய branch: `nifty-pro-qa` மட்டும்.
 
-Project folder-ஐ unzip செய்த பின், அந்த folder-க்குள் சென்று:
+GitHub Actions workflow:
+`.github/workflows/nifty-pro-qa-tests.yml`
 
-```bash
-cd ai_nifty_analyzer
-git init
-git add .
-git status
-```
+ஒவ்வொரு deploy candidate commit-க்கும்:
+1. Branch head SHA-ஐ உறுதிப்படுத்தவும்.
+2. அந்த SHA-க்கு உரிய `NIFTY-PRO QA Tests` workflow வெற்றியடைந்திருக்க வேண்டும்.
+3. முழு pytest suite-ல் தோல்வி பூஜ்ஜியம் இருக்க வேண்டும்.
+4. Workflow முடிந்த பின் branch-ல் புதிய commit வந்திருந்தால் பழைய CI முடிவை deploy approval ஆகப் பயன்படுத்தக்கூடாது.
 
-`git status` output-ல் `.env` **தென்படக்கூடாது** (`.gitignore`-ல் ஏற்கனவே exclude செய்யப்பட்டுள்ளது). `.env.example` மட்டும் தென்பட வேண்டும் — அது சரி, அதில் real secrets இல்லை.
+QA CI வெற்றி மட்டும் live market-data validation அல்லது production readiness நிரூபிக்காது.
 
-```bash
-git commit -m "Initial commit: AI NIFTY Option Analyzer Pro"
-```
+## 2. Render Blueprint — அமைப்பு
 
-### Step 1.2 — GitHub-ல் புதிய repository உருவாக்கவும்
+`render.yaml`-ல் வரையறுக்கப்பட்ட தனித்த வளங்கள்:
 
-1. [github.com/new](https://github.com/new)-க்குச் செல்லவும்
-2. Repository name: `ai-nifty-analyzer` (அல்லது உங்கள் விருப்பம்)
-3. **Public** அல்லது **Private** — உங்கள் விருப்பம் (Private recommended, code-ல் உங்கள் architecture இருப்பதால்)
-4. **"Add a README file" checkbox-ஐ UNCHECK செய்யவும்** (ஏற்கனவே README.md உள்ளது)
-5. **Create repository** click செய்யவும்
+| Resource | பெயர் | Branch / Database |
+|---|---|---|
+| Web Service | `nifty-pro-analyzer` | `nifty-pro-qa` |
+| PostgreSQL | `nifty-pro-db` | தனி NIFTY-PRO DB |
 
-### Step 1.3 — Local repo-ஐ GitHub-உடன் இணைக்கவும்
+Blueprint-ல் தற்போது Free plans குறிப்பிடப்பட்டுள்ளன. அவை production market-data collector மற்றும் தொடர்ச்சியான paper-history சேமிப்புக்கு ஏற்றவை என்று கருதக்கூடாது. Free service sleep, database expiry, retention, backup, uptime மற்றும் persistent storage தேவைகள் தீர்மானிக்கப்பட வேண்டும்.
 
-GitHub, repo உருவான பின் ஒரு URL தரும் (இது போல இருக்கும்):
+**செலவு அனுமதி இல்லாமல் paid plan தேர்வு செய்யவோ, Free plan-ஐ production-க்கு ஏற்றது எனக் கருதவோ கூடாது.** Render plan/pricing/limits-ஐ deployment நாளில் அதிகாரப்பூர்வ ஆவணத்தில் மீண்டும் சரிபார்க்க வேண்டும்.
 
-```bash
-git remote add origin https://github.com/<உங்கள்-username>/ai-nifty-analyzer.git
-git branch -M main
-git push -u origin main
-```
+## 3. முதல் deploy-க்கு முன் தேவையான secrets
 
-Username/password கேட்டால் — GitHub password ஏற்காது, **Personal Access Token** தேவை:
-[github.com/settings/tokens](https://github.com/settings/tokens) → "Generate new token (classic)" → `repo` scope select செய்யவும் → அந்த token-ஐ password-க்கு பதிலாக paste செய்யவும்.
+Render Dashboard-ல் secrets ஆக மட்டும் அமைக்க வேண்டும்; Git-ல் உண்மையான values சேர்க்கக்கூடாது.
 
-✅ **சரிபார்க்க:** உங்கள் GitHub repo பக்கத்தை refresh செய்யவும் — எல்லா files-ம் தெரிய வேண்டும், `.env` தெரியக்கூடாது.
+- `APP_AUTH_USERNAME` — தனிப்பட்ட strong username
+- `APP_AUTH_PASSWORD` — நீளமான, unique password
+- குறைந்தது ஒரு AI provider key: `GEMINI_API_KEY`, `OPENAI_API_KEY`, அல்லது `DEEPSEEK_API_KEY`
+- Angel One / Zerodha credentials — live data feed தேவை மற்றும் பாதுகாப்பு ஆய்வு முடிந்த பின் மட்டுமே
 
----
+Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகிர வேண்டாம். Production authentication secrets இல்லையெனில் middleware fail-closed ஆக இருக்க வேண்டும்.
 
-## Part 2 — Render-ல் Deploy செய்தல்
+## 4. கட்டாய safety configuration
 
-### Method A — Blueprint மூலம் (Fast, ஒரே click)
+கீழே உள்ள மதிப்புகள் deploy candidate-ல் மாற்றமின்றி இருக்க வேண்டும்:
 
-இந்த repo-வில் ஏற்கனவே `render.yaml` இருக்கிறது — Render அதை படித்து தானாகவே எல்லா settings-ஐயும் configure செய்யும்.
-
-1. [dashboard.render.com](https://dashboard.render.com)-ல் login செய்யவும்
-2. **New +** → **Blueprint** click செய்யவும்
-3. உங்கள் GitHub account-ஐ connect செய்யவும் (முதல் முறை என்றால் permission கேட்கும்)
-4. `ai-nifty-analyzer` repo-ஐ select செய்யவும்
-5. Render, `render.yaml`-ஐ கண்டுபிடித்து preview காட்டும் — **Apply** click செய்யவும்
-6. Deploy தொடங்கும் (2-4 நிமிடங்கள் ஆகலாம்)
-
-Deploy ஆன பின், **Step 2.3 (Environment Variables)**-க்குச் செல்லவும் — API keys set செய்ய வேண்டும்.
-
-### Method B — Manual Setup (Full control)
-
-1. [dashboard.render.com](https://dashboard.render.com) → **New +** → **Web Service**
-2. GitHub repo-ஐ connect செய்து select செய்யவும்
-3. கீழ்க்கண்டவாறு நிரப்பவும்:
-
-| Field | Value |
-|---|---|
-| **Name** | `ai-nifty-analyzer` |
-| **Region** | Singapore (இந்தியாவுக்கு அருகில்) |
-| **Branch** | `main` |
-| **Runtime** | Python 3 |
-| **Build Command** | `pip install -r requirements.txt` |
-| **Start Command** | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| **Instance Type** | Free (testing-க்கு) |
-
-4. **Create Web Service** click செய்யவும் (இப்போது build fail ஆகலாம் — env vars இன்னும் set ஆகவில்லை, அது Step 2.3-ல் சரி செய்யப்படும்)
-
-### Step 2.3 — Environment Variables Set செய்யவும்
-
-Render dashboard-ல் உங்கள் service page-க்குச் சென்று → **Environment** tab:
-
-இதை ஒவ்வொன்றாக **Add Environment Variable** மூலம் சேர்க்கவும் (உங்கள் `.env.example`-ஐ reference ஆகப் பயன்படுத்தவும்):
-
-| Key | Value |
+| Variable | Required value |
 |---|---|
 | `ENV` | `production` |
-| `AI_PROVIDER` | `gemini` (அல்லது `openai`/`deepseek`) |
-| `GEMINI_API_KEY` | உங்கள் real key |
-| `SQLITE_DB_PATH` | `./data/analyzer.db` |
-| `CACHE_TTL` | `60` |
-| `LOG_LEVEL` | `INFO` |
-| `LOG_FILE` | `./logs/app.log` |
-| `CORS_ALLOWED_ORIGINS` | `*` (deploy ஆன பின் உங்கள் actual URL-க்கு மாற்றவும் — Step 2.5 பார்க்கவும்) |
-| `API_RATE_LIMIT_PER_MINUTE` | `60` |
+| `TRADING_MODE` | `paper` |
+| `LIVE_TRADING_ENABLED` | `false` |
+| `ALLOW_CRED_WRITE` | `0` |
+| `DATABASE_URL` | Blueprint-ன் `nifty-pro-db` connection |
+| `SQLITE_DB_PATH` | `./data/analyzer_pro.db` (fallback மட்டும்) |
+| `HISTORY_COLLECTOR_SYMBOLS` | `NIFTY,BANKNIFTY,FINNIFTY,SENSEX` |
+| `HISTORY_COLLECTOR_INTERVAL_MINUTES` | `5` |
 
-**⚠️ Method A (Blueprint) பயன்படுத்தினால்:** `GEMINI_API_KEY` (`sync: false` என render.yaml-ல் குறிக்கப்பட்டுள்ளதால்) dashboard-ல் manual-ஆக set செய்ய Render கேட்கும் — மற்ற variables ஏற்கனவே render.yaml-லிருந்து auto-set ஆகி இருக்கும்.
+`/healthz` மட்டும் public health endpoint. மற்ற application routes Basic Authentication மூலம் பாதுகாக்கப்பட வேண்டும். `/healthz` response மட்டும் app readiness, DB readiness அல்லது market-feed readiness நிரூபிக்காது.
 
-Environment variable சேர்த்த பின் **Save Changes** click செய்யவும் — Render தானாக redeploy செய்யும்.
+## 5. Deploy approval gates — அனைத்தும் PASS ஆக வேண்டும்
 
-### Step 2.4 — Deployment Logs சரிபார்க்கவும்
+- [ ] Latest candidate SHA-க்கு GitHub Actions full suite PASS.
+- [ ] Auth tests: unauthenticated request 401; production credentials missing 503.
+- [ ] Live execution tests: PIN இருந்தாலும் broker order call சாத்தியமில்லை.
+- [ ] Paper ledger tests PASS; paper records DB-ல் நிலையாக எழுதப்படுகின்றன.
+- [ ] NIFTY, BANKNIFTY, FINNIFTY, SENSEX — ஒவ்வொன்றுக்கும் spot, option-chain, expiry, lot-size, quote freshness, exchange/token mapping சரிபார்க்கப்பட்டது.
+- [ ] SENSEX BFO mapping மற்றும் NSE symbols-க்கு NFO mapping தனித்தனியாக சரிபார்க்கப்பட்டது.
+- [ ] Live-feed validation உண்மையான provider data-வில் செய்யப்பட்டது; fixtures/mock மட்டும் போதாது.
+- [ ] Database migration/initialization, backup மற்றும் restore rehearsal முடிந்தது.
+- [ ] Render service/database plan, monthly cost, region, retention மற்றும் persistence உறுதி செய்யப்பட்டது.
+- [ ] Authentication, secrets, CORS, rate limit, logs மற்றும் health checks இறுதி ஆய்வு முடிந்தது.
+- [ ] Rollback procedure மற்றும் rollback trigger சோதிக்கப்பட்டது.
+- [ ] Deploy செய்யும் நாள் weekday; NSE market close ஆன பிறகு 15:30 IST கடந்திருக்க வேண்டும்.
 
-**Logs** tab-ல்:
-- `Starting AI NIFTY Option Analyzer Pro` தெரிய வேண்டும்
-- Errors எதுவும் இல்லாமல் `Application startup complete` தெரிய வேண்டும்
+ஏதேனும் ஒரு symbol தோல்வியடைந்தால் deploy நிறுத்தப்பட வேண்டும். Deploy பிந்தைய முதல் 10 trading days real-money trading செய்யக்கூடாது; நான்கு symbols-ல் ஏதேனும் ஒன்று தோல்வியடைந்தால் rollback செய்ய வேண்டும். Paper validation முடியும் வரை project status `Preparation` ஆகவே இருக்கும்.
 
-Errors இருந்தால் **Troubleshooting** section பார்க்கவும் (கீழே).
+## 6. Deployment செய்யும் நாளில் மட்டும்
 
-### Step 2.5 — உங்கள் Live URL-ஐ Test செய்யவும்
+மேலுள்ள எல்லா gates-க்கும் ஆதாரம் கிடைத்து, செலவு/வள ஒப்புதல் கிடைத்த பின்:
 
-Render, ஒரு URL தரும்: `https://ai-nifty-analyzer.onrender.com` போல.
+1. GitHub branch மற்றும் commit SHA-ஐ இறுதியாக உறுதிப்படுத்தவும்.
+2. Render Dashboard-ல் சரியான repository மற்றும் `nifty-pro-qa` branch தேர்ந்தெடுக்கப்பட்டுள்ளதா உறுதிப்படுத்தவும்.
+3. Blueprint preview-ல் உருவாகும் resource பெயர்கள் `nifty-pro-analyzer`, `nifty-pro-db` என்பதையும் பழைய வளங்கள் எதுவும் மாற்றப்படவில்லை என்பதையும் சரிபார்க்கவும்.
+4. Secrets மற்றும் paper-only environment values அமைக்கப்பட்டுள்ளதா உறுதிப்படுத்தவும்.
+5. தனி deployment approval கிடைத்த பிறகே Apply செய்யவும்.
+6. Deploy முடிந்ததும் auth, DB, health, four-symbol live-feed மற்றும் paper-ledger smoke tests செய்யவும்.
+7. தோல்வி ஏற்பட்டால் உடனடியாக rollback; பழைய Oracle/Render service-ஐத் தொடவோ மாற்றவோ கூடாது.
 
-1. அதை browser-ல் திறக்கவும் — Home page தெரிய வேண்டும்
-2. `/dashboard` பக்கத்திற்குச் சென்று NIFTY/BANKNIFTY/FINNIFTY cards load ஆகிறதா பார்க்கவும்
-3. **இப்போது `CORS_ALLOWED_ORIGINS`-ஐ actual URL-க்கு update செய்யவும்:**
-   Environment tab-ல் `CORS_ALLOWED_ORIGINS` = `https://ai-nifty-analyzer.onrender.com` எனச் சரி செய்யவும் → Save
+## 7. பழைய வழிமுறைகள் செல்லாது
 
----
+இந்த NIFTY-PRO split-க்கு கீழே உள்ள பழைய பொதுவான வழிமுறைகளைப் பயன்படுத்த வேண்டாம்:
 
-## Part 3 — Deploy-க்குப் பின் முக்கியமான குறிப்புகள்
+- `main` branch-க்கு push செய்வது
+- `ai-nifty-analyzer` என்ற பழைய service பெயர்
+- `./data/analyzer.db` என்ற பழைய production DB பாதை
+- CORS-ஐ `*` ஆக நிரந்தரமாக வைப்பது
+- முதலில் deploy செய்து பின்னர் secrets/auth அமைப்பது
 
-### ⚠️ SQLite Data Ephemeral (Free Tier)
-
-Render-ன் **free web service disk permanent இல்லை** — ஒவ்வொரு redeploy/restart-லும் `./data/analyzer.db`, `./logs/app.log` **அழிந்துவிடும்**. இது history/analysis tracking-ஐ பாதிக்கும்.
-
-**தீர்வுகள் (தேர்ந்தெடுக்கவும்):**
-1. **Render Persistent Disk** (paid plan தேவை) — `render.yaml`-ல் commented-out `disk:` block-ஐ uncomment செய்யவும்
-2. **Render Postgres** (recommended, production-க்கு better) — Render dashboard-ல் **New +** → **PostgreSQL** உருவாக்கி, கிடைக்கும் "Internal Database URL"-ஐ `SQLITE_DB_PATH`-க்கு பதிலாக DB connection string-ஆக பயன்படுத்த `app/database.py`-ஐ Postgres driver (`asyncpg`)-க்கு switch செய்ய வேண்டும் (`CODE_REVIEW.md`-ல் இது open item-ஆக குறிப்பிடப்பட்டுள்ளது)
-
-### ⚠️ NSE IP Block Risk on Shared Hosting
-
-Render-ன் free/shared IP ranges-லிருந்து NSE-க்கு requests அனுப்பும்போது, **NSE அதிக அளவில் block செய்யக்கூடும்** (பல apps ஒரே IP range பகிர்வதால்). இது code bug இல்லை — hosting infrastructure-ன் இயல்பான limitation. Logs-ல் `NSEBlockedError` அடிக்கடி வந்தால், இதுவே காரணமாக இருக்கலாம்.
-
-### Free Tier Cold Start
-
-Render free web services 15 நிமிடம் idle-ஆக இருந்தால் **sleep** ஆகும் — அடுத்த request வரும்போது எழுப்ப ~30-50 விநாடிகள் ஆகும். Production-க்கு paid plan (`Starter` அல்லது மேல்) பரிந்துரைக்கப்படுகிறது.
-
-### Auto-Deploy on Git Push
-
-Default-ஆக, Render `main` branch-க்கு நீங்கள் push செய்யும் ஒவ்வொரு முறையும் **தானாக redeploy** செய்யும். இதை Render dashboard → **Settings** → **Auto-Deploy** toggle மூலம் மாற்றலாம்.
-
-புதிய code மாற்றங்களை deploy செய்ய:
-```bash
-git add .
-git commit -m "உங்கள் மாற்றம் பற்றிய குறிப்பு"
-git push
-```
-
----
-
-## Troubleshooting
-
-| பிரச்சனை | காரணம் / தீர்வு |
-|---|---|
-| Build fails: `ModuleNotFoundError` | `requirements.txt`-ல் அந்த package இல்லை — சேர்த்து மீண்டும் push செய்யவும் |
-| `Application failed to respond` | Start command-ல் `$PORT` சரியாக இருக்கிறதா பார்க்கவும் — Render dynamic port assign செய்யும், hardcoded `8000` வேலை செய்யாது |
-| `AIProviderError: No AI provider API key configured` | Environment tab-ல் `GEMINI_API_KEY` (அல்லது தேர்ந்தெடுத்த provider key) சரியாக set ஆகவில்லை |
-| Dashboard cards load ஆகவில்லை, CORS error console-ல் | `CORS_ALLOWED_ORIGINS` உங்கள் actual Render URL-உடன் match ஆகிறதா சரிபார்க்கவும் |
-| `NSEBlockedError` frequent-ஆக logs-ல் | மேலே "NSE IP Block Risk" பார்க்கவும் — hosting IP-ன் limitation |
-| Restart-க்குப் பின் dashboard history காலியாக உள்ளது | மேலே "SQLite Data Ephemeral" பார்க்கவும் |
-
----
-
-## Summary Checklist
-
-- [ ] `git init` → `git add .` → `git commit`
-- [ ] GitHub-ல் repo உருவாக்கி `git push`
-- [ ] `.env` repo-வில் இல்லை என சரிபார்த்தது
-- [ ] Render-ல் Blueprint அல்லது Manual Web Service உருவாக்கியது
-- [ ] `GEMINI_API_KEY` (அல்லது தேர்ந்தெடுத்த provider) set செய்தது
-- [ ] Deploy logs-ல் errors இல்லை என சரிபார்த்தது
-- [ ] Live URL open ஆகி dashboard load ஆகிறது என சரிபார்த்தது
-- [ ] `CORS_ALLOWED_ORIGINS`-ஐ actual URL-க்கு update செய்தது
+புதிய மாற்றங்கள் அனைத்தும் `nifty-pro-qa` branch-ல் மட்டுமே செய்யப்பட வேண்டும். பழைய Oracle production branch/service மற்றும் பழைய Render service/database தனியாகவே இருக்க வேண்டும்.
