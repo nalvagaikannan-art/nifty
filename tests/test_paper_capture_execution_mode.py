@@ -3,8 +3,9 @@ import asyncio
 import pytest
 
 
+@pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
 @pytest.mark.asyncio
-async def test_paper_capture_scheduler_uses_capture_only_route(monkeypatch):
+async def test_paper_capture_scheduler_uses_capture_only_route(monkeypatch, symbol):
     from app.services import history_collector
 
     captured = {}
@@ -42,17 +43,18 @@ async def test_paper_capture_scheduler_uses_capture_only_route(monkeypatch):
 
     result = await history_collector._run_strategy_recommendation_for_capture(
         analyzer=object(),
-        symbol="NIFTY",
+        symbol=symbol,
     )
 
     assert result is True
-    assert captured["symbol"] == "NIFTY"
+    assert captured["symbol"] == symbol
     assert captured["ai"] is None
     assert captured["_capture_only"] is True
 
 
+@pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
 @pytest.mark.asyncio
-async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monkeypatch):
+async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monkeypatch, symbol):
     import app.api.routes.strategy as strategy
 
     class FakeAnalyzer:
@@ -90,7 +92,7 @@ async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monke
     saved_states = []
 
     async def fake_load(symbol):
-        assert symbol == "NIFTY"
+        assert symbol == symbol
         return None
 
     def fake_lifecycle(decision, persisted_state, now):
@@ -169,7 +171,7 @@ async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(monke
     monkeypatch.setattr(strategy, "get_ai_analysis", unexpected_call)
 
     result = await strategy.strike_recommendation(
-        symbol="NIFTY",
+        symbol=symbol,
         analyzer=FakeAnalyzer(),
         ai=None,
         _capture_only=True,
