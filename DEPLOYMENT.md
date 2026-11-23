@@ -10,7 +10,7 @@
 - Render database பெயர்: `nifty-pro-db`
 - Application mode: paper-only
 - Broker live order placement: தடைசெய்யப்பட்டுள்ளது
-- QA CI: 590 passed, 0 failed, 1 warning (2026-11-23 run #45121152611)
+- QA CI: 598 passed, 0 failed, 1 warning (2026-11-23 run #45123248227; commit `893b966f1a7e7bc959bdf4c267a6448abd03d8a5`)
 - Render resources: இன்னும் உருவாக்கப்படவில்லை
 - Production deployment: செய்யப்படவில்லை
 
@@ -53,7 +53,8 @@ Render Dashboard-ல் secrets ஆக மட்டும் அமைக்க 
 - `APP_AUTH_USERNAME` — தனிப்பட்ட strong username
 - `APP_AUTH_PASSWORD` — நீளமான, unique password
 - குறைந்தது ஒரு AI provider key: `GEMINI_API_KEY`, `OPENAI_API_KEY`, அல்லது `DEEPSEEK_API_KEY`
-- Angel One / Zerodha credentials — live data feed தேவை மற்றும் பாதுகாப்பு ஆய்வு முடிந்த பின் மட்டுமே
+- `ANGEL_API_KEY`, `ANGEL_CLIENT_ID`, `ANGEL_PASSWORD`, `ANGEL_TOTP_SECRET` — Angel One live market-data login (Render Blueprint-ல் secret placeholders சேர்க்கப்பட்டுள்ளன; values Render Dashboard-ல் மட்டும் அமைக்கவும்)
+- Zerodha credentials — தேவையானால் மட்டும்; live data fallback ஆய்வு முடிந்த பின் அமைக்கவும்
 
 Secrets-ஐ chat, commit, logs அல்லது screenshots-ல் பகிர வேண்டாம். Production authentication secrets இல்லையெனில் middleware fail-closed ஆக இருக்க வேண்டும்.
 
