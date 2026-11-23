@@ -4,6 +4,7 @@ This module records observations only. It never places, simulates, or journals
 broker orders. It deliberately leaves DailySignalLedger.outcome untouched.
 """
 import math
+from collections import defaultdict
 from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -542,6 +543,14 @@ async def _grade_matured_horizon(session, ledger_row, outcome, event_ts, target_
     return outcome.status
 
 
+def _group_existing_outcomes(existing_rows):
+    """Index outcome rows by ledger ID in one pass."""
+    grouped = defaultdict(list)
+    for item in existing_rows:
+        grouped[item.ledger_id].append(item)
+    return grouped
+
+
 async def process_forward_paper_outcomes(*, now=None, ledger_limit=MAX_LEDGER_ROWS):
     """Create pending horizon rows, then grade them once their quote window closes.
 
@@ -595,6 +604,7 @@ async def process_forward_paper_outcomes(*, now=None, ledger_limit=MAX_LEDGER_RO
             (item.ledger_id, item.horizon_minutes): item
             for item in existing_rows
         }
+        existing_by_ledger_id = _group_existing_outcomes(existing_rows)
 
         changed = False
 
@@ -603,10 +613,9 @@ async def process_forward_paper_outcomes(*, now=None, ledger_limit=MAX_LEDGER_RO
         # row is legacy/unapproved; only approved V2 rows may create new ones.
         for ledger_row in reversed(ledger_rows):
             eligible = _eligible(ledger_row)
-            existing_for_entry = [
-                item for (ledger_id, _), item in existing_by_key.items()
-                if ledger_id == ledger_row.id
-            ]
+            existing_for_entry = existing_by_ledger_id.get(
+                ledger_row.id, ()
+            )
 
             if not eligible and not existing_for_entry:
                 continue
