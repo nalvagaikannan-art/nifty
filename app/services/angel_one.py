@@ -512,6 +512,152 @@ class AngelOneSession:
             and str(row.get("name") or "").strip().upper() not in index_names
         })
 
+    async def get_fno_stock_market_scan(self, cache_ttl: float = 45.0) -> Dict:
+        """Batch-scan NSE F&O cash EQ quotes; no per-symbol LTP fan-out.
+
+        Uses the verified instrument master and Angel FULL quote endpoint in
+        batches of at most 50. The result is a market-move shortlist only:
+        it deliberately does not claim relative volume, news, fundamentals,
+        or an options entry recommendation.
+        """
+        now_mono = time.monotonic()
+        cached = getattr(self, "_fno_stock_scan_cache", None)
+        cached_at = getattr(self, "_fno_stock_scan_cache_ts", 0.0)
+        if isinstance(cached, dict) and now_mono - cached_at < cache_ttl:
+            return {**cached, "cache_hit": True}
+
+        await self.ensure_session()
+        await self._ensure_instruments()
+        index_names = set(self.NFO_SYMBOL_MAP.values())
+        fno_names = {
+            str(row.get("name") or "").strip().upper()
+            for row in (self._instruments or [])
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "NFO"
+            and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
+            and str(row.get("name") or "").strip().upper() not in index_names
+        }
+        cash_by_symbol: Dict[str, str] = {}
+        ambiguous = set()
+        for row in (self._instruments or []):
+            if not isinstance(row, dict) or row.get("exch_seg") != "NSE":
+                continue
+            tradingsymbol = str(row.get("symbol") or "").strip().upper()
+            if not tradingsymbol.endswith("-EQ"):
+                continue
+            name = tradingsymbol[:-3]
+            token = str(row.get("token") or "").strip()
+            if name not in fno_names or not token:
+                continue
+            if name in cash_by_symbol:
+                ambiguous.add(name)
+            else:
+                cash_by_symbol[name] = token
+        for name in ambiguous:
+            cash_by_symbol.pop(name, None)
+
+        instruments = [
+            {"symbol": symbol, "token": cash_by_symbol[symbol]}
+            for symbol in sorted(fno_names)
+            if symbol in cash_by_symbol
+        ]
+        if not instruments:
+            raise AngelOneError("No unambiguous NSE cash EQ tokens found for F&O stocks")
+        if not hasattr(self._obj, "getMarketData"):
+            raise AngelOneError("Angel One SDK getMarketData is unavailable; stock scan cannot run")
+
+        quote_by_token: Dict[str, Dict] = {}
+        for offset in range(0, len(instruments), 50):
+            batch = instruments[offset:offset + 50]
+            call_name = f"fno_stock_scan:batch{offset // 50 + 1}"
+            await self._throttle(call_name=call_name)
+            failed_obj = self._obj
+            try:
+                body = await asyncio.to_thread(
+                    self._obj.getMarketData,
+                    mode="FULL",
+                    exchangeTokens={"NSE": [item["token"] for item in batch]},
+                )
+            except Exception as exc:
+                if self._is_rate_limit_error(exc):
+                    self._record_rate_limit(call_name)
+                    raise AngelOneError(f"Angel One rate limit during F&O stock scan: {exc}")
+                if self._is_invalid_token(exc) and await self._recover_invalid_token(failed_obj=failed_obj):
+                    await self._throttle(call_name=call_name + ":retry")
+                    try:
+                        body = await asyncio.to_thread(
+                            self._obj.getMarketData,
+                            mode="FULL",
+                            exchangeTokens={"NSE": [item["token"] for item in batch]},
+                        )
+                    except Exception as retry_exc:
+                        if self._is_rate_limit_error(retry_exc):
+                            self._record_rate_limit(call_name + ":retry")
+                        raise AngelOneError(f"Angel One F&O stock scan retry failed: {retry_exc}")
+                else:
+                    raise AngelOneError(f"Angel One F&O stock scan failed: {exc}")
+
+            if not isinstance(body, dict) or body.get("status") is False:
+                error_text = (body or {}).get("errorcode") or (body or {}).get("message") or "Invalid quote response"
+                if self._is_rate_limit_error(error_text):
+                    self._record_rate_limit(call_name)
+                raise AngelOneError(f"Angel One F&O stock scan response error: {error_text}")
+            data_block = body.get("data")
+            fetched = data_block.get("fetched", []) if isinstance(data_block, dict) else data_block
+            if not isinstance(fetched, list):
+                raise AngelOneError("Unexpected Angel One F&O stock scan quote response")
+            for quote in fetched:
+                if not isinstance(quote, dict):
+                    continue
+                token = str(quote.get("symbolToken") or quote.get("symboltoken") or "").strip()
+                if token:
+                    quote_by_token[token] = quote
+
+        observed_at = now_ist().isoformat()
+        rows = []
+        for item in instruments:
+            quote = quote_by_token.get(item["token"])
+            if not quote:
+                rows.append({"symbol": item["symbol"], "available": False, "reason": "quote_missing"})
+                continue
+            ltp = safe_float(quote.get("ltp"))
+            close = safe_float(quote.get("close"))
+            if ltp <= 0 or close <= 0:
+                rows.append({"symbol": item["symbol"], "available": False, "reason": "invalid_ltp_or_close"})
+                continue
+            rows.append({
+                "symbol": item["symbol"],
+                "available": True,
+                "ltp": ltp,
+                "open": safe_float(quote.get("open")),
+                "high": safe_float(quote.get("high")),
+                "low": safe_float(quote.get("low")),
+                "close": close,
+                "change": round(ltp - close, 2),
+                "change_percent": round((ltp - close) / close * 100.0, 2),
+                "trade_volume": safe_float(quote.get("tradeVolume") or quote.get("volume")),
+                "total_buy_quantity": safe_float(quote.get("totalBuyQuan")),
+                "total_sell_quantity": safe_float(quote.get("totalSellQuan")),
+                "source": "angel_one_marketdata_full",
+                "observed_at": observed_at,
+            })
+        rows.sort(key=lambda row: row.get("change_percent", 0.0), reverse=True)
+        result = {
+            "available": True,
+            "source": "angel_one_marketdata_full",
+            "observed_at": observed_at,
+            "universe_count": len(fno_names),
+            "cash_token_count": len(instruments),
+            "quoted_count": sum(1 for row in rows if row.get("available")),
+            "missing_count": sum(1 for row in rows if not row.get("available")),
+            "batch_size": 50,
+            "rows": rows,
+            "cache_hit": False,
+        }
+        self._fno_stock_scan_cache = result
+        self._fno_stock_scan_cache_ts = time.monotonic()
+        return result
+
     async def _resolve_cash_instrument(self, symbol: str) -> Optional[Dict]:
         """Resolve an NSE F&O stock's cash EQ instrument without broker quotes."""
         sym = str(symbol or "").strip().upper()
