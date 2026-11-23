@@ -58,8 +58,10 @@ async def _check_symbol(symbol: str) -> str:
         return sym
     try:
         from app.services.angel_one import angel_session
-        if angel_session.is_configured and await angel_session._resolve_cash_instrument(sym):
-            return sym
+        if angel_session.is_configured:
+            stock_symbols = await angel_session.get_fno_stock_symbols()
+            if sym in {str(item).strip().upper() for item in stock_symbols}:
+                return sym
     except Exception as exc:
         logger.warning("Accuracy F&O symbol validation failed for %s: %s", sym, exc)
     raise HTTPException(400, detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}")
@@ -95,7 +97,7 @@ async def signal_accuracy(
     days: int = Query(15, ge=1, le=60),
     horizon_minutes: int = Query(60, description=f"one of {HORIZONS_MINUTES}"),
 ):
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         compute_signal_accuracy(sym, days=days, horizon_minutes=horizon_minutes),
         endpoint="signals", sym=sym,
@@ -113,7 +115,7 @@ async def premium_accuracy(
     """Review #1: option-PREMIUM-based accuracy (would buying the actually-
     recommended contract have made money), as a distinct metric from
     /signals' spot-direction accuracy — see signal_accuracy.compute_premium_accuracy."""
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         compute_premium_accuracy(sym, days=days, horizon_minutes=horizon_minutes),
         endpoint="premium", sym=sym,
@@ -134,7 +136,7 @@ async def ledger_performance(
     premium returns and reports exact rupee P&L only when the entry ledger
     snapshot contains the frozen historical lot size.
     """
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         compute_ledger_performance(
             sym,
@@ -159,7 +161,7 @@ async def session_study(
     14:40 IST late-session actionable-signal bucket without changing strategy
     scores, gates, lifecycle state, or the production DailySignalLedger.
     """
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         compute_session_study(sym, days=days),
         endpoint="session-study",
@@ -186,7 +188,7 @@ async def confidence_calibration(
     (Note: /api/analysis/ai/{symbol} already attaches this automatically
     under `confidence_calibration` — this endpoint is for looking it up
     standalone, e.g. for a different confidence value than the live one.)"""
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         calibrate_confidence(sym, confidence, days=days, horizon_minutes=horizon_minutes),
         endpoint="calibration", sym=sym,
@@ -198,7 +200,7 @@ async def confidence_calibration(
 @router.get("/status/{symbol}", response_model=AccuracyStatusResponse)
 async def accuracy_status(symbol: str):
     """Persistence diagnostics: proves whether history is actually being stored."""
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     try:
         async with AsyncSessionLocal() as session:
             market_count = await session.scalar(
@@ -257,7 +259,7 @@ async def call_tracker(
 
     sym = str(symbol or "ALL").strip().upper()
     if sym != "ALL":
-        sym = _check_symbol(sym)
+        sym = await _check_symbol(sym)
 
     return await _run_with_timeout(
         compute_call_tracker(sym, days=days),
