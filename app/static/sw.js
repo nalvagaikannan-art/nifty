@@ -74,29 +74,16 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // HTML pages — network first, cache fallback.
-  // BUG FIX (2026-08-22): if the network fetch failed AND there was no
-  // cached copy either, `caches.match()` resolves to `undefined` —
-  // respondWith(undefined) is itself a rejection (a Response is required),
-  // producing the same "network error response" failure this whole file is
-  // being fixed for. Fall back to a minimal offline page instead of
-  // `undefined` so that never happens.
+  // Protected HTML pages are network-only. Never cache authenticated pages:
+  // an offline cache must not become an authentication bypass.
   if (event.request.headers.get('accept')?.includes('text/html')) {
     event.respondWith(
-      fetch(event.request)
-        .then(response => {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          return response;
-        })
-        .catch(() =>
-          caches.match(event.request).then(cached =>
-            cached || new Response(
-              '<h1>Offline</h1><p>No connection and no cached copy of this page yet.</p>',
-              { status: 503, headers: { 'Content-Type': 'text/html' } }
-            )
-          )
+      fetch(event.request).catch(() =>
+        new Response(
+          '<h1>Offline</h1><p>Reconnect to sign in and use NIFTY-PRO.</p>',
+          { status: 503, headers: { 'Content-Type': 'text/html' } }
         )
+      )
     );
     return;
   }
