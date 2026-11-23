@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     # "settings-இல் இருக்கணும்" comment — now actually wired through config.
     default_capital: int = Field(200000, alias="DEFAULT_CAPITAL")
 
+    # Application access control (required in production; secrets live in host env only).
+    app_auth_username: Optional[str] = Field(None, alias="APP_AUTH_USERNAME")
+    app_auth_password: Optional[str] = Field(None, alias="APP_AUTH_PASSWORD")
+
     # ── NIFTY-PRO: sell-signal engine / commodities / news / order execution ──
     # SAFETY DEFAULTS: paper mode, live disabled, PIN required, naked sell blocked.
     trading_mode:          str            = Field("paper", alias="TRADING_MODE")            # paper | live
