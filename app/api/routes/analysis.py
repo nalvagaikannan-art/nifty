@@ -11,6 +11,13 @@ from app.services.history_service import save_analysis_result
 import logging
 
 router = APIRouter()
+
+@router.get("/ai-status")
+async def ai_provider_status(ai: AIEngine = Depends(get_ai_engine)):
+    """Report provider readiness without exposing credentials or making a paid call."""
+    return ai.readiness_status()
+
+
 logger = logging.getLogger(__name__)
 
 
