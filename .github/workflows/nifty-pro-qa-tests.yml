@@ -17,6 +17,20 @@ jobs:
     name: Python test suite
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nifty_qa
+          POSTGRES_PASSWORD: nifty_qa_only
+          POSTGRES_DB: nifty_qa_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nifty_qa -d nifty_qa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out QA branch
         uses: actions/checkout@v4
@@ -38,5 +52,6 @@ jobs:
           ALLOW_CRED_WRITE: "0"
           APP_AUTH_USERNAME: qa-user
           APP_AUTH_PASSWORD: qa-only-test-password
+          POSTGRES_TEST_URL: postgresql+asyncpg://nifty_qa:nifty_qa_only@127.0.0.1:5432/nifty_qa_test
         run: |
           python -m pytest -q
