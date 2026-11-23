@@ -1318,6 +1318,50 @@ class AngelLiveFeed:
 
             return result
 
+    def _option_stream_status(self, now=None) -> dict:
+        """Return per-symbol option subscription and live-tick diagnostics."""
+        current = time.time() if now is None else float(now)
+        result = {}
+
+        with self._lock:
+            for symbol in self.SYMBOL_TOKENS:
+                tokens = self._option_tokens_by_symbol.get(symbol, set())
+                symbol_ticks = [
+                    tick
+                    for tick in self._option_ticks.values()
+                    if str(tick.get("symbol", "")).upper() == symbol
+                ]
+                latest = max(
+                    symbol_ticks,
+                    key=lambda tick: float(tick.get("received_at") or 0.0),
+                    default=None,
+                )
+
+                received_age = None
+                exchange_age = None
+                if latest is not None:
+                    received_at = latest.get("received_at")
+                    exchange_ts = latest.get("exchange_timestamp")
+                    if isinstance(received_at, (int, float)) and received_at > 0:
+                        received_age = round(current - float(received_at), 1)
+                    if isinstance(exchange_ts, (int, float)) and exchange_ts > 0:
+                        exchange_age = round(current - (float(exchange_ts) / 1000.0), 1)
+
+                fresh = (
+                    received_age is not None
+                    and exchange_age is not None
+                    and 0 <= received_age <= self.LIVE_TICK_MAX_AGE_SEC
+                    and 0 <= exchange_age <= self.LIVE_TICK_MAX_AGE_SEC
+                )
+                result[symbol] = {
+                    "subscribed_tokens": len(tokens),
+                    "tick_count": len(symbol_ticks),
+                    "latest_tick_age_sec": received_age,
+                    "latest_exchange_age_sec": exchange_age,
+                    "fresh": fresh,
+                }
+
+        return result
     def status(self) -> dict:
         now = time.time()
 
@@ -1385,17 +1429,14 @@ class AngelLiveFeed:
 
             # OPTION_WS_PATCH_20260923
             "option_stream": {
-                "tick_count":
-                    len(self._option_ticks),
+                "tick_count": len(self._option_ticks),
                 "tokens_by_symbol": {
                     symbol: len(tokens)
-                    for symbol, tokens
-                    in self._option_tokens_by_symbol.items()
+                    for symbol, tokens in self._option_tokens_by_symbol.items()
                 },
-                "last_refresh_at":
-                    self._option_last_refresh_at,
-                "last_error":
-                    self._option_last_error,
+                "by_symbol": self._option_stream_status(now),
+                "last_refresh_at": self._option_last_refresh_at,
+                "last_error": self._option_last_error,
             },
         }
 
