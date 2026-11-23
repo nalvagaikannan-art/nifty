@@ -32,6 +32,37 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+ANGEL_LIVE_FEED_RETRY_INTERVAL_SEC = 60
+
+
+async def _start_angel_live_feed_with_retry(angel_live_feed):
+    """Retry initial Angel WebSocket startup only during NSE market hours."""
+    while True:
+        if not is_market_hours_ist():
+            await asyncio.sleep(ANGEL_LIVE_FEED_RETRY_INTERVAL_SEC)
+            continue
+
+        try:
+            started = await angel_live_feed.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Angel live feed startup attempt failed; REST remains available: %s",
+                exc,
+            )
+        else:
+            if started:
+                logger.info("Angel live feed startup succeeded")
+                return
+            logger.warning(
+                "Angel live feed startup returned false; retrying in %ss",
+                ANGEL_LIVE_FEED_RETRY_INTERVAL_SEC,
+            )
+
+        await asyncio.sleep(ANGEL_LIVE_FEED_RETRY_INTERVAL_SEC)
+
+
 class _HealthCheckFilter(logging.Filter):
     """Drops uvicorn access-log lines for the bare health-check path '/' —
     Render polls this every ~5s and it drowns out real request/app logs.
@@ -102,21 +133,12 @@ async def lifespan(app: FastAPI):
     from app.services.angel_live_feed import angel_live_feed
 
     if angel_session.is_configured:
-        # Start Angel One WebSocket LTP feed independently from REST polling.
-        # The feed maintains in-memory NIFTY/BANKNIFTY/FINNIFTY ticks.
-        try:
-            ws_started = await angel_live_feed.start()
-            logger.info(
-                "Angel live feed startup result: started=%s",
-                ws_started,
-            )
-        except Exception as e:
-            # WebSocket failure must never prevent the REST-based application
-            # from starting. REST remains the primary fallback.
-            logger.warning(
-                "Angel live feed startup failed; continuing with REST: %s",
-                e,
-            )
+        # Retry initial login/feed startup independently; REST remains available.
+        # The retry coroutine only attempts login during NSE market hours and
+        # exits permanently once the feed workers have started successfully.
+        app.state.angel_live_feed_startup_task = asyncio.create_task(
+            _start_angel_live_feed_with_retry(angel_live_feed)
+        )
 
         # FIX (2026-08-26): warmup_instruments() downloads 36MB instrument
         # master. Running it immediately at startup (same moment as
@@ -190,6 +212,16 @@ async def lifespan(app: FastAPI):
         app.state.angel_warmup_task.cancel()
         try:
             await app.state.angel_warmup_task
+        except asyncio.CancelledError:
+            pass
+    # Stop pending startup retries before stopping feed workers.
+    angel_startup_task = getattr(
+        app.state, "angel_live_feed_startup_task", None
+    )
+    if angel_startup_task and not angel_startup_task.done():
+        angel_startup_task.cancel()
+        try:
+            await angel_startup_task
         except asyncio.CancelledError:
             pass
     # Stop Angel WebSocket before closing the REST/data services.
