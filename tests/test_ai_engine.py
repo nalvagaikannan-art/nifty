@@ -68,3 +68,37 @@ def test_prompt_requires_tamil_script_not_tanglish():
     )
     assert "using Tamil script" in prompt
     assert "Do NOT write Tanglish" in prompt
+
+
+def test_readiness_status_never_exposes_provider_secrets(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    monkeypatch.setattr(settings, "openai_api_key", "test-openai-secret")
+    monkeypatch.setattr(settings, "deepseek_api_key", None)
+    monkeypatch.setattr(settings, "ai_provider", "openai")
+
+    status = AIEngine().readiness_status()
+
+    assert status["ready"] is True
+    assert status["effective_provider_order"] == ["openai"]
+    assert status["configured"] == {
+        "gemini": False, "openai": True, "deepseek": False,
+    }
+    assert "test-openai-secret" not in str(status)
+    assert status["mode"] == "ai_validator_and_explainer"
+
+
+def test_gemini_key_alone_is_not_ready_when_gemini_disabled(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, "gemini_api_key", "test-gemini-secret")
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "deepseek_api_key", None)
+    monkeypatch.setattr(settings, "ai_provider", "gemini")
+    monkeypatch.setattr("app.services.ai_engine.GEMINI_ENABLED", False)
+
+    status = AIEngine().readiness_status()
+
+    assert status["configured"]["gemini"] is True
+    assert status["gemini_enabled"] is False
+    assert status["ready"] is False
+    assert status["effective_provider_order"] == []
