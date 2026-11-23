@@ -32,10 +32,8 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - name: Check out QA branch
+      - name: Check out tested commit
         uses: actions/checkout@v4
-        with:
-          ref: nifty-pro-qa
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
