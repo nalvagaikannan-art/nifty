@@ -1928,6 +1928,18 @@ class AngelOneSession:
 
         lot_size = next(iter(lot_sizes)) if len(lot_sizes) == 1 else 0
 
+        # Tick size is also contract metadata; expose it only when every
+        # selected CE/PE instrument agrees on one positive value.
+        tick_sizes = set()
+        for _r in selected_rows:
+            try:
+                _tick = float(_r.get("tick_size") or _r.get("ticksize") or 0)
+            except (TypeError, ValueError):
+                _tick = 0.0
+            if _tick > 0:
+                tick_sizes.add(_tick)
+        tick_size = next(iter(tick_sizes)) if len(tick_sizes) == 1 else 0.0
+
         logger.info(
             f"Angel One option chain built: {len(chain_rows)} strikes "
             f"for {sym} {chosen_expiry}, lot_size={lot_size}"
@@ -1938,6 +1950,7 @@ class AngelOneSession:
             "all_expiries":     expiries,
             "underlying_price": spot,
             "lot_size":         lot_size,
+            "tick_size":        tick_size,
             "data":             chain_rows,
             "data_source":      "angel_one_composed",
         }
