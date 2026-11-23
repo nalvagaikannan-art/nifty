@@ -22,7 +22,7 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -64,6 +64,20 @@ def _normalize_expiry(e: str) -> str:
         except ValueError:
             continue
     return e  # unparseable — return as-is
+
+
+def _valid_option_expiries(expiries: List[str]) -> List[str]:
+    """Keep current/future contracts using the exchange's IST calendar date."""
+    today = now_ist().date()
+    valid = []
+    for expiry in expiries:
+        try:
+            normalized = _normalize_expiry(expiry)
+            if normalized and date.fromisoformat(normalized) >= today:
+                valid.append(expiry)
+        except (TypeError, ValueError):
+            logger.debug("Angel One: unable to parse option expiry %r", expiry)
+    return valid
 
 
 class AngelOneError(Exception):
@@ -1242,25 +1256,7 @@ class AngelOneSession:
             key=self._expiry_sort_key,
         )
 
-        from datetime import date
-
-        today = date.today()
-        valid_expiries = []
-
-        for e in expiries:
-            try:
-                e_norm = _normalize_expiry(e)
-                if not e_norm:
-                    continue
-                e_date = date.fromisoformat(e_norm)
-                if e_date >= today:
-                    valid_expiries.append(e)
-            except Exception:
-                logger.debug(
-                    "Angel One: unable to parse expiry %r "
-                    "while resolving option tokens",
-                    e,
-                )
+        valid_expiries = _valid_option_expiries(expiries)
 
         if not valid_expiries:
             raise AngelOneError(
@@ -1423,24 +1419,7 @@ class AngelOneSession:
         # of the sorted expiry list. Never use expiries[0] blindly because an
         # expired contract can make getMarketData return AB4030 / zero quotes.
 
-        from datetime import date
-
-        today = date.today()
-
-        valid_expiries = []
-        for e in expiries:
-            try:
-                e_norm = _normalize_expiry(e)
-                if not e_norm:
-                    continue
-                e_date = date.fromisoformat(e_norm)
-                if e_date >= today:
-                    valid_expiries.append(e)
-            except Exception:
-                logger.debug(
-                    "Angel One: unable to parse expiry %r while filtering expired contracts",
-                    e,
-                )
+        valid_expiries = _valid_option_expiries(expiries)
 
         if not valid_expiries:
             raise AngelOneError(
