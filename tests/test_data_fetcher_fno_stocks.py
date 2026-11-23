@@ -20,7 +20,7 @@ async def test_supported_market_symbol_rejects_stock_when_instrument_master_unav
     fetcher = DataFetcher()
 
     with patch(
-        "app.services.data_fetcher.angel_session",
+        "app.services.angel_one.angel_session",
         SimpleNamespace(is_configured=False),
         create=True,
     ):
