@@ -12,24 +12,31 @@
 # requirements.txt now installs asyncpg unconditionally so the connection
 # actually works the first time (review #17's exact complaint).
 databases:
-  - name: ai-nifty-db
+  - name: nifty-pro-db
     plan: free      # Render's free Postgres — fine for this app's volume;
                      # upgrade if signal frequency/retention grows a lot.
     region: singapore
 
 services:
   - type: web
-    name: ai-nifty-analyzer
+    name: nifty-pro-analyzer
     runtime: python
     plan: free
     region: singapore
-    branch: main
+    branch: nifty-pro-qa
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     healthCheckPath: /
     envVars:
       - key: ENV
         value: production
+      # NIFTY-PRO is paper-only; the executor also enforces this in code.
+      - key: TRADING_MODE
+        value: paper
+      - key: LIVE_TRADING_ENABLED
+        value: "false"
+      - key: ALLOW_CRED_WRITE
+        value: "0"
       - key: AI_PROVIDER
         value: gemini
       - key: GEMINI_API_KEY
@@ -39,10 +46,10 @@ services:
       - key: DEEPSEEK_API_KEY
         sync: false
       - key: SQLITE_DB_PATH
-        value: ./data/analyzer.db   # only used as a fallback if DATABASE_URL below is ever removed
+        value: ./data/analyzer_pro.db   # only used as a fallback if DATABASE_URL below is ever removed
       - key: DATABASE_URL
         fromDatabase:
-          name: ai-nifty-db
+          name: nifty-pro-db
           property: connectionString
       - key: CACHE_TTL
         value: "60"
