@@ -273,6 +273,14 @@ def _iron_condor(
         ),
     }
 
+# PRICE_LEVELS_ATR_20261015
+# Old values (stop 0.3xATR, T1 0.5xATR, T2 1.0xATR) put the stop inside normal
+# 5-minute noise. Multipliers below are in units of ATR.
+PRICE_LEVEL_SL_ATR = 1.0
+PRICE_LEVEL_T1_ATR = 1.0
+PRICE_LEVEL_T2_ATR = 2.0
+
+
 def generate_price_levels(market_data: Dict) -> Optional[Dict]:
     """
     Spot-level Entry Zone / Target 1 / Target 2 / Stop-Loss / Invalidation
@@ -311,14 +319,14 @@ def generate_price_levels(market_data: Dict) -> Optional[Dict]:
     entry_zone = {"low": round(spot - entry_buffer, 1), "high": round(spot + entry_buffer, 1)}
 
     if side == "CALL":
-        target_1 = round(spot + atr * 0.5, 1)
-        target_2 = round(spot + atr * 1.0, 1)
-        stop_loss = round(spot - atr * 0.3, 1)
+        target_1 = round(spot + atr * PRICE_LEVEL_T1_ATR, 1)
+        target_2 = round(spot + atr * PRICE_LEVEL_T2_ATR, 1)
+        stop_loss = round(spot - atr * PRICE_LEVEL_SL_ATR, 1)
         invalidation_level = round(supports[0], 1) if supports else stop_loss
     else:  # PUT
-        target_1 = round(spot - atr * 0.5, 1)
-        target_2 = round(spot - atr * 1.0, 1)
-        stop_loss = round(spot + atr * 0.3, 1)
+        target_1 = round(spot - atr * PRICE_LEVEL_T1_ATR, 1)
+        target_2 = round(spot - atr * PRICE_LEVEL_T2_ATR, 1)
+        stop_loss = round(spot + atr * PRICE_LEVEL_SL_ATR, 1)
         invalidation_level = round(resistances[0], 1) if resistances else stop_loss
 
     return {

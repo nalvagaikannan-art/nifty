@@ -103,6 +103,116 @@ def bearish_market_data(spot: float = 24650.0) -> dict:
     return d
 
 
+
+def _chain_quality_fixture(oi=True, volume=True):
+    return {
+        "available": True,
+        "status": "adequate" if oi else "limited",
+        "oi_usable": oi,
+        "volume_usable": volume,
+        "oi_coverage_pct": 100 if oi else 40,
+        "volume_coverage_pct": 100 if volume else 10,
+        "reason": None if oi else "OI coverage below threshold",
+        "volume_reason": None if volume else "Volume coverage below threshold",
+    }
+
+
+def test_quality_low_oi_disables_option_flow_availability():
+    from app.services.decision_engine import _data_availability
+    d = {"pcr": 1.45, "option_chain_quality": _chain_quality_fixture(oi=False)}
+    a = _data_availability(d, "placeholder")
+    assert all(not a[k] for k in (
+        "pcr", "oi_change", "max_pain", "call_writing", "put_writing"
+    ))
+
+
+def test_quality_low_volume_only_disables_writing_availability():
+    from app.services.decision_engine import _data_availability
+    d = {
+        "pcr": 1.45,
+        "oi_change": {"ce_change": 100, "pe_change": 150},
+        "option_chain_quality": _chain_quality_fixture(volume=False),
+    }
+    a = _data_availability(d, "placeholder")
+    assert all(a[k] for k in ("pcr", "oi_change", "max_pain"))
+    assert not a["call_writing"]
+    assert not a["put_writing"]
+
+
+def test_quality_low_oi_neutralizes_option_flow_scores():
+    d = bullish_market_data()
+    strike = d["spot"]["price"] * 1.01
+    d["oi_summary"]["ce_max_oi_strike"] = strike
+    d["oi_change_tracked"] = {
+        "available": True,
+        "wall_evidence": {"ce": _wall_evidence(strike, 100, -10.0)},
+    }
+    d["option_chain_quality"] = _chain_quality_fixture(oi=False)
+    result = run_decision_engine(d)
+    assert all("OI quality limited" in reason for reason in result["reasons"][:5])
+    assert "Tracked CE short buildup" not in result["reasons"][3]
+
+
+def test_quality_low_volume_neutralizes_writing_scores():
+    d = bullish_market_data()
+    d["option_chain_quality"] = _chain_quality_fixture(volume=False)
+    result = run_decision_engine(d)
+    assert all("volume coverage limited" not in r.lower()
+               for r in result["reasons"][:3])
+    assert all("volume coverage limited" in r.lower()
+               for r in result["reasons"][3:5])
+
+
+def test_valid_tracked_wall_survives_low_volume_gate_but_penalty_remains():
+    from app.services.decision_engine import _data_availability
+
+    d = bullish_market_data()
+    strike = d["spot"]["price"] * 1.01
+    d["oi_summary"]["ce_max_oi_strike"] = strike
+    d["option_chain_quality"] = _chain_quality_fixture(volume=False)
+    d["oi_change_tracked"] = {
+        "available": True,
+        "wall_evidence": {"ce": _wall_evidence(strike, 100, -10.0)},
+    }
+    result = run_decision_engine(d)
+
+    assert "Tracked CE short buildup" in result["reasons"][3]
+    assert "completeness penalty retained" in result["reasons"][3].lower()
+    assert "volume coverage limited" in result["reasons"][4].lower()
+
+    availability = _data_availability(d, d.get("technical_data_source", ""))
+    assert availability["call_writing"] is False
+    assert availability["put_writing"] is False
+
+
+def test_invalid_tracked_wall_price_falls_back_to_legacy():
+    from app.services.decision_engine import _score_call_writing
+
+    summary = {
+        "ce_max_oi_strike": 22700, "spot": 22622,
+        "ce_oi_chg_atm": 1200, "ce_ltp_chg_atm": None,
+    }
+    evidence = _wall_evidence(22700, 100, -10.0)
+    evidence["current_price"] = 0
+    result = _score_call_writing({
+        **summary, "_wall_evidence": {"ce": evidence}
+    })
+    assert "ATM option price change unavailable" in result[2]
+
+
+def test_quality_missing_preserves_legacy_availability():
+    from app.services.decision_engine import _data_availability
+    a = _data_availability(
+        {
+            "pcr": 1.45,
+            "oi_change": {"ce_change": 100, "pe_change": 50},
+        },
+        "placeholder",
+    )
+    assert all(a[k] for k in (
+        "pcr", "oi_change", "max_pain", "call_writing", "put_writing"
+    ))
+
 def test_strongly_bullish_conditions_produce_call_bias():
     result = run_decision_engine(bullish_market_data())
     assert result["market_bias"] == "Bullish"
@@ -344,6 +454,37 @@ def test_persistent_lifecycle_hard_gate_clears_directional_state():
     assert out["preferred_side"] == "NONE"
 
 
+def test_persistent_lifecycle_hard_gate_overrides_older_duplicate_snapshot_without_rewinding_timestamp():
+    state = {
+        "active_side": "CALL",
+        "candidate_side": "CALL",
+        "confirmations": 3,
+        "reversal_confirmations": 1,
+        "lifecycle": "HOLD_CALL",
+        "last_evaluation_at": 1100,
+        "last_confirmation_at": 900,
+    }
+
+    decision = _lifecycle_decision("CALL", 20)
+    decision["market_regime_no_trade"] = True
+
+    out, next_state = apply_persistent_signal_lifecycle(
+        decision, state, 1046
+    )
+
+    assert out["signal_lifecycle"] == "WAIT"
+    assert out["signal_active_side"] == "NONE"
+    assert out["signal_candidate"] == "NONE"
+    assert out["signal_confirmations"] == 0
+    assert out["signal_reversal_confirmations"] == 0
+    assert out["preferred_side"] == "NONE"
+
+    # The stale response is gated, but must not overwrite the newer state.
+    assert next_state["lifecycle"] == "HOLD_CALL"
+    assert next_state["active_side"] == "CALL"
+    assert next_state["last_evaluation_at"] == 1100
+
+
 # DB_MTF_LINEAGE_REGRESSION_20260930
 def test_mtf_live_valid_rejects_history_db_fallback_even_when_fresh():
     from app.services.decision_engine import _mtf_live_valid
@@ -364,3 +505,150 @@ def test_mtf_live_valid_rejects_history_db_fallback_even_when_fresh():
     }
 
     assert _mtf_live_valid(mtf) is False
+
+# OI_FALLBACK_REASON_REGRESSION_20261022
+def test_call_writing_fallback_explains_missing_price_change():
+    from app.services.decision_engine import WEIGHTS, _score_call_writing
+
+    direction, score, reason = _score_call_writing({
+        "ce_max_oi_strike": 22700,
+        "spot": 22622,
+        "ce_oi_chg_atm": 1200,
+        "ce_ltp_chg_atm": None,
+    })
+
+    assert direction == "bear"
+    assert score == int(WEIGHTS["call_writing"] * 0.5)
+    assert "ATM option price change unavailable" in reason
+    assert "proximity-only fallback" in reason
+    assert "OI change unavailable" not in reason
+
+
+def test_put_writing_fallback_explains_missing_price_change():
+    from app.services.decision_engine import WEIGHTS, _score_put_writing
+
+    direction, score, reason = _score_put_writing({
+        "pe_max_oi_strike": 22550,
+        "spot": 22622,
+        "pe_oi_chg_atm": 900,
+        "pe_ltp_chg_atm": None,
+    })
+
+    assert direction == "bull"
+    assert score == int(WEIGHTS["put_writing"] * 0.5)
+    assert "ATM option price change unavailable" in reason
+    assert "proximity-only fallback" in reason
+    assert "OI change unavailable" not in reason
+
+# TRACKED_WALL_SCORING_TESTS_20261022
+def _wall_evidence(strike, oi_change, price_change):
+    current = max(100.0, 100.0 + float(price_change))
+    previous = current - float(price_change)
+    return {
+        "available": True, "strike": strike, "oi_change": oi_change,
+        "price_change": price_change,
+        "current_price": current, "previous_price": previous,
+    }
+
+
+def test_ce_tracked_wall_short_buildup_is_used():
+    from app.services.decision_engine import WEIGHTS, _score_call_writing
+    summary = {"ce_max_oi_strike": 22700, "spot": 22622,
+               "ce_oi_chg_atm": 1200, "ce_ltp_chg_atm": None}
+    result = _score_call_writing(
+        {**summary, "_wall_evidence": {"ce": _wall_evidence(22700, 100, -10)}}
+    )
+    assert result[0] == "bear"
+    assert result[1] == WEIGHTS["call_writing"]
+    assert "Tracked CE short buildup" in result[2]
+
+
+def test_pe_tracked_wall_short_buildup_is_used():
+    from app.services.decision_engine import WEIGHTS, _score_put_writing
+    summary = {"pe_max_oi_strike": 22550, "spot": 22622,
+               "pe_oi_chg_atm": 900, "pe_ltp_chg_atm": None}
+    result = _score_put_writing(
+        {**summary, "_wall_evidence": {"pe": _wall_evidence(22550, 200, -5)}}
+    )
+    assert result[0] == "bull"
+    assert result[1] == WEIGHTS["put_writing"]
+    assert "Tracked PE short buildup" in result[2]
+
+
+def test_zero_or_unmatched_tracked_wall_does_not_override_legacy():
+    from app.services.decision_engine import WEIGHTS, _score_call_writing
+    summary = {"ce_max_oi_strike": 22700, "spot": 22622,
+               "ce_oi_chg_atm": 1200, "ce_ltp_chg_atm": None}
+    zero = _score_call_writing({
+        **summary, "_wall_evidence": {"ce": _wall_evidence(22700, 0, -10)}
+    })
+    unmatched = _score_call_writing({
+        **summary, "_wall_evidence": {"ce": _wall_evidence(22650, 100, -10)}
+    })
+    assert zero[0:2] == ("neutral", 0)
+    assert "zero OI or price change" in zero[2]
+    assert unmatched[0] == "bear"
+    assert unmatched[1] == int(WEIGHTS["call_writing"] * 0.5)
+    assert "ATM option price change unavailable" in unmatched[2]
+
+
+def test_decision_engine_passes_wall_evidence_in_summary_copy(monkeypatch):
+    import app.services.decision_engine as engine
+    data = bullish_market_data()
+    evidence = {"ce": _wall_evidence(24700, 100, -10)}
+    data["oi_change_tracked"] = {"wall_evidence": evidence}
+    seen = {}
+
+    def fake_call(summary):
+        seen["call"] = summary
+        return "neutral", 0, "test"
+
+    def fake_put(summary):
+        seen["put"] = summary
+        return "neutral", 0, "test"
+
+    monkeypatch.setattr(engine, "_score_call_writing", fake_call)
+    monkeypatch.setattr(engine, "_score_put_writing", fake_put)
+    engine.run_decision_engine(data)
+
+    assert seen["call"]["_wall_evidence"] is evidence
+    assert seen["put"]["_wall_evidence"] is evidence
+    assert "_wall_evidence" not in data["oi_summary"]
+
+def test_missing_or_none_spot_market_open_fails_closed_for_all_supported_symbols():
+    from app.services.market_regime import classify_market_regime
+
+    for symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
+        for status in ("missing", None):
+            data = bullish_market_data()
+            data["symbol"] = symbol
+
+            if status == "missing":
+                data["spot"].pop("market_open", None)
+            else:
+                data["spot"]["market_open"] = None
+
+            decision = run_decision_engine(data)
+            regime = classify_market_regime(data)
+
+            assert decision["market_open"] is False, (symbol, status)
+            assert decision["hard_gated"] is True, (symbol, status)
+            assert decision["preferred_side"] == "NONE", (symbol, status)
+            assert regime["regime"] == "NO_TRADE", (symbol, status)
+            assert regime["hard_no_trade"] is True, (symbol, status)
+
+
+def test_persistent_lifecycle_missing_market_open_fails_closed():
+    for status in ("missing", None):
+        decision = _lifecycle_decision("CALL", 20)
+
+        if status == "missing":
+            decision.pop("market_open", None)
+        else:
+            decision["market_open"] = None
+
+        out, _ = apply_persistent_signal_lifecycle(decision, {}, 1046)
+
+        assert out["preferred_side"] == "NONE", status
+        assert out["signal_lifecycle"] == "WAIT", status
+        assert out["signal_active_side"] == "NONE", status

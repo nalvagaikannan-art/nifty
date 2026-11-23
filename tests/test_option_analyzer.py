@@ -129,3 +129,87 @@ def test_pick_candidates_prefers_fresh_buildup_near_atm():
     picks = analyzer.pick_candidates(df, underlying=24600.0)
     assert picks["ce"]["strike"] == 24600.0
     assert picks["ce"]["is_atm"] is True
+
+def test_assess_chain_quality_complete_chain():
+    analyzer = OptionAnalyzer()
+    rows = [_chain_row(100 + i * 5, 1000, 1000) for i in range(12)]
+    df = analyzer.process_option_chain(_make_chain(rows))
+
+    quality = analyzer.assess_chain_quality(df)
+
+    assert quality["available"] is True
+    assert quality["status"] == "adequate"
+    assert quality["oi_coverage_pct"] == 100.0
+    assert quality["volume_coverage_pct"] == 100.0
+    assert quality["oi_usable"] is True
+    assert quality["volume_usable"] is True
+
+
+def test_assess_chain_quality_low_oi_coverage():
+    analyzer = OptionAnalyzer()
+    rows = [
+        _chain_row(
+            100 + i * 5,
+            ce_oi=1000 if i < 4 else 0,
+            pe_oi=1000 if i < 4 else 0,
+            ce_vol=100,
+            pe_vol=100,
+        )
+        for i in range(12)
+    ]
+    df = analyzer.process_option_chain(_make_chain(rows))
+
+    quality = analyzer.assess_chain_quality(df)
+
+    assert quality["oi_usable"] is False
+    assert quality["status"] == "limited"
+    assert quality["oi_coverage_pct"] < 70.0
+    assert quality["volume_usable"] is True
+
+
+def test_assess_chain_quality_low_volume_coverage():
+    analyzer = OptionAnalyzer()
+    rows = [
+        _chain_row(
+            100 + i * 5,
+            ce_oi=1000,
+            pe_oi=1000,
+            ce_vol=100 if i < 3 else 0,
+            pe_vol=100 if i < 3 else 0,
+        )
+        for i in range(12)
+    ]
+    df = analyzer.process_option_chain(_make_chain(rows))
+
+    quality = analyzer.assess_chain_quality(df)
+
+    assert quality["oi_usable"] is True
+    assert quality["volume_usable"] is False
+    assert quality["volume_coverage_pct"] < 50.0
+    assert quality["reason"] is None
+    assert quality["volume_reason"]
+
+
+def test_assess_chain_quality_sparse_strikes():
+    analyzer = OptionAnalyzer()
+    rows = [_chain_row(100 + i * 5, 1000, 1000) for i in range(3)]
+    df = analyzer.process_option_chain(_make_chain(rows))
+
+    quality = analyzer.assess_chain_quality(df)
+
+    assert quality["oi_coverage_pct"] == 100.0
+    assert quality["oi_usable"] is False
+    assert quality["volume_usable"] is False
+    assert "strikes" in quality["reason"]
+
+
+def test_assess_chain_quality_empty_chain():
+    analyzer = OptionAnalyzer()
+    df = analyzer.process_option_chain({"data": []})
+
+    quality = analyzer.assess_chain_quality(df)
+
+    assert quality["available"] is False
+    assert quality["status"] == "unavailable"
+    assert quality["oi_usable"] is False
+    assert quality["volume_usable"] is False

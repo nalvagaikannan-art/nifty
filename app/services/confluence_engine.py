@@ -341,16 +341,53 @@ def _eval_pcr(market_data: Dict) -> Dict:
 
 
 def _eval_oi_change(market_data: Dict) -> Dict:
-    oi  = market_data.get("oi_change", {})
-    ce  = oi.get("ce_change", 0)
-    pe  = oi.get("pe_change", 0)
-    w   = FACTOR_WEIGHTS["oi_change"]
-    if pe > ce and pe > 0:
-        return _factor("oi_change", "bullish", w, f"PE OI buildup (+{pe:,}) > CE — bullish pressure")
-    if ce > pe and ce > 0:
-        return _factor("oi_change", "bearish", w, f"CE OI buildup (+{ce:,}) > PE — bearish pressure")
-    return _factor("oi_change", "neutral", 0, "OI change balanced")
+    w = FACTOR_WEIGHTS["oi_change"]
 
+    # Same-session tracked OI takes priority. An unavailable tracked
+    # comparison must not be mislabeled as balanced provider OI.
+    if "oi_change_tracked" in market_data:
+        tracked = market_data.get("oi_change_tracked")
+        if not isinstance(tracked, dict) or tracked.get("available") is not True:
+            reason = (
+                tracked.get("reason") if isinstance(tracked, dict) else None
+            ) or "tracked OI reference coverage is unavailable"
+            return _factor(
+                "oi_change", "neutral", 0,
+                f"OI change unavailable ? {reason}",
+            )
+        ce_raw = tracked.get("ce_oi_change")
+        pe_raw = tracked.get("pe_oi_change")
+    else:
+        # Backward-compatible behavior for callers with no tracked-OI field.
+        provider = market_data.get("oi_change")
+        if not isinstance(provider, dict):
+            return _factor(
+                "oi_change", "neutral", 0,
+                "OI change unavailable ? no OI-change source",
+            )
+        ce_raw = provider.get("ce_change")
+        pe_raw = provider.get("pe_change")
+
+    if ce_raw is None or pe_raw is None:
+        return _factor(
+            "oi_change", "neutral", 0,
+            "OI change unavailable ? CE/PE change values are incomplete",
+        )
+
+    try:
+        ce = float(ce_raw)
+        pe = float(pe_raw)
+    except (TypeError, ValueError, OverflowError):
+        return _factor(
+            "oi_change", "neutral", 0,
+            "OI change unavailable ? CE/PE change values are invalid",
+        )
+
+    if pe > ce and pe > 0:
+        return _factor("oi_change", "bullish", w, f"PE OI buildup (+{pe:,.0f}) > CE ? bullish pressure")
+    if ce > pe and ce > 0:
+        return _factor("oi_change", "bearish", w, f"CE OI buildup (+{ce:,.0f}) > PE ? bearish pressure")
+    return _factor("oi_change", "neutral", 0, "OI change balanced")
 
 def _eval_call_writing(market_data: Dict) -> Dict:
     """Classify call positioning using OI/LTP change when available.
@@ -638,6 +675,33 @@ def _eval_price_structure(market_data: Dict) -> Dict:
 
 # ── Main Confluence Engine ────────────────────────────────────────────────
 
+def _option_chain_quality_state(market_data: Dict) -> Dict:
+    quality = market_data.get("option_chain_quality")
+    if not isinstance(quality, dict) or not quality:
+        meta = market_data.get("pcr_quality")
+        quality = meta.get("chain_quality") if isinstance(meta, dict) else None
+
+    if not isinstance(quality, dict) or not quality:
+        return {
+            "reported": False,
+            "oi_usable": True,
+            "volume_usable": True,
+            "oi_reason": "",
+            "volume_reason": "",
+        }
+
+    available = quality.get("available") is True
+    return {
+        "reported": True,
+        "oi_usable": available and quality.get("oi_usable") is True,
+        "volume_usable": available and quality.get("volume_usable") is True,
+        "oi_reason": str(quality.get("reason") or "OI coverage insufficient"),
+        "volume_reason": str(
+            quality.get("volume_reason") or "Volume coverage insufficient"
+        ),
+    }
+
+
 def run_confluence_engine(market_data: Dict) -> Dict:
     """
     18 factors evaluate செய்து confluence score return செய்கிறோம்.
@@ -664,6 +728,8 @@ def run_confluence_engine(market_data: Dict) -> Dict:
         _eval_price_structure,
     ]
 
+    quality_state = _option_chain_quality_state(market_data)
+
     factors: List[Dict] = []
     bull_score = 0.0
     bear_score = 0.0
@@ -678,6 +744,33 @@ def run_confluence_engine(market_data: Dict) -> Dict:
         except Exception as exc:
             logger.warning(f"Confluence factor {fn.__name__} error: {exc}")
             continue
+
+        if quality_state["reported"]:
+            factor_id = f.get("id")
+            withheld_reason = None
+
+            if factor_id in ("pcr", "oi_change") and not quality_state["oi_usable"]:
+                withheld_reason = (
+                    f"Option-chain quality limited; {factor_id} withheld: "
+                    f"{quality_state['oi_reason']}"
+                )
+            elif factor_id in ("call_writing", "put_writing"):
+                if not quality_state["oi_usable"]:
+                    withheld_reason = (
+                        f"Option-chain quality limited; {factor_id} withheld: "
+                        f"{quality_state['oi_reason']}"
+                    )
+                elif not quality_state["volume_usable"]:
+                    withheld_reason = (
+                        f"Option-chain quality limited; {factor_id} withheld: "
+                        f"{quality_state['volume_reason']}"
+                    )
+
+            if withheld_reason:
+                f = dict(f)
+                f["direction"] = "neutral"
+                f["score"] = 0
+                f["reason"] = withheld_reason
 
         factors.append(f)
         total_factors += 1

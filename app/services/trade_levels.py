@@ -274,6 +274,8 @@ def calculate_trade_levels(
     else:
         hold_days = max(0.0, float(assumed_hold_days))
 
+    theta_adjustment_applied = False
+
     if option_ltp > 0:
         opt_risk = round(risk_spot * eff_delta, 1)
         opt_sl   = round(option_ltp - opt_risk, 1)
@@ -302,6 +304,8 @@ def calculate_trade_levels(
         theta_note = ""
         if theta_per_day is not None and theta_per_day < 0 and hold_days > 0:
             expected_decay = round(abs(theta_per_day) * hold_days, 1)
+            if expected_decay > 0:
+                theta_adjustment_applied = True
 
             # BUY_THETA_SIGN_FIX_20260925:
             # Theta decay works AGAINST a long option.  Therefore the
@@ -410,6 +414,9 @@ def calculate_trade_levels(
         "option_t3":       opt_t3 if option_ltp > 0 else None,
         "delta_used":      round(eff_delta, 2) if option_ltp > 0 else None,
         "delta_is_real":   delta_is_real if option_ltp > 0 else None,
+        "theta_adjustment_applied": (
+            theta_adjustment_applied if option_ltp > 0 else None
+        ),
         "theta_per_day_used": theta_per_day,
         "risk_per_lot":    risk_per_lot,
         "rr_ratio":        rr_ratio,

@@ -7,6 +7,6 @@ if __name__ == "__main__":
     # env var — it changes per deploy, so it must never be hardcoded.
     # `reload=True` is a dev-only convenience and should not run in production
     # (it spawns a file-watcher process and reloads on every code change).
-    port = int(os.environ.get("PORT", 8000))
+    port = int(os.environ.get("PORT", 8001))  # NIFTY-PRO: 8001 (production keeps 8000)
     is_dev = os.environ.get("ENV", "production") == "development"
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=is_dev)

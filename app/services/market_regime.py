@@ -17,6 +17,7 @@ Output:
     preferred_strategy: str
     reasons: [str]
     no_trade: bool
+    hard_no_trade: bool
     no_trade_reason: str
 """
 
@@ -70,6 +71,7 @@ def _time_session() -> str:
     if now <= close_:
         return "CLOSING"
     return "POST_MARKET"
+
 
 
 def _market_reason_ta(reason):
@@ -170,7 +172,7 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
     spot_data    = market_data.get("spot", {}) or {}
     spot         = spot_data.get("price", 0)
     prev_close   = spot_data.get("prev_close", 0)
-    market_open  = spot_data.get("market_open", True)
+    market_open  = spot_data.get("market_open") is True
     vix          = market_data.get("vix", 15)
     adx          = tech.get("adx", 0)
     atr          = tech.get("atr", 0)
@@ -208,9 +210,10 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
             "option_selling_allowed": False,
             "preferred_strategy":    "WAIT",
             "reasons":               ["Market is closed"],
-            "reasons_ta":            ["????? ??????? ???????????????."],
-            "no_trade_reason_ta":   "????? ???????????????.",
+            "reasons_ta":            ["சந்தை தற்போது மூடப்பட்டுள்ளது."],
+            "no_trade_reason_ta":   "சந்தை மூடப்பட்டுள்ளது.",
             "no_trade":              True,
+            "hard_no_trade":         True,
             "no_trade_reason":       "Market closed",
             "session":               session,
             "days_to_expiry":        days_to_exp,
@@ -326,12 +329,18 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
     # ── Strategy implications ─────────────────────────────────────────────
     buying_regimes  = {REGIME_TREND_UP, REGIME_TREND_DOWN, REGIME_BREAKOUT, REGIME_BREAKDOWN}
     selling_regimes = {REGIME_RANGE, REGIME_LOW_VOL}
-    no_trade_regimes = {REGIME_NO_TRADE, REGIME_HIGH_VOL}
+    no_trade_regimes = {REGIME_NO_TRADE}
 
     if regime in no_trade_regimes:
         option_buying_allowed  = False
         option_selling_allowed = False
         preferred_strategy     = "NO TRADE"
+    elif regime == REGIME_HIGH_VOL:
+        # High volatility is a soft risk context for VIX 25-30.
+        # Separate VIX > 30, session and critical-data gates remain hard stops.
+        option_buying_allowed  = True
+        option_selling_allowed = True
+        preferred_strategy     = "CAUTIOUS STRATEGY - REDUCED CONFIDENCE"
     elif regime in buying_regimes:
         option_buying_allowed  = True
         option_selling_allowed = False
@@ -361,7 +370,8 @@ def classify_market_regime(market_data: Dict, confluence: Dict = None) -> Dict:
         "preferred_strategy":     preferred_strategy,
         "reasons":                reasons,
         "reasons_ta":             [_market_reason_ta(r) for r in reasons],
-        "no_trade":               no_trade or regime in no_trade_regimes,
+        "no_trade":               no_trade or regime == REGIME_NO_TRADE,
+        "hard_no_trade":          no_trade or regime == REGIME_NO_TRADE,
         "no_trade_reason":        no_trade_reason,
         "no_trade_reason_ta":     _market_reason_ta(no_trade_reason) if no_trade_reason else "",
         "session":                session,

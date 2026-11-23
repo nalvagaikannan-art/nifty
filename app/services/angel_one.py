@@ -460,6 +460,30 @@ class AngelOneSession:
         "SENSEX": "BFO",
     }
 
+    @staticmethod
+    def _is_rate_limit_error(value) -> bool:
+        """Recognize Angel One rate-limit errors across SDK and JSON paths."""
+        text = str(value).lower()
+        return any(marker in text for marker in (
+            "ab1021",
+            "too many requests",
+            "rate limit",
+            "access rate",
+            "exceeding access rate",
+            "access denied",
+        ))
+
+    def _record_rate_limit(self, call_name: str) -> None:
+        """Apply a shared cooldown so concurrent requests respect broker limits."""
+        self._rate_limit_cooldown_until = max(
+            self._rate_limit_cooldown_until,
+            time.time() + 8.0,
+        )
+        logger.warning(
+            "Angel One rate limit hit for %s ? shared 8s cooldown",
+            call_name,
+        )
+
     async def get_ltp(self, symbol: str) -> Dict:
         """Live LTP fetch — Angel One SmartAPI with one invalid-token recovery."""
         await self.ensure_session()
@@ -485,6 +509,11 @@ class AngelOneSession:
         try:
             data = await _call_ltp()
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._record_rate_limit(f"get_ltp:{symbol_upper}")
+                raise AngelOneError(
+                    f"Angel One rate limit for get_ltp:{symbol_upper}"
+                )
             if self._is_invalid_token(e):
                 logger.warning(
                     "Angel One Invalid Token on get_ltp:%s; attempting recovery",
@@ -501,6 +530,8 @@ class AngelOneSession:
                 try:
                     data = await _call_ltp()
                 except Exception as retry_error:
+                    if self._is_rate_limit_error(retry_error):
+                        self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
                     raise AngelOneError(
                         f"LTP fetch failed after session recovery for "
                         f"{symbol}: {retry_error}"
@@ -513,6 +544,11 @@ class AngelOneSession:
         # (for example: "Invalid Token").  Never call .get() on a
         # non-dict response.
         if isinstance(data, str):
+            if self._is_rate_limit_error(data):
+                self._record_rate_limit(f"get_ltp:{symbol_upper}")
+                raise AngelOneError(
+                    f"Angel One rate limit for get_ltp:{symbol_upper}"
+                )
             if self._is_invalid_token(data):
                 logger.warning(
                     "Angel One Invalid Token string response on get_ltp:%s; "
@@ -531,12 +567,19 @@ class AngelOneSession:
                 try:
                     data = await _call_ltp()
                 except Exception as retry_error:
+                    if self._is_rate_limit_error(retry_error):
+                        self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
                     raise AngelOneError(
                         f"LTP fetch failed after session recovery for "
                         f"{symbol}: {retry_error}"
                     )
 
                 if isinstance(data, str):
+                    if self._is_rate_limit_error(data):
+                        self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
+                        raise AngelOneError(
+                            f"Angel One rate limit for get_ltp:{symbol_upper}:retry"
+                        )
                     if self._is_invalid_token(data):
                         raise AngelOneError(
                             f"LTP error after session recovery for "
@@ -561,6 +604,11 @@ class AngelOneSession:
         if not data or data.get("status") is False or data.get("success") is False:
             message = data.get("message", "Unknown") if data else "No response"
 
+            if self._is_rate_limit_error(data):
+                self._record_rate_limit(f"get_ltp:{symbol_upper}")
+                raise AngelOneError(
+                    f"Angel One rate limit for get_ltp:{symbol_upper}"
+                )
             if self._is_invalid_token(data):
                 logger.warning(
                     "Angel One Invalid Token response on get_ltp:%s; "
@@ -580,12 +628,24 @@ class AngelOneSession:
                 try:
                     data = await _call_ltp()
                 except Exception as retry_error:
+                    if self._is_rate_limit_error(retry_error):
+                        self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
                     raise AngelOneError(
                         f"LTP fetch failed after session recovery for "
                         f"{symbol}: {retry_error}"
                     )
 
+                if isinstance(data, str) and self._is_rate_limit_error(data):
+                    self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
+                    raise AngelOneError(
+                        f"Angel One rate limit for get_ltp:{symbol_upper}:retry"
+                    )
                 if not data or data.get("status") is False or data.get("success") is False:
+                    if self._is_rate_limit_error(data):
+                        self._record_rate_limit(f"get_ltp:{symbol_upper}:retry")
+                        raise AngelOneError(
+                            f"Angel One rate limit for get_ltp:{symbol_upper}:retry"
+                        )
                     retry_message = (
                         data.get("message", "Unknown")
                         if data
@@ -642,6 +702,9 @@ class AngelOneSession:
         try:
             data = await _call_vix()
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._record_rate_limit("get_india_vix")
+                raise AngelOneError(f"Angel One rate limit for India VIX: {e}")
             if self._is_invalid_token(e):
                 logger.warning(
                     "Angel One Invalid Token on get_india_vix; attempting recovery"
@@ -659,6 +722,8 @@ class AngelOneSession:
                 try:
                     data = await _call_vix()
                 except Exception as retry_error:
+                    if self._is_rate_limit_error(retry_error):
+                        self._record_rate_limit("get_india_vix")
                     raise AngelOneError(
                         "India VIX fetch failed after session recovery: "
                         f"{retry_error}"
@@ -675,6 +740,9 @@ class AngelOneSession:
                 else "No response"
             )
 
+            if self._is_rate_limit_error(data):
+                self._record_rate_limit("get_india_vix")
+                raise AngelOneError(f"Angel One rate limit for India VIX: {message}")
             if self._is_invalid_token(data):
                 logger.warning(
                     "Angel One Invalid Token response on get_india_vix; "
@@ -693,12 +761,22 @@ class AngelOneSession:
                 try:
                     data = await _call_vix()
                 except Exception as retry_error:
+                    if self._is_rate_limit_error(retry_error):
+                        self._record_rate_limit("get_india_vix")
                     raise AngelOneError(
                         "India VIX fetch failed after session recovery: "
                         f"{retry_error}"
                     )
 
+                if isinstance(data, str) and self._is_rate_limit_error(data):
+                    self._record_rate_limit("get_india_vix:retry")
+                    raise AngelOneError(f"Angel One rate limit for India VIX retry: {data}")
                 if not data or data.get("status") is False:
+                    if self._is_rate_limit_error(data):
+                        self._record_rate_limit("get_india_vix:retry")
+                        raise AngelOneError(
+                            f"Angel One rate limit for India VIX retry: {data}"
+                        )
                     retry_message = (
                         data.get("message", "Unknown")
                         if data
@@ -1118,6 +1196,177 @@ class AngelOneSession:
                 continue
         return datetime.max
 
+    async def resolve_option_tokens(
+        self,
+        symbol: str,
+        expiry: Optional[str] = None,
+        strikes_each_side: Optional[int] = 10,
+        spot_price: Optional[float] = None,
+    ) -> List[Dict]:
+        """
+        Resolve option token metadata from the cached instrument master only.
+
+        IMPORTANT:
+        - No Angel market-data quote call.
+        - No getMarketData().
+        - No futures quote resolution.
+        - Keeps the same expiry and ATM +/- N strike selection semantics
+          used by get_option_chain().
+        - Intended for WebSocket subscription/token discovery.
+        """
+        await self.ensure_session()
+        await self._ensure_instruments()
+
+        if not isinstance(self._instruments, list) or not self._instruments:
+            raise AngelOneError("Instrument master not available")
+
+        sym = self.NFO_SYMBOL_MAP.get(symbol.upper(), symbol.upper())
+        derivative_exchange = self.DERIVATIVE_EXCHANGE_MAP.get(
+            symbol.upper(), "NFO"
+        )
+
+        rows = [
+            r for r in self._instruments
+            if isinstance(r, dict)
+            and r.get("name") == sym
+            and r.get("instrumenttype") == "OPTIDX"
+            and r.get("exch_seg") == derivative_exchange
+            and r.get("expiry")
+        ]
+
+        if not rows:
+            raise AngelOneError(f"No option instruments found for {sym}")
+
+        expiries = sorted(
+            {r["expiry"] for r in rows},
+            key=self._expiry_sort_key,
+        )
+
+        from datetime import date
+
+        today = date.today()
+        valid_expiries = []
+
+        for e in expiries:
+            try:
+                e_norm = _normalize_expiry(e)
+                if not e_norm:
+                    continue
+                e_date = date.fromisoformat(e_norm)
+                if e_date >= today:
+                    valid_expiries.append(e)
+            except Exception:
+                logger.debug(
+                    "Angel One: unable to parse expiry %r "
+                    "while resolving option tokens",
+                    e,
+                )
+
+        if not valid_expiries:
+            raise AngelOneError(
+                f"No current/future option expiries found for {sym}"
+            )
+
+        if expiry:
+            norm_requested = _normalize_expiry(expiry)
+            matched = next(
+                (
+                    e for e in valid_expiries
+                    if _normalize_expiry(e) == norm_requested
+                ),
+                None,
+            )
+            chosen_expiry = matched or valid_expiries[0]
+        else:
+            chosen_expiry = valid_expiries[0]
+
+        rows = [
+            r for r in rows
+            if r.get("expiry") == chosen_expiry
+        ]
+
+        if not rows:
+            raise AngelOneError(
+                f"No option rows for {sym} expiry {chosen_expiry}"
+            )
+
+        if spot_price is not None and float(spot_price) > 0:
+            spot = float(spot_price)
+        else:
+            spot_info = await self.get_ltp(symbol)
+            spot = float(spot_info["price"])
+
+        def _strike(r: Dict) -> float:
+            try:
+                return float(r.get("strike", 0)) / 100.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        all_strikes = sorted(
+            {_strike(r) for r in rows if _strike(r) > 0}
+        )
+
+        if not all_strikes:
+            raise AngelOneError(
+                f"No valid strikes parsed for {sym} {chosen_expiry}"
+            )
+
+        atm_idx = min(
+            range(len(all_strikes)),
+            key=lambda i: abs(all_strikes[i] - spot),
+        )
+
+        if strikes_each_side is None:
+            selected_strikes = set(all_strikes)
+        else:
+            lo = max(0, atm_idx - strikes_each_side)
+            hi = min(
+                len(all_strikes),
+                atm_idx + strikes_each_side + 1,
+            )
+            selected_strikes = set(all_strikes[lo:hi])
+
+        selected_rows = [
+            r for r in rows
+            if _strike(r) in selected_strikes
+            and r.get("token")
+        ]
+
+        if not selected_rows:
+            raise AngelOneError(
+                f"No option tokens resolved for {sym} {chosen_expiry}"
+            )
+
+        metadata = []
+
+        for r in selected_rows:
+            tsym = str(r.get("symbol") or "")
+            if tsym.endswith("CE"):
+                option_type = "CE"
+            elif tsym.endswith("PE"):
+                option_type = "PE"
+            else:
+                continue
+
+            metadata.append(
+                {
+                    "symbol": symbol.upper(),
+                    "token": str(r["token"]).strip(),
+                    "expiry": r.get("expiry"),
+                    "strike": _strike(r),
+                    "optionType": option_type,
+                    "tradingsymbol": tsym,
+                }
+            )
+
+        if not metadata:
+            raise AngelOneError(
+                f"No CE/PE option tokens resolved for "
+                f"{sym} {chosen_expiry}"
+            )
+
+        return metadata
+
     async def get_option_chain(
         self,
         symbol: str,
@@ -1322,6 +1571,13 @@ class AngelOneSession:
                             mode="FULL", exchangeTokens={derivative_exchange: batch}
                         )
                     except Exception as e:
+                        if self._is_rate_limit_error(e):
+                            self._record_rate_limit(
+                                f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
+                            )
+                            raise AngelOneError(
+                                f"Angel One rate limit for option-chain quotes: {e}"
+                            )
                         if not self._is_invalid_token(e):
                             raise AngelOneError(
                                 f"SDK getMarketData failed: {e}"
@@ -1351,6 +1607,10 @@ class AngelOneSession:
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
+                            if self._is_rate_limit_error(retry_error):
+                                self._record_rate_limit(
+                                    f"option_chain_quotes:{sym}:batch{i // 50 + 1}:retry"
+                                )
                             raise AngelOneError(
                                 "Option-chain quote fetch failed after "
                                 f"session recovery: {retry_error}"
@@ -1395,6 +1655,13 @@ class AngelOneSession:
                         or ""
                     )
 
+                    if self._is_rate_limit_error(error_text):
+                        self._record_rate_limit(
+                            f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
+                        )
+                        raise AngelOneError(
+                            f"Angel One rate limit for option-chain quotes: {error_text}"
+                        )
                     if self._is_invalid_token(error_text):
                         logger.warning(
                             "Angel One Invalid Token response on option-chain batch %s "
@@ -1421,6 +1688,10 @@ class AngelOneSession:
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
+                            if self._is_rate_limit_error(retry_error):
+                                self._record_rate_limit(
+                                    f"option_chain_quotes:{sym}:batch{i // 50 + 1}:retry"
+                                )
                             raise AngelOneError(
                                 "Option-chain quote fetch failed after "
                                 f"session recovery: {retry_error}"
@@ -1438,6 +1709,10 @@ class AngelOneSession:
                                 or body.get("message")
                                 or "Unknown"
                             )
+                            if self._is_rate_limit_error(retry_text):
+                                self._record_rate_limit(
+                                    f"option_chain_quotes:{sym}:batch{i // 50 + 1}:retry"
+                                )
                             raise AngelOneError(
                                 "Option-chain quote fetch failed after session "
                                 f"recovery: {retry_text}"
@@ -1746,6 +2021,9 @@ class AngelOneSession:
                 )
 
             except Exception as e:
+                if self._is_rate_limit_error(e):
+                    self._record_rate_limit(f"futures_ltp:{sym}")
+                    return None
                 if self._is_invalid_token(e):
                     logger.warning(
                         "Angel One Invalid Token on futures LTP for %s; "
@@ -1768,6 +2046,9 @@ class AngelOneSession:
                                 exchangeTokens={derivative_exchange: [token]},
                             )
                         except Exception as retry_error:
+                            if self._is_rate_limit_error(retry_error):
+                                self._record_rate_limit(f"futures_ltp:{sym}:retry")
+                                return None
                             if self._is_invalid_token(retry_error):
                                 logger.warning(
                                     "Futures LTP retry still has Invalid Token "
@@ -1828,6 +2109,9 @@ class AngelOneSession:
                     or ""
                 )
 
+                if self._is_rate_limit_error(error_text):
+                    self._record_rate_limit(f"futures_ltp:{sym}")
+                    return None
                 if self._is_invalid_token(error_text):
                     logger.warning(
                         "Angel One Invalid Token response on futures LTP "
@@ -1850,6 +2134,14 @@ class AngelOneSession:
                                 mode="LTP",
                                 exchangeTokens={derivative_exchange: [token]},
                             )
+
+                            if (
+                                isinstance(retry_body, dict)
+                                and retry_body.get("status") is False
+                                and self._is_rate_limit_error(retry_body)
+                            ):
+                                self._record_rate_limit(f"futures_ltp:{sym}:retry")
+                                return None
 
                             if (
                                 isinstance(retry_body, dict)
@@ -1915,6 +2207,9 @@ class AngelOneSession:
             )
 
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._record_rate_limit(f"futures_ltp_fallback:{sym}")
+                return None
             if self._is_invalid_token(e):
                 logger.warning(
                     "Angel One Invalid Token on futures ltpData fallback "
@@ -1938,6 +2233,10 @@ class AngelOneSession:
                         )
 
                     except Exception as retry_error:
+                        if self._is_rate_limit_error(retry_error):
+                            self._record_rate_limit(
+                                f"futures_ltp_fallback:{sym}:retry"
+                            )
                         logger.debug(
                             "Futures ltpData retry failed for %s: %s",
                             sym,
@@ -1965,6 +2264,9 @@ class AngelOneSession:
                 or ""
             )
 
+            if self._is_rate_limit_error(error_text):
+                self._record_rate_limit(f"futures_ltp_fallback:{sym}")
+                return None
             if self._is_invalid_token(error_text):
                 logger.warning(
                     "Angel One Invalid Token response on futures "
@@ -1995,9 +2297,18 @@ class AngelOneSession:
                         ):
                             data = retry_data
                         else:
+                            if (
+                                isinstance(retry_data, dict)
+                                and self._is_rate_limit_error(retry_data)
+                            ):
+                                self._record_rate_limit(
+                                    f"futures_ltp_fallback:{sym}:retry"
+                                )
                             return None
 
                     except Exception as retry_error:
+                        if self._is_rate_limit_error(retry_error):
+                            self._record_rate_limit(f"futures_ltp_fallback:{sym}:retry")
                         logger.debug(
                             "Futures ltpData response retry failed "
                             "for %s: %s",
@@ -2068,15 +2379,7 @@ class AngelOneSession:
         }
 
         def _is_rate_limit(value) -> bool:
-            text = str(value).lower()
-            return any(marker in text for marker in (
-                "ab1021",
-                "too many requests",
-                "rate limit",
-                "access rate",
-                "exceeding access rate",
-                "access denied",
-            ))
+            return self._is_rate_limit_error(value)
 
         async def _call_candle_api():
             # Serialize the complete historical broker transaction.
@@ -2134,12 +2437,17 @@ class AngelOneSession:
             else:
                 priority = get_angel_call_priority()
 
-                # Background history collection must never poison the
-                # foreground broker path with a global cooldown.
+                # Background rate limits still fail fast without retry.
+                # Because this is the same SmartAPI session, briefly cool
+                # down subsequent calls to protect foreground requests too.
                 if priority == ANGEL_PRIORITY_BACKGROUND:
+                    self._rate_limit_cooldown_until = max(
+                        self._rate_limit_cooldown_until,
+                        time.time() + 8.0,
+                    )
                     logger.warning(
                         "Angel One background rate limit hit for %s — "
-                        "skipping retry/cooldown",
+                        "shared 8s cooldown; skipping retry",
                         label or token,
                     )
                     raise AngelOneError(
@@ -2241,9 +2549,13 @@ class AngelOneSession:
                 priority = get_angel_call_priority()
 
                 if priority == ANGEL_PRIORITY_BACKGROUND:
+                    self._rate_limit_cooldown_until = max(
+                        self._rate_limit_cooldown_until,
+                        time.time() + 8.0,
+                    )
                     logger.warning(
                         "Angel One background rate limit response for %s — "
-                        "skipping retry/cooldown",
+                        "shared 8s cooldown; skipping retry",
                         label or token,
                     )
                     raise AngelOneError(
@@ -2339,6 +2651,8 @@ class AngelOneSession:
             # FIX (event-loop block): offload blocking SDK call.
             resp = await asyncio.to_thread(self._obj.position)
         except Exception as e:
+            if self._is_rate_limit_error(e):
+                self._record_rate_limit("positions")
             raise AngelOneError(f"Positions fetch failed: {e}")
 
         _t_position = time.perf_counter()
@@ -2352,6 +2666,8 @@ class AngelOneSession:
         )
 
         if not resp or resp.get("status") is False:
+            if self._is_rate_limit_error(resp):
+                self._record_rate_limit("positions")
             raise AngelOneError(
                 f"Positions error: {resp.get('message', 'Unknown') if resp else 'No response'}"
             )

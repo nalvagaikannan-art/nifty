@@ -297,22 +297,69 @@ def build_tamil_indicators(market_data: Dict, decision: Dict) -> List[Dict]:
     out.append(_item("pcr", "⚖️", "புட்-கால் விகிதம் (PCR)", f"{pcr:.3f}" if pcr > 0 else "N/A", d, ex))
 
     # 2. OI Change
-    ce_chg = oi_change.get("ce_change", 0)
-    pe_chg = oi_change.get("pe_change", 0)
-    if pe_chg > ce_chg and pe_chg > 0:
-        d = "bull"
-        ex = (f"இன்னிக்கு Put side-ல Open Interest (+{pe_chg:,}) Call side-ஐ விட அதிகமா "
-              f"கூடி இருக்கு. அதாவது support level-ல bulls confidence-ஆ position போட்டு "
-              f"இருக்காங்க — bullish signal.")
-    elif ce_chg > pe_chg and ce_chg > 0:
-        d = "bear"
-        ex = (f"இன்னிக்கு Call side-ல Open Interest (+{ce_chg:,}) Put side-ஐ விட அதிகமா "
-              f"கூடி இருக்கு. அதாவது resistance level-ல bears confidence-ஆ position போட்டு "
-              f"இருக்காங்க — bearish signal.")
+    # A present tracked-OI contract is authoritative; never fall back to
+    # provider zeros when that same-session comparison is unavailable.
+    oi_available = False
+    ce_chg = None
+    pe_chg = None
+    ce_raw = None
+    pe_raw = None
+    oi_reason = "same-session reference data is unavailable or incomplete"
+
+    if "oi_change_tracked" in market_data:
+        tracked_oi = market_data.get("oi_change_tracked")
+        if isinstance(tracked_oi, dict) and tracked_oi.get("available") is True:
+            ce_raw = tracked_oi.get("ce_oi_change")
+            pe_raw = tracked_oi.get("pe_oi_change")
+            if ce_raw is None or pe_raw is None:
+                oi_reason = "tracked CE/PE OI-change values are incomplete"
+        elif isinstance(tracked_oi, dict):
+            oi_reason = str(tracked_oi.get("reason") or oi_reason)
+    elif isinstance(oi_change, dict):
+        # Backward compatibility only when the tracked contract is absent.
+        ce_raw = oi_change.get("ce_change")
+        pe_raw = oi_change.get("pe_change")
+        if ce_raw is None or pe_raw is None:
+            oi_reason = "legacy CE/PE OI-change values are incomplete"
     else:
-        d, ex = "neutral", "CE/PE Open Interest change இரண்டு பக்கமும் சமமா இருக்கு, தெளிவான திசை இல்ல."
+        oi_reason = "legacy OI-change data is unavailable"
+
+    if ce_raw is not None and pe_raw is not None:
+        try:
+            ce_number = float(ce_raw)
+            pe_number = float(pe_raw)
+            ce_integer = int(ce_number)
+            pe_integer = int(pe_number)
+            if ce_number != ce_integer or pe_number != pe_integer:
+                raise ValueError("OI changes must be whole numbers")
+            ce_chg = ce_integer
+            pe_chg = pe_integer
+            oi_available = True
+        except (TypeError, ValueError, OverflowError):
+            oi_reason = "tracked/provider CE/PE OI-change values are invalid"
+
+    if oi_available:
+        if pe_chg > ce_chg and pe_chg > 0:
+            d = "bull"
+            ex = (f"இன்னிக்கு Put side-ல Open Interest (+{pe_chg:,}) Call side-ஐ விட அதிகமா "
+                  f"கூடி இருக்கு. அதாவது support level-ல bulls confidence-ஆ position போட்டு "
+                  f"இருக்காங்க — bullish signal.")
+        elif ce_chg > pe_chg and ce_chg > 0:
+            d = "bear"
+            ex = (f"இன்னிக்கு Call side-ல Open Interest (+{ce_chg:,}) Put side-ஐ விட அதிகமா "
+                  f"கூடி இருக்கு. அதாவது resistance level-ல bears confidence-ஆ position போட்டு "
+                  f"இருக்காங்க — bearish signal.")
+        else:
+            d, ex = "neutral", "CE/PE Open Interest change இரண்டு பக்கமும் சமமா இருக்கு, தெளிவான திசை இல்ல."
+        oi_display = f"CE {ce_chg:+,} / PE {pe_chg:+,}"
+    else:
+        d, ex = "neutral", (
+            "OI change unavailable: " + oi_reason +
+            ". Zero is not evidence of neutral OI flow."
+        )
+        oi_display = "N/A"
     out.append(_item("oi_change", "📊", "ஓபன் இன்ட்ரெஸ்ட் மாற்றம் (OI Change)",
-                      f"CE {ce_chg:+,} / PE {pe_chg:+,}", d, ex))
+                      oi_display, d, ex))
 
     # 3. Max Pain
     if max_pain > 0:

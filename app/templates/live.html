@@ -16,7 +16,7 @@
 
     <!-- LIVE CHART -->
     <div class="card" style="margin-bottom:1rem;">
-        <h3>📈 Live Price (5-min)</h3>
+        <h3>📈 நேரடி விலை</h3>
         <div id="liveChart" style="height:280px;"></div>
         <div id="liveChartMsg" style="display:none;font-size:0.85rem;color:var(--text2);text-align:center;padding:1rem 0;"></div>
     </div>
@@ -194,49 +194,268 @@ function renderFii(fiiNet, diiNet) {
 }
 
 let liveChartDrawn = false;
+let liveChartInterval = 'FIVE_MINUTE';
+let liveChartRequestSeq = 0;
+let liveChartSymbol = '';
+
+function ensureLiveChartToolbar() {
+    const chart = document.getElementById('liveChart');
+    if (!chart || !chart.parentNode) return false;
+
+    let toolbar = document.getElementById('liveChartToolbar');
+    if (!toolbar) {
+        toolbar = document.createElement('div');
+        toolbar.id = 'liveChartToolbar';
+        toolbar.className = 'live-chart-toolbar';
+
+        const title = document.createElement('strong');
+        title.className = 'live-chart-title';
+        title.textContent = 'விலை மெழுகுவர்த்தி';
+
+        const status = document.createElement('span');
+        status.id = 'liveChartStatus';
+        status.className = 'live-chart-status';
+        status.textContent = 'தரவு பெறத் தயாராக உள்ளது';
+
+        const controls = document.createElement('div');
+        controls.className = 'live-chart-intervals';
+        controls.setAttribute('aria-label', 'Chart timeframe');
+
+        [
+            { value: 'FIVE_MINUTE', label: '5 நிமிடம்' },
+            { value: 'FIFTEEN_MINUTE', label: '15 நிமிடம்' }
+        ].forEach(function(option) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'live-chart-interval';
+            button.dataset.interval = option.value;
+            button.textContent = option.label;
+            button.setAttribute('aria-pressed', 'false');
+
+            button.addEventListener('click', function() {
+                const nextInterval = this.dataset.interval;
+                if (!nextInterval || nextInterval === liveChartInterval) return;
+                loadLiveChart(liveChartSymbol, nextInterval);
+            });
+
+            controls.appendChild(button);
+        });
+
+        toolbar.appendChild(title);
+        toolbar.appendChild(status);
+        toolbar.appendChild(controls);
+        chart.parentNode.insertBefore(toolbar, chart);
+    }
+
+    toolbar.querySelectorAll('[data-interval]').forEach(function(button) {
+        const active = button.dataset.interval === liveChartInterval;
+        button.classList.toggle('is-active', active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+
+    return true;
+}
+
+function setLiveChartStatus(text, state) {
+    const status = document.getElementById('liveChartStatus');
+    if (!status) return;
+    status.textContent = text;
+    status.dataset.state = state || 'neutral';
+}
 
 function renderLiveChartMsg(text) {
+    liveChartRequestSeq += 1;
     $('#liveChart').hide();
     $('#liveChartMsg').text(text).show();
     liveChartDrawn = false;
+    setLiveChartStatus('விளக்கப்படத் தரவு இல்லை', 'warning');
 }
 
-function loadLiveChart(sym) {
-    $.get('/api/market/candles/' + sym, { interval: 'FIVE_MINUTE', bars: 100 })
-      .done(function(d) {
-        if (!d || !d.available || !d.closes || !d.closes.length) {
-            renderLiveChartMsg('⚠ Live chart தேவையான intraday data கிடைக்கவில்லை (Angel One/Zerodha configure ஆகவில்லை).');
+function loadLiveChart(sym, interval) {
+    if (!sym) {
+        renderLiveChartMsg('குறியீடு தேர்ந்தெடுக்கப்படவில்லை.');
+        return;
+    }
+
+    liveChartSymbol = String(sym).toUpperCase();
+
+    if (interval) {
+        liveChartInterval = interval;
+    }
+
+    if (!['FIVE_MINUTE', 'FIFTEEN_MINUTE'].includes(liveChartInterval)) {
+        renderLiveChartMsg('தேர்ந்தெடுக்கப்பட்ட நேர இடைவெளி ஆதரிக்கப்படவில்லை.');
+        return;
+    }
+
+    if (!ensureLiveChartToolbar()) {
+        renderLiveChartMsg('விளக்கப்படம் காட்டும் பகுதி கிடைக்கவில்லை.');
+        return;
+    }
+
+    const requestSeq = ++liveChartRequestSeq;
+    const intervalLabel = liveChartInterval === 'FIVE_MINUTE' ? '5 நிமிடம்' : '15 நிமிடம்';
+
+    setLiveChartStatus('தரவு பெறப்படுகிறது...', 'loading');
+    $('#liveChartMsg').hide();
+
+    $.get('/api/market/candles/' + encodeURIComponent(liveChartSymbol), {
+        interval: liveChartInterval,
+        bars: 100
+    })
+    .done(function(d) {
+        if (requestSeq !== liveChartRequestSeq) return;
+
+        if (!d || d.available !== true) {
+            const reason = d && d.reason ? ' ' + String(d.reason) : '';
+            renderLiveChartMsg('உண்மையான OHLC தரவு கிடைக்கவில்லை.' + reason);
             return;
         }
+
+        const keys = ['opens', 'highs', 'lows', 'closes', 'timestamps'];
+        const arrays = {};
+
+        for (const key of keys) {
+            if (!Array.isArray(d[key])) {
+                renderLiveChartMsg('OHLC தரவில் ' + key + ' இல்லை.');
+                return;
+            }
+            arrays[key] = d[key];
+        }
+
+        const count = arrays.closes.length;
+        if (count < 2 || keys.some(key => arrays[key].length !== count)) {
+            renderLiveChartMsg('OHLC தரவின் அளவுகள் பொருந்தவில்லை.');
+            return;
+        }
+
+        const opens = arrays.opens.map(Number);
+        const highs = arrays.highs.map(Number);
+        const lows = arrays.lows.map(Number);
+        const closes = arrays.closes.map(Number);
+        const timestamps = arrays.timestamps.map(value => String(value || ''));
+
+        for (let i = 0; i < count; i++) {
+            const o = opens[i], h = highs[i], l = lows[i], c = closes[i];
+
+            if (![o, h, l, c].every(Number.isFinite) ||
+                ![o, h, l, c].every(value => value > 0) ||
+                h < Math.max(o, l, c) ||
+                l > Math.min(o, h, c) ||
+                !Number.isFinite(Date.parse(timestamps[i]))) {
+                renderLiveChartMsg('சரிபார்க்க முடியாத candle தரவு உள்ளது; தவறான candle காட்டப்படவில்லை.');
+                return;
+            }
+        }
+
+        if (typeof Plotly === 'undefined') {
+            renderLiveChartMsg('விளக்கப்பட நூலகம் ஏற்றப்படவில்லை.');
+            return;
+        }
+
+        const trace = {
+            type: 'candlestick',
+            name: liveChartSymbol + ' · ' + intervalLabel,
+            x: timestamps,
+            open: opens,
+            high: highs,
+            low: lows,
+            close: closes,
+            increasing: {
+                line: { color: '#00c176', width: 1.2 },
+                fillcolor: 'rgba(0,193,118,0.70)'
+            },
+            decreasing: {
+                line: { color: '#ff5252', width: 1.2 },
+                fillcolor: 'rgba(255,82,82,0.70)'
+            },
+            whiskerwidth: 0.45,
+            hovertemplate:
+                '%{x|%d %b %H:%M}' +
+                '<br>திறப்பு: ₹%{open:,.2f}' +
+                '<br>உயர்: ₹%{high:,.2f}' +
+                '<br>குறைவு: ₹%{low:,.2f}' +
+                '<br>முடிவு: ₹%{close:,.2f}<extra></extra>'
+        };
+
+        const layout = {
+            title: {
+                text: liveChartSymbol + ' · ' + intervalLabel + ' மெழுகுவர்த்தி',
+                font: { color: '#e9eefb', size: 13 },
+                x: 0.02,
+                xanchor: 'left'
+            },
+            paper_bgcolor: 'rgba(0,0,0,0)',
+            plot_bgcolor: 'rgba(0,0,0,0)',
+            font: {
+                family: 'Noto Sans Tamil, Latha, Nirmala UI, sans-serif',
+                color: '#8899aa',
+                size: 11
+            },
+            margin: { t: 42, b: 34, l: 62, r: 15 },
+            xaxis: {
+                type: 'date',
+                showgrid: false,
+                tickfont: { size: 9 },
+                rangeslider: { visible: false }
+            },
+            yaxis: {
+                gridcolor: 'rgba(255,255,255,0.06)',
+                tickprefix: '₹',
+                tickformat: ',.0f',
+                fixedrange: false
+            },
+            showlegend: false,
+            dragmode: 'pan',
+            uirevision: liveChartSymbol + ':' + liveChartInterval
+        };
+
+        const config = {
+            responsive: true,
+            displayModeBar: true,
+            displaylogo: false,
+            scrollZoom: true
+        };
+
         $('#liveChartMsg').hide();
         $('#liveChart').show();
-        const x = d.timestamps && d.timestamps.length === d.closes.length ? d.timestamps : d.closes.map((_, i) => i);
-        const trace = {
-            x: x, y: d.closes, mode: 'lines', type: 'scatter',
-            line: { color: '#00e676', width: 1.6 },
-            fill: 'tozeroy', fillcolor: 'rgba(0,230,118,0.06)',
-            hovertemplate: '₹%{y:,.2f}<extra></extra>',
-        };
-        const layout = {
-            paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
-            font: { color: '#8899aa', size: 11 },
-            margin: { t: 10, b: 30, l: 55, r: 10 },
-            xaxis: { showgrid: false, tickfont: { size: 9 } },
-            yaxis: { gridcolor: 'rgba(255,255,255,0.06)', tickprefix: '₹', tickformat: ',.0f' },
-            showlegend: false,
-        };
-        const config = { responsive: true, displayModeBar: false };
-        if (liveChartDrawn) {
-            Plotly.react('liveChart', [trace], layout, config);
-        } else {
-            Plotly.newPlot('liveChart', [trace], layout, config);
-            liveChartDrawn = true;
+
+        let drawPromise;
+        try {
+            drawPromise = liveChartDrawn
+                ? Plotly.react('liveChart', [trace], layout, config)
+                : Plotly.newPlot('liveChart', [trace], layout, config);
+        } catch (error) {
+            renderLiveChartMsg('விளக்கப்படம் வரைய முடியவில்லை.');
+            return;
         }
-      })
-      .fail(function() {
-        renderLiveChartMsg('⚠ Live chart load ஆகவில்லை.');
-      });
+
+        Promise.resolve(drawPromise)
+            .then(function() {
+                if (requestSeq !== liveChartRequestSeq) return;
+                liveChartDrawn = true;
+
+                if (d.market_open === true && d.fresh === true) {
+                    setLiveChartStatus('நேரடி தரவு உறுதி · ' + intervalLabel, 'live');
+                } else if (d.market_open === false) {
+                    setLiveChartStatus('சந்தை மூடப்பட்டுள்ளது · கடைசி கிடைத்த candle', 'historical');
+                } else {
+                    setLiveChartStatus('Freshness உறுதி இல்லை · Live அல்ல', 'warning');
+                }
+            })
+            .catch(function() {
+                if (requestSeq === liveChartRequestSeq) {
+                    renderLiveChartMsg('Candlestick chart வரைய முடியவில்லை.');
+                }
+            });
+    })
+    .fail(function() {
+        if (requestSeq === liveChartRequestSeq) {
+            renderLiveChartMsg('Candlestick தரவு சேவையிலிருந்து பதில் கிடைக்கவில்லை.');
+        }
+    });
 }
+
 
 function loadLive(sym) {
     $('#errorBanner').hide();

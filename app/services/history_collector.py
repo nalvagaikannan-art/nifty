@@ -215,6 +215,108 @@ async def run_periodic_live_market_snapshots() -> None:
         await asyncio.sleep(LIVE_MARKET_SNAPSHOT_INTERVAL_SEC)
 
 
+OPTION_CHAIN_SNAPSHOT_ROTATION_INTERVAL_SEC = 15.0
+OPTION_CHAIN_SNAPSHOT_START_DELAY_SEC = 45.0
+OPTION_CHAIN_SNAPSHOT_CLOSED_RECHECK_SEC = 60.0
+OPTION_CHAIN_SNAPSHOT_FOREGROUND_GRACE_SEC = 2.0
+
+
+async def _wait_for_option_chain_foreground_grace() -> None:
+    """Give foreground requests a short head start over scheduled polling."""
+    await asyncio.sleep(OPTION_CHAIN_SNAPSHOT_FOREGROUND_GRACE_SEC)
+
+
+async def _collect_option_chain_snapshot_once(
+    analyzer: MarketAnalyzer,
+    symbol: str,
+) -> bool:
+    """Fetch one chain via the shared DataFetcher persistence path."""
+    if not is_market_hours_ist():
+        return False
+
+    priority_token = set_angel_call_priority(ANGEL_PRIORITY_BACKGROUND)
+    try:
+        fetcher = getattr(analyzer, "fetcher", None)
+        get_chain = getattr(fetcher, "get_option_chain", None)
+        if not callable(get_chain):
+            raise RuntimeError("shared option-chain fetcher unavailable")
+
+        # Let foreground HTTP work become the single-flight owner when it
+        # arrives at the same time. Background callers may join foreground
+        # work; foreground callers must not wait for scheduler-owned I/O.
+        await _wait_for_option_chain_foreground_grace()
+        chain = await get_chain(symbol, expiry=None)
+        rows = chain.get("data") if isinstance(chain, dict) else None
+        if not rows:
+            logger.warning(
+                "Option-chain snapshot poll returned no rows for %s", symbol
+            )
+            return False
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Option-chain snapshot poll failed for %s (%s)",
+            symbol,
+            type(exc).__name__,
+        )
+        return False
+    finally:
+        reset_angel_call_priority(priority_token)
+
+
+async def run_periodic_option_chain_snapshots(
+    analyzer: MarketAnalyzer,
+) -> None:
+    """Poll one index at a time during market hours; never place trades."""
+    symbols = settings.history_collector_symbols
+    if not symbols:
+        logger.warning("Option-chain snapshot scheduler disabled: no symbols")
+        return
+
+    logger.info(
+        "Option-chain snapshot scheduler started: symbols=%s interval=%.1fs",
+        symbols,
+        OPTION_CHAIN_SNAPSHOT_ROTATION_INTERVAL_SEC,
+    )
+
+    # Leave startup warmup and initial application traffic undisturbed.
+    await asyncio.sleep(OPTION_CHAIN_SNAPSHOT_START_DELAY_SEC)
+    cycle_index = 0
+
+    while True:
+        try:
+            if not is_market_hours_ist():
+                await asyncio.sleep(OPTION_CHAIN_SNAPSHOT_CLOSED_RECHECK_SEC)
+                continue
+
+            symbol = symbols[cycle_index % len(symbols)]
+            cycle_index += 1
+            started = asyncio.get_running_loop().time()
+            has_rows = await _collect_option_chain_snapshot_once(
+                analyzer, symbol
+            )
+            elapsed = asyncio.get_running_loop().time() - started
+            logger.info(
+                "Option-chain snapshot poll complete: symbol=%s has_rows=%s elapsed=%.1fs",
+                symbol,
+                has_rows,
+                elapsed,
+            )
+
+            # Pause after each poll even if a broker request is slow. This
+            # avoids turning a slow request into a burst of immediate calls.
+            await asyncio.sleep(OPTION_CHAIN_SNAPSHOT_ROTATION_INTERVAL_SEC)
+
+        except asyncio.CancelledError:
+            logger.info("Option-chain snapshot scheduler stopped")
+            raise
+        except Exception:
+            logger.exception("Option-chain snapshot scheduler iteration failed")
+            await asyncio.sleep(OPTION_CHAIN_SNAPSHOT_ROTATION_INTERVAL_SEC)
+
+
 async def run_periodic_collection(analyzer: MarketAnalyzer) -> None:
     interval_minutes = settings.history_collector_interval_minutes
     if interval_minutes <= 0:
@@ -279,3 +381,166 @@ async def run_periodic_collection(analyzer: MarketAnalyzer) -> None:
         )
 
         await asyncio.sleep(remaining)
+# FORWARD_PAPER_CAPTURE_SCHEDULER_PHASE2B
+# Evaluate one configured index at a time, during market hours only.
+# Uses the shared analyzer, existing strategy logic, background Angel priority,
+# and a short foreground grace. No broker orders are sent by this task.
+PAPER_CAPTURE_ROTATION_INTERVAL_SEC = 15.0
+PAPER_CAPTURE_START_DELAY_SEC = 75.0
+PAPER_CAPTURE_CLOSED_RECHECK_SEC = 60.0
+
+
+async def _run_strategy_recommendation_for_capture(
+    analyzer: MarketAnalyzer,
+    ai: AIEngine,
+    symbol: str,
+) -> bool:
+    # Import lazily to avoid router/service import cycles during app startup.
+    from app.api.routes.strategy import strike_recommendation
+
+    priority_token = set_angel_call_priority(ANGEL_PRIORITY_BACKGROUND)
+    try:
+        await _wait_for_option_chain_foreground_grace()
+        result = await strike_recommendation(
+            symbol=str(symbol).upper(),
+            expiry=None,
+            cache_bust="",
+            analyzer=analyzer,
+            ai=ai,
+        )
+        if isinstance(result, dict):
+            logger.info(
+                "Forward paper-capture evaluation complete: "
+                "symbol=%s action=%s lifecycle=%s",
+                str(symbol).upper(),
+                result.get("best_strategy", "unknown"),
+                result.get("signal_lifecycle", "unknown"),
+            )
+        else:
+            logger.info(
+                "Forward paper-capture evaluation completed for %s",
+                str(symbol).upper(),
+            )
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "Forward paper-capture evaluation failed for %s (%s)",
+            str(symbol).upper(),
+            type(exc).__name__,
+        )
+        return False
+    finally:
+        reset_angel_call_priority(priority_token)
+
+
+async def run_periodic_paper_capture(analyzer: MarketAnalyzer) -> None:
+    """
+    Background trigger for the existing strategy route and ledger capture.
+
+    Rotates through configured symbols sequentially. Closed-market periods do
+    not call the strategy route. This reuses the same analyzer and strategy
+    implementation instead of duplicating decision or capture rules.
+    """
+    symbols = [
+        str(symbol).upper()
+        for symbol in settings.history_collector_symbols
+        if str(symbol).strip()
+    ]
+    if not symbols:
+        logger.warning("Forward paper-capture scheduler disabled: no symbols")
+        return
+
+    logger.info(
+        "Forward paper-capture scheduler started: symbols=%s interval=%.1fs",
+        symbols,
+        PAPER_CAPTURE_ROTATION_INTERVAL_SEC,
+    )
+    await asyncio.sleep(PAPER_CAPTURE_START_DELAY_SEC)
+
+    ai = None
+    cycle_index = 0
+    while True:
+        if not is_market_hours_ist():
+            await asyncio.sleep(PAPER_CAPTURE_CLOSED_RECHECK_SEC)
+            continue
+
+        symbol = symbols[cycle_index % len(symbols)]
+        cycle_index += 1
+        if ai is None:
+            ai = AIEngine()
+
+        started = asyncio.get_running_loop().time()
+        try:
+            ok = await _run_strategy_recommendation_for_capture(
+                analyzer, ai, symbol
+            )
+        except asyncio.CancelledError:
+            logger.info("Forward paper-capture scheduler stopped")
+            raise
+        except Exception:
+            logger.exception(
+                "Forward paper-capture scheduler iteration failed for %s",
+                symbol,
+            )
+            ok = False
+
+        elapsed = asyncio.get_running_loop().time() - started
+        logger.info(
+            "Forward paper-capture poll complete: symbol=%s success=%s elapsed=%.1fs",
+            symbol,
+            ok,
+            elapsed,
+        )
+        await asyncio.sleep(
+            max(0.0, PAPER_CAPTURE_ROTATION_INTERVAL_SEC - elapsed)
+        )
+
+
+# FORWARD_PAPER_OUTCOME_GRADING_PHASE1
+# Grades persisted signal observations only; it never submits or journals trades.
+# This loop also runs outside market hours so end-of-session horizons can mature.
+PAPER_OUTCOME_GRADING_INTERVAL_SEC = 60.0
+PAPER_OUTCOME_GRADING_START_DELAY_SEC = 90.0
+
+
+async def run_periodic_forward_paper_outcomes() -> None:
+    """Persist one outcome per eligible ledger entry and configured horizon."""
+    logger.info(
+        "Forward paper-outcome scheduler started: interval=%.1fs",
+        PAPER_OUTCOME_GRADING_INTERVAL_SEC,
+    )
+    await asyncio.sleep(PAPER_OUTCOME_GRADING_START_DELAY_SEC)
+
+    while True:
+        started = asyncio.get_running_loop().time()
+        try:
+            # Lazy import keeps startup imports and service dependency edges small.
+            from app.services.forward_paper_outcomes import (
+                process_forward_paper_outcomes,
+            )
+
+            stats = await process_forward_paper_outcomes()
+            logger.info(
+                "Forward paper-outcome cycle complete: "
+                "ledger_seen=%s eligible=%s created=%s updated=%s "
+                "pending=%s matured=%s session_unavailable=%s",
+                stats.get("ledger_rows_seen", 0),
+                stats.get("eligible_entries", 0),
+                stats.get("outcome_rows_created", 0),
+                stats.get("outcome_rows_updated", 0),
+                stats.get("pending_rows", 0),
+                stats.get("matured_rows", 0),
+                stats.get("session_unavailable_rows", 0),
+            )
+            elapsed = asyncio.get_running_loop().time() - started
+            await asyncio.sleep(
+                max(0.0, PAPER_OUTCOME_GRADING_INTERVAL_SEC - elapsed)
+            )
+        except asyncio.CancelledError:
+            logger.info("Forward paper-outcome scheduler stopped")
+            raise
+        except Exception:
+            logger.exception("Forward paper-outcome grading iteration failed")
+            await asyncio.sleep(PAPER_OUTCOME_GRADING_INTERVAL_SEC)

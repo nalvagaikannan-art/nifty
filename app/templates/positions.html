@@ -36,6 +36,15 @@
 .ai-tag { font-size:.75rem; padding:.2rem .6rem; border-radius:12px; background:rgba(64,196,255,.12); color:var(--primary); }
 .btn-danger { background:var(--red); color:#fff; border:none; border-radius:6px; cursor:pointer; }
 #pos-status.error { color:#ff6b6b; }
+.pos-action-disabled {
+  margin-left:auto;
+  padding:.3rem .65rem;
+  border:1px solid var(--border);
+  border-radius:6px;
+  color:var(--text2);
+  font-size:.72rem;
+  text-align:right;
+}
 </style>
 
 <script>
@@ -78,10 +87,10 @@ function renderPosition(p) {
         '<div class="pos-meta">' + esc(p.status) + '</div>' +
       '</div>' +
     '</div>' +
-    (p.stop_loss_hit ? '<div class="sl-alert">🚨 Stop-loss level அடைந்துவிட்டது — square off பரிசீலிக்கவும்</div>' : '') +
+    (p.stop_loss_hit ? '<div class="sl-alert">🚨 Stop-loss level அடைந்துவிட்டது — Angel One app/site-ல் position-ஐ சரிபார்க்கவும்.</div>' : '') +
     '<div class="pos-actions">' +
       '<span class="ai-tag">🤖 ' + esc(p.ai_suggestion) + '</span>' +
-      '<button class="btn btn-danger" style="font-size:.75rem;padding:.3rem .8rem;margin-left:auto;" onclick="squareOff(\'' + esc(p.symbol) + '\')">Square Off</button>' +
+      '<span class="pos-action-disabled" role="note">இந்த செயலியில் Square Off வசதி இல்லை. Angel One app/site-ல் நேரடியாக நிர்வகிக்கவும்.</span>' +
     '</div>' +
     (p.ai_reasons && p.ai_reasons.length ? '<div class="pos-reasons">' + p.ai_reasons.map(function(r){ return '<div class="pos-reason-line">\u2022 ' + esc(r) + '</div>'; }).join('') + '</div>' : '') +
   '</div>';
@@ -96,19 +105,6 @@ function esc(s) {
   return $('<div>').text(s == null ? '' : s).html();
 }
 
-function squareOff(symbol) {
-  if (!confirm(symbol + ' position-ஐ square off பண்ணலாமா?')) return;
-  $.post('/api/portfolio/positions/square-off/' + symbol)
-    .done(function() {
-      alert('Square off request அனுப்பப்பட்டது.');
-      loadPositions();
-    })
-    .fail(function(xhr) {
-      var msg = 'Square off ஆகவில்லை';
-      try { msg = JSON.parse(xhr.responseText).detail; } catch(e) {}
-      alert('⚠ ' + msg);
-    });
-}
 
 $(document).ready(function() {
   loadPositions();

@@ -8,6 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import engine, Base
 from app.api.routes import dashboard, market, options, analysis, angel, positions, strategy, market_intel, accuracy
+from app.api.routes import pro as pro_routes  # NIFTY-PRO
+import app.services.iv_history  # noqa: F401 — registers pro_iv_history table
+import app.services.order_executor  # noqa: F401 — registers pro_orders table
 from app.api.routes import settings as settings_routes
 from app.api.routes import paper_trade as paper_trade_routes
 from app.utils.logging import setup_logging
@@ -17,6 +20,9 @@ from app.services.market_analyzer import MarketAnalyzer, _snapshot_persistence_e
 from app.services.history_collector import (
     run_periodic_collection,
     run_periodic_live_market_snapshots,
+    run_periodic_option_chain_snapshots,
+    run_periodic_paper_capture,
+    run_periodic_forward_paper_outcomes,
 )
 from app.exceptions import MarketDataError, AIProviderError
 from app.middleware.rate_limit import RateLimitMiddleware
@@ -63,6 +69,19 @@ async def lifespan(app: FastAPI):
     # browser/API request is active and adds no broker REST calls.
     app.state.live_market_snapshot_task = asyncio.create_task(
         run_periodic_live_market_snapshots()
+    )
+
+    # Capture option chains independently of browser/API traffic.
+    app.state.option_chain_snapshot_task = asyncio.create_task(
+        run_periodic_option_chain_snapshots(app.state.market_analyzer)
+    )
+    # Prospective paper observation uses the shared strategy route.
+    app.state.paper_capture_task = asyncio.create_task(
+        run_periodic_paper_capture(app.state.market_analyzer)
+    )
+    # Grades persisted forward observations; it never places orders.
+    app.state.forward_paper_outcome_task = asyncio.create_task(
+        run_periodic_forward_paper_outcomes()
     )
     # FIX (2026-08-21): Angel One's option-chain/futures-premium calls both
     # need the ~15-30MB instrument master file (see angel_one._ensure_
@@ -148,6 +167,24 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    app.state.option_chain_snapshot_task.cancel()
+    try:
+        await app.state.option_chain_snapshot_task
+    except asyncio.CancelledError:
+        pass
+
+    app.state.paper_capture_task.cancel()
+    try:
+        await app.state.paper_capture_task
+    except asyncio.CancelledError:
+        pass
+
+    app.state.forward_paper_outcome_task.cancel()
+    try:
+        await app.state.forward_paper_outcome_task
+    except asyncio.CancelledError:
+        pass
+
     if app.state.angel_warmup_task and not app.state.angel_warmup_task.done():
         app.state.angel_warmup_task.cancel()
         try:
@@ -156,7 +193,11 @@ async def lifespan(app: FastAPI):
             pass
     # Stop Angel WebSocket before closing the REST/data services.
     try:
-        angel_live_feed.stop()
+        stop_completed = await asyncio.to_thread(angel_live_feed.stop)
+        if not stop_completed:
+            logger.warning(
+                "Angel live feed shutdown returned with worker threads still active"
+            )
     except Exception as e:
         logger.warning("Angel live feed shutdown failed: %s", e)
 
@@ -167,9 +208,9 @@ async def lifespan(app: FastAPI):
     await economic_calendar_service.close()
 
 app = FastAPI(
-    title="AI NIFTY Option Analyzer Pro",
+    title="AI NIFTY Option Analyzer PRO+",
     description="Live Market Analysis and AI Decision Support Tool",
-    version="1.0.0",
+    version="2.0.0-pro",
     lifespan=lifespan
 )
 
@@ -229,6 +270,7 @@ app.include_router(strategy.router,        prefix="/api/strategy",   tags=["Stra
 app.include_router(market_intel.router,    prefix="/api/market-intel", tags=["Market Intelligence"])
 app.include_router(paper_trade_routes.router, prefix="/api/paper-trade", tags=["Paper Trading"])
 app.include_router(accuracy.router,        prefix="/api/accuracy",   tags=["Accuracy"])
+app.include_router(pro_routes.router,      prefix="/api/pro",        tags=["Pro (sell signals / orders)"])
 
 # Frontend pages
 @app.get("/sw.js")
@@ -290,3 +332,14 @@ async def accuracy_page(request: Request):
 @app.get("/positions")
 async def positions_page(request: Request):
     return templates.TemplateResponse("positions.html", {"request": request})
+
+# CALL_TRACKER_PAGE_20261026
+@app.get("/call-tracker")
+async def call_tracker_page(request: Request):
+    return templates.TemplateResponse("call-tracker.html", {"request": request})
+
+
+# NIFTY-PRO page
+@app.get("/pro")
+async def pro_page(request: Request):
+    return templates.TemplateResponse("pro.html", {"request": request})

@@ -203,6 +203,75 @@ class AIEngine:
         oi_sum = md.get("oi_summary", {})
         chain_valid = bool(md.get("option_chain_valid", False))
         chain_rows = int(md.get("option_chain_rows", 0))
+        chain_quality = md.get("option_chain_quality")
+        if not isinstance(chain_quality, dict) or not chain_quality:
+            pq = md.get("pcr_quality")
+            chain_quality = pq.get("chain_quality") if isinstance(pq, dict) else None
+
+        quality_reported = isinstance(chain_quality, dict) and bool(chain_quality)
+        quality_available = quality_reported and chain_quality.get("available") is True
+        oi_usable = not quality_reported or (
+            quality_available and chain_quality.get("oi_usable") is True
+        )
+        volume_usable = not quality_reported or (
+            quality_available and chain_quality.get("volume_usable") is True
+        )
+        qstatus = (
+            (chain_quality.get("status") or "limited")
+            if quality_reported else "not reported"
+        )
+
+        def _coverage(key):
+            value = chain_quality.get(key) if quality_reported else None
+            return f"{value:.1f}%" if isinstance(value, (int, float)) else "not reported"
+
+        oi_coverage = _coverage("oi_coverage_pct")
+        volume_coverage = _coverage("volume_coverage_pct")
+        oi_reason = (
+            str(chain_quality.get("reason") or "OI quality insufficient")
+            if quality_reported and not oi_usable else "usable or not reported"
+        )
+        volume_reason = (
+            str(chain_quality.get("volume_reason") or "Volume quality insufficient")
+            if quality_reported and not volume_usable else "usable or not reported"
+        )
+
+        quality_rules = []
+        if quality_reported and not oi_usable:
+            quality_rules.append(
+                "OI quality unusable: do not use PCR, Max Pain, OI changes, "
+                "max-OI strikes or writing flags to infer option flow. State "
+                "the limitation. Output pcr=0.000 as an unavailable sentinel."
+            )
+        if quality_reported and not volume_usable:
+            quality_rules.append(
+                "Volume quality unusable: do not claim confirmed call/put "
+                "writing or unusual option activity. Treat writing flags as unavailable."
+            )
+        chain_quality_rules = "\n".join("- " + rule for rule in quality_rules)
+
+        pcr_display = f"{pcr:.3f}" if oi_usable else "UNAVAILABLE (OI quality insufficient)"
+        pcr_for_output = pcr if oi_usable else 0.0
+        max_pain_display = (
+            f"{md.get('max_pain', 0):,.0f}"
+            if oi_usable else "UNAVAILABLE (OI quality insufficient)"
+        )
+        call_writing_display = (
+            oi_sum.get("call_writing_confirmed", False)
+            if oi_usable and volume_usable else "UNAVAILABLE (chain quality guard)"
+        )
+        put_writing_display = (
+            oi_sum.get("put_writing_confirmed", False)
+            if oi_usable and volume_usable else "UNAVAILABLE (chain quality guard)"
+        )
+        ce_max_oi_display = (
+            f"{oi_sum.get('ce_max_oi_strike', 0):,.0f}"
+            if oi_usable else "UNAVAILABLE (OI quality insufficient)"
+        )
+        pe_max_oi_display = (
+            f"{oi_sum.get('pe_max_oi_strike', 0):,.0f}"
+            if oi_usable else "UNAVAILABLE (OI quality insufficient)"
+        )
         rule_reasons = "\n".join(decision.get("reasons", [])[:10])
 
         multi_tf = md.get("multi_timeframe", {}) or {}
@@ -227,6 +296,7 @@ CRITICAL DATA RULES:
 - If option-chain quality is invalid or incomplete, do NOT invent PCR/OI/Max Pain/option-flow conclusions.
 - If the rule engine preferred_side is NONE, preserve NONE and explain why; do not upgrade it to CALL/PUT.
 - Max OI alone is not writing. Require OI increase + option-price weakness + volume before calling writing.
+{chain_quality_rules}
 - Treat VIX as volatility/risk, not as directional evidence.
 
 A rule-based engine already scored {md.get('symbol','NIFTY')} and gave:
@@ -235,7 +305,8 @@ RULE ENGINE RESULT:
 - Market Bias: {decision.get('market_bias','Sideways')} (Bullish {decision.get('bullish_probability',50)}% / Bearish {decision.get('bearish_probability',50)}%)
 - Preferred Side: {decision.get('preferred_side','NONE')}
 - Bull Score: {decision.get('bull_score',0)} | Bear Score: {decision.get('bear_score',0)}
-- Confidence: {decision.get('confidence',50)}%
+- Signal Strength: {decision.get('confidence',50)}/100 (rule-engine score; not a win probability)
+- Wording rule: say 'Signal Strength N/100'; do not describe it as 'confidence N%' or as probability of success.
 - Forecast: {decision.get('forecast','Neutral')}
 - Risk: {decision.get('risk','Medium')}
 
@@ -244,17 +315,19 @@ TOP RULE SIGNALS:
 
 MARKET DATA (DAILY, from historical closes):
 - Spot: {spot.get('price',0):,.0f} | Change: {spot.get('change_percent',0):.2f}%
-- PCR: {pcr:.3f} | Max Pain: {md.get('max_pain',0):,.0f}
+- PCR: {pcr_display} | Max Pain: {max_pain_display}
 - India VIX: {vix:.2f} (volatility measure — NOT directional, do not use it to call a side)
 - RSI: {md.get('rsi',50):.1f} | MACD: {md.get('macd',{}).get('macd',0):.1f}
 - EMA20: {tech.get('ema20',0):,.0f} | EMA50: {tech.get('ema50',0):,.0f}
 - ADX: {tech.get('adx',0):.1f} | Supertrend: {tech.get('supertrend','N/A')}
-- Option-chain quality: valid={chain_valid}, valid_rows={chain_rows}
-- Confirmed Call Writing: {oi_sum.get('call_writing_confirmed', False)}
-- Confirmed Put Writing: {oi_sum.get('put_writing_confirmed', False)}
+- Option-chain quality: valid={chain_valid}, valid_rows={chain_rows}, status={qstatus}
+- OI quality: usable={oi_usable}, positive OI coverage={oi_coverage}; reason={oi_reason}
+- Volume quality: usable={volume_usable}, positive volume coverage={volume_coverage}; reason={volume_reason}
+- Confirmed Call Writing: {call_writing_display}
+- Confirmed Put Writing: {put_writing_display}
 - ATM IV: {oi_sum.get('atm_iv',0):.1f}%
-- CE Max OI Strike: {oi_sum.get('ce_max_oi_strike',0):,.0f}
-- PE Max OI Strike: {oi_sum.get('pe_max_oi_strike',0):,.0f}
+- CE Max OI Strike: {ce_max_oi_display}
+- PE Max OI Strike: {pe_max_oi_display}
 - Support: {sr.get('support',[])} | Resistance: {sr.get('resistance',[])}
 - Market Open: {spot.get('market_open',False)}
 
@@ -277,7 +350,7 @@ Output EXACTLY this JSON:
   "resistance": [<float>,<float>],
   "risk": "<Low|Medium|High>",
   "vix": {vix:.2f},
-  "pcr": {pcr:.3f}
+  "pcr": {pcr_for_output:.3f}
 }}"""
 
     def _parse(self, text: str) -> Dict:

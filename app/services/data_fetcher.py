@@ -21,7 +21,9 @@ FIXES (2026-08-08):
   - __init__:             _breadth_primary_dead_until circuit breaker removed
 """
 
+from app.utils.expiry import canonical_expiry
 import asyncio
+import copy
 import json
 import re
 import time
@@ -107,6 +109,106 @@ def _parse_expiry_date(e: str):
     return datetime.max.date()
 
 
+
+
+_OPTION_SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS = 60.0
+_OPTION_SNAPSHOT_PERSIST_LAST_SAVED = {}
+_OPTION_SNAPSHOT_PERSIST_LOCK = asyncio.Lock()
+
+
+async def _persist_option_chain_snapshot_if_due(
+    chain,
+    fallback_symbol: str,
+    now_mono=None,
+) -> bool:
+    """Persist option snapshots for all chain consumers with one shared throttle."""
+    import time
+    from app.services.option_snapshot_state import snapshot_persistence_enabled
+    from app.utils.helpers import is_market_hours_ist
+
+    if not snapshot_persistence_enabled.get() or not is_market_hours_ist():
+        return False
+    if not isinstance(chain, dict) or not chain.get("data"):
+        return False
+
+    symbol = str(chain.get("symbol") or fallback_symbol or "").upper()
+    expiry = canonical_expiry(chain.get("expiry") or "")
+    if not symbol or not expiry:
+        return False
+
+    key = (symbol, expiry)
+
+    async with _OPTION_SNAPSHOT_PERSIST_LOCK:
+        current = time.monotonic() if now_mono is None else float(now_mono)
+        previous = _OPTION_SNAPSHOT_PERSIST_LAST_SAVED.get(key)
+        if previous is not None and current - previous < _OPTION_SNAPSHOT_PERSIST_MIN_INTERVAL_SECONDS:
+            return False
+
+        from app.services.option_analyzer import OptionAnalyzer
+        option_df = OptionAnalyzer().process_option_chain(chain)
+        if option_df is None or option_df.empty:
+            return False
+
+        from app.services.history_service import save_option_chain_snapshot
+        saved = await save_option_chain_snapshot(symbol, expiry, option_df)
+        if saved:
+            _OPTION_SNAPSHOT_PERSIST_LAST_SAVED[key] = current
+            logger.info(
+                "OPTION_SNAPSHOT_PERSISTED: %s %s rows=%d",
+                symbol,
+                expiry,
+                len(option_df) * 2,
+            )
+        return bool(saved)
+
+
+
+_OPTION_QUOTE_HISTORY_PERSIST_MIN_INTERVAL_SECONDS = 60.0
+_OPTION_QUOTE_HISTORY_PERSIST_LAST_SAVED = {}
+_OPTION_QUOTE_HISTORY_PERSIST_LOCK = asyncio.Lock()
+
+
+async def _persist_option_quote_history_if_due(
+    chain,
+    fallback_symbol: str,
+    now_mono=None,
+) -> bool:
+    """Persist merged live quotes separately from the legacy OI snapshots."""
+    import time as _time
+    from app.services.option_snapshot_state import snapshot_persistence_enabled
+    from app.utils.helpers import is_market_hours_ist
+
+    if not snapshot_persistence_enabled.get() or not is_market_hours_ist():
+        return False
+    if not isinstance(chain, dict) or not chain.get("data"):
+        return False
+
+    symbol = str(chain.get("symbol") or fallback_symbol or "").upper().strip()
+    expiry = canonical_expiry(chain.get("expiry") or "")
+    if not symbol or not expiry:
+        return False
+
+    key = (symbol, expiry)
+    async with _OPTION_QUOTE_HISTORY_PERSIST_LOCK:
+        current = _time.monotonic() if now_mono is None else float(now_mono)
+        previous = _OPTION_QUOTE_HISTORY_PERSIST_LAST_SAVED.get(key)
+        if (
+            previous is not None
+            and current - previous < _OPTION_QUOTE_HISTORY_PERSIST_MIN_INTERVAL_SECONDS
+        ):
+            return False
+
+        from app.services.history_service import save_option_quote_snapshot
+        saved = await save_option_quote_snapshot(chain, symbol)
+        if saved:
+            _OPTION_QUOTE_HISTORY_PERSIST_LAST_SAVED[key] = current
+            logger.info(
+                "OPTION_QUOTE_HISTORY_PERSISTED: %s %s",
+                symbol, expiry,
+            )
+        return bool(saved)
+
+
 class DataFetcher:
     BASE_URL = "https://www.nseindia.com/api"
     HOME_URL  = "https://www.nseindia.com/"
@@ -122,6 +224,9 @@ class DataFetcher:
         self._futures_premium_cache: Dict[str, Dict] = {}
         self._futures_premium_cache_ts: Dict[str, float] = {}
         self._futures_premium_refresh_tasks: Dict[str, asyncio.Task] = {}
+        # Throttle optional premium refreshes independently per symbol.
+        self._futures_premium_refresh_last_scheduled_ts: Dict[str, float] = {}
+        self._futures_premium_refresh_cooldown = 60.0
         self._futures_premium_lock = asyncio.Lock()
 
         # Fresh enough for immediate use; beyond this we refresh in background.
@@ -404,7 +509,7 @@ class DataFetcher:
 
         return {
             "symbol":           symbol.upper(),
-            "expiry":           expiry or raw.get("expiry", "") if isinstance(raw, dict) else "",
+            "expiry":           (raw.get("expiry") or expiry or "") if isinstance(raw, dict) else (expiry or ""),
             "all_expiries":     sorted(
                 raw.get("all_expiries", []) if isinstance(raw, dict) else [],
                 key=_parse_expiry_date
@@ -414,6 +519,7 @@ class DataFetcher:
             "lot_size":         int(safe_float(raw.get("lot_size", 0))) if isinstance(raw, dict) else 0,
             "data":             rows,
             "data_source":      "angel_one",
+            "fetched_at": current_ist().isoformat(),
         }
 
     async def _try_angel_historical(
@@ -531,11 +637,12 @@ class DataFetcher:
 
         return {
             "symbol":           symbol.upper(),
-            "expiry":           expiry or raw.get("expiry", "") if isinstance(raw, dict) else "",
+            "expiry":           (raw.get("expiry") or expiry or "") if isinstance(raw, dict) else (expiry or ""),
             "all_expiries":     raw.get("all_expiries", []) if isinstance(raw, dict) else [],
             "underlying_price": safe_float(raw.get("underlying_price", 0)) if isinstance(raw, dict) else 0,
             "data":             rows,
             "data_source":      "zerodha",
+            "fetched_at": current_ist().isoformat(),
         }
 
     async def _try_zerodha_historical(self, symbol: str, days: int = 60) -> Optional[Dict]:
@@ -577,10 +684,14 @@ class DataFetcher:
     # Keep futures volume as a separate best-effort cache so VWAP/volume
     # indicators can use real traded futures volume without adding a
     # foreground Angel request to every analysis.
-    _FUTURES_VOLUME_CACHE: Dict[str, Dict[float, int]] = {}
-    _FUTURES_VOLUME_CACHE_TS: Dict[str, float] = {}
-    _FUTURES_VOLUME_TASKS: Dict[str, asyncio.Task] = {}
-    _FUTURES_VOLUME_CACHE_TTL = 150.0
+    _FUTURES_VOLUME_CACHE: Dict[tuple, Dict[float, int]] = {}
+    _FUTURES_VOLUME_CACHE_TS: Dict[tuple, float] = {}
+    _FUTURES_VOLUME_TASKS: Dict[tuple, asyncio.Task] = {}
+    _FUTURES_VOLUME_CACHE_TTL = 360.0
+    # Limit repeated background broker requests after each attempt.
+    _FUTURES_VOLUME_REFRESH_COOLDOWN = 300.0
+    _FUTURES_VOLUME_LAST_SCHEDULED_TS: Dict[tuple, float] = {}
+    _FUTURES_VOLUME_MIN_SESSION_COVERAGE = 0.90
 
     # ── Public API ─────────────────────────────────────────────────────────
 
@@ -597,6 +708,80 @@ class DataFetcher:
 #
 # Broker/API failures remain cached for only 30 seconds so temporary
 # failures can recover without repeatedly hitting Angel One.
+    @staticmethod
+    def _refresh_intraday_freshness(result: Dict, interval: str) -> Dict:
+        """Recalculate timestamp-derived freshness whenever a snapshot is returned."""
+        from zoneinfo import ZoneInfo
+
+        updated = dict(result)
+        ist = ZoneInfo("Asia/Kolkata")
+        limits = {
+            "ONE_MINUTE": 5,
+            "THREE_MINUTE": 10,
+            "FIVE_MINUTE": 15,
+            "FIFTEEN_MINUTE": 30,
+            "THIRTY_MINUTE": 60,
+            "ONE_HOUR": 90,
+        }
+        interval_key = str(interval).upper().strip()
+        max_age = limits.get(interval_key)
+
+        timestamps = updated.get("timestamps") or []
+        latest = timestamps[-1] if timestamps and timestamps[-1] else (
+            updated.get("latest_timestamp")
+        )
+
+        now = current_ist()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=ist)
+        else:
+            now = now.astimezone(ist)
+
+        minute_of_day = now.hour * 60 + now.minute
+        market_open = (
+            now.weekday() < 5
+            and 9 * 60 + 15 <= minute_of_day < 15 * 60 + 30
+        )
+        updated["market_open"] = market_open
+        updated["max_freshness_minutes"] = max_age
+
+        if not latest:
+            updated["fresh"] = False
+            updated["freshness_minutes"] = None
+            updated["session_date"] = None
+            return updated
+
+        try:
+            ts_text = str(latest).strip()
+            if ts_text.endswith("Z"):
+                ts_text = ts_text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(ts_text)
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ist)
+            latest_ist = parsed.astimezone(ist)
+
+            age_seconds = (now - latest_ist).total_seconds()
+            age_minutes = round(max(age_seconds, 0.0) / 60.0, 1)
+            fresh = bool(
+                age_seconds >= 0
+                and market_open
+                and latest_ist.date() == now.date()
+                and max_age is not None
+                and age_minutes <= max_age
+            )
+
+            updated["latest_timestamp"] = latest_ist.isoformat()
+            updated["freshness_minutes"] = age_minutes
+            updated["session_date"] = latest_ist.date().isoformat()
+            updated["fresh"] = fresh
+        except (TypeError, ValueError, OverflowError):
+            updated["fresh"] = False
+            updated["freshness_minutes"] = None
+            updated["session_date"] = None
+
+        return updated
+
     async def get_intraday_ohlc(
         self,
         symbol: str,
@@ -638,30 +823,27 @@ class DataFetcher:
         # "unavailable" when we already have a real historical snapshot.
         snapshot_key = (str(symbol).upper(), str(interval).upper())
 
-        if isinstance(result, dict) and result.get("available"):
-            self._LAST_GOOD_INTRADAY_SNAPSHOTS[snapshot_key] = {
-                "cached_at": current_ist().isoformat(),
-                "result": dict(result),
-            }
+        using_last_good_fallback = False
+        if not (isinstance(result, dict) and result.get("available")):
+            if isinstance(result, dict):
+                failure_reason = result.get("reason")
+                remembered = self._LAST_GOOD_INTRADAY_SNAPSHOTS.get(snapshot_key)
 
-        elif isinstance(result, dict):
-            failure_reason = result.get("reason")
-            remembered = self._LAST_GOOD_INTRADAY_SNAPSHOTS.get(snapshot_key)
+                if remembered and isinstance(remembered.get("result"), dict):
+                    restored = dict(remembered["result"])
+                    restored["snapshot_fallback"] = True
+                    restored["snapshot_fallback_reason"] = failure_reason
+                    restored["snapshot_cached_at"] = remembered.get("cached_at")
 
-            if remembered and isinstance(remembered.get("result"), dict):
-                restored = dict(remembered["result"])
-                restored["snapshot_fallback"] = True
-                restored["snapshot_fallback_reason"] = failure_reason
-                restored["snapshot_cached_at"] = remembered.get("cached_at")
-
-                logger.warning(
-                    "Using last-known-good intraday snapshot for %s/%s "
-                    "after current broker fetch failed: %s",
-                    symbol,
-                    interval,
-                    failure_reason,
-                )
-                result = restored
+                    logger.warning(
+                        "Using last-known-good intraday snapshot for %s/%s "
+                        "after current broker fetch failed: %s",
+                        symbol,
+                        interval,
+                        failure_reason,
+                    )
+                    result = restored
+                    using_last_good_fallback = True
 
         if not isinstance(result, dict) or not result.get("available"):
             return result
@@ -673,15 +855,25 @@ class DataFetcher:
         # snapshot here so the new futures volume becomes visible to MTF
         # callers without another index candle request.
         # FUTURES_VOLUME_REFRESH_SCHEDULE_FIX_20260924
-        if not any(result.get("volumes") or []):
+        if not self._has_positive_volume_in_latest_session(
+            result.get("volumes") or [],
+            result.get("timestamps") or [],
+            interval,
+        ):
             cached_futures_volumes = self._get_cached_futures_volumes(
                 symbol,
                 result.get("timestamps") or [],
+                interval,
             )
 
             if cached_futures_volumes is not None:
                 result = dict(result)
-                result["volumes"] = cached_futures_volumes
+                result["volumes"] = self._merge_latest_session_proxy_volumes(
+                    result.get("volumes") or [],
+                    result.get("timestamps") or [],
+                    cached_futures_volumes,
+                    interval,
+                )
                 result["volume_source"] = "front_month_futures_proxy"
 
                 logger.info(
@@ -700,17 +892,49 @@ class DataFetcher:
                 ).strftime("%Y-%m-%d 09:15")
                 to_str = now_ist.strftime("%Y-%m-%d %H:%M")
 
-                self._schedule_futures_volume_refresh(
+                scheduled = self._schedule_futures_volume_refresh(
                     symbol,
                     "FIVE_MINUTE",
                     from_str,
                     to_str,
                 )
 
-                logger.info(
-                    "Scheduled futures volume proxy refresh for %s/FIVE_MINUTE",
-                    str(symbol).upper(),
-                )
+                if scheduled:
+                    logger.info(
+                        "Scheduled futures volume proxy refresh for %s/FIVE_MINUTE",
+                        str(symbol).upper(),
+                    )
+                else:
+                    logger.debug(
+                        "Skipped futures volume proxy refresh for %s/FIVE_MINUTE "
+                        "(task active or refresh cooldown)",
+                        str(symbol).upper(),
+                    )
+
+        # Recompute freshness from candle timestamps; cached metadata ages.
+        result = self._refresh_intraday_freshness(result, interval)
+
+        # Keep the last-good copy volume-enriched, but never save fallback
+        # diagnostic flags as part of the underlying successful snapshot.
+        cacheable_result = dict(result)
+        for metadata_key in (
+            "snapshot_fallback",
+            "snapshot_fallback_reason",
+            "snapshot_cached_at",
+        ):
+            cacheable_result.pop(metadata_key, None)
+
+        if using_last_good_fallback:
+            remembered = self._LAST_GOOD_INTRADAY_SNAPSHOTS.get(snapshot_key)
+            if remembered and isinstance(remembered.get("result"), dict):
+                # Preserve the original successful snapshot time; enrichment
+                # does not make old candles new.
+                remembered["result"] = cacheable_result
+        elif result.get("available") and result.get("fresh"):
+            self._LAST_GOOD_INTRADAY_SNAPSHOTS[snapshot_key] = {
+                "cached_at": current_ist().isoformat(),
+                "result": cacheable_result,
+            }
 
         # Return only the trailing candles requested by this caller.
         # This keeps Live charts at 100 bars while MTF analysis can receive
@@ -803,15 +1027,79 @@ class DataFetcher:
         except Exception:
             return None
 
+    @classmethod
+    def _latest_session_volume_indices(
+        cls, timestamps: List, interval: str
+    ) -> List[int]:
+        """Return latest-date session candle indices for volume validation."""
+        if not timestamps:
+            return []
+        tz = current_ist().tzinfo
+        if tz is None:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Asia/Kolkata")
+
+        parsed = []
+        for i, raw_timestamp in enumerate(timestamps):
+            key = cls._candle_timestamp_key(raw_timestamp)
+            if key is None:
+                continue
+            try:
+                parsed.append((i, datetime.fromtimestamp(key, tz=tz)))
+            except (OverflowError, OSError, ValueError):
+                continue
+        if not parsed:
+            return []
+
+        latest_date = max(dt.date() for _, dt in parsed)
+        is_daily = str(interval).upper().strip() in {"ONE_DAY", "DAILY"}
+        indices = []
+        for i, dt in parsed:
+            if dt.date() != latest_date:
+                continue
+            minutes = dt.hour * 60 + dt.minute
+            in_regular_session = 9 * 60 + 15 <= minutes < 15 * 60 + 30
+            if is_daily or in_regular_session:
+                indices.append(i)
+        return indices
+
+    @classmethod
+    def _has_positive_volume_in_latest_session(
+        cls, volumes: List, timestamps: List, interval: str
+    ) -> bool:
+        """Historical volume must not conceal an empty latest session."""
+        return any(
+            i < len(volumes) and safe_int(volumes[i]) > 0
+            for i in cls._latest_session_volume_indices(timestamps, interval)
+        )
+
+    @classmethod
+    def _merge_latest_session_proxy_volumes(
+        cls, volumes: List, timestamps: List,
+        proxy_volumes: List, interval: str
+    ) -> List:
+        """Apply futures proxy only to latest session, preserving history."""
+        count = len(timestamps)
+        merged = list(volumes or [])
+        merged = (merged + [0] * count)[:count]
+        if proxy_volumes is None or len(proxy_volumes) < count:
+            return merged
+        for i in cls._latest_session_volume_indices(timestamps, interval):
+            merged[i] = safe_int(proxy_volumes[i])
+        return merged
+
     def _get_cached_futures_volumes(
         self,
         symbol: str,
         timestamps: List,
+        interval: str,
     ) -> Optional[List[int]]:
-        """Return futures-volume values aligned to index timestamps."""
+        """Return interval-matched futures volumes aligned to index timestamps."""
         symbol = str(symbol).upper().strip()
-        cached = self._FUTURES_VOLUME_CACHE.get(symbol)
-        cached_ts = self._FUTURES_VOLUME_CACHE_TS.get(symbol, 0.0)
+        interval = str(interval).upper().strip()
+        cache_key = (symbol, interval)
+        cached = self._FUTURES_VOLUME_CACHE.get(cache_key)
+        cached_ts = self._FUTURES_VOLUME_CACHE_TS.get(cache_key, 0.0)
 
         if not cached or cached_ts <= 0:
             return None
@@ -819,21 +1107,56 @@ class DataFetcher:
         if (time.time() - cached_ts) > self._FUTURES_VOLUME_CACHE_TTL:
             return None
 
-        aligned = []
-        matched = 0
-
-        for ts in timestamps:
-            key = self._candle_timestamp_key(ts)
-            value = cached.get(key, 0) if key is not None else 0
-            value = safe_int(value)
-            aligned.append(value)
-            if value > 0:
-                matched += 1
-
-        if matched == 0:
+        normalized = [
+            self._candle_timestamp_key(ts) for ts in timestamps
+        ]
+        valid_keys = [key for key in normalized if key is not None]
+        if not valid_keys:
             return None
 
-        return aligned
+        # Measure coverage for the latest session only, excluding historical
+        # warm-up bars from the denominator.
+        ist_tz = current_ist().tzinfo
+        dated_keys = [
+            (key, datetime.fromtimestamp(key, tz=ist_tz).date())
+            for key in valid_keys
+        ]
+        latest_date = max(day for _, day in dated_keys)
+        latest_session_keys = [
+            key for key, day in dated_keys if day == latest_date
+        ]
+        if not latest_session_keys:
+            return None
+
+        matched = sum(
+            1 for key in latest_session_keys if key in cached
+        )
+        coverage = matched / len(latest_session_keys)
+        if coverage < self._FUTURES_VOLUME_MIN_SESSION_COVERAGE:
+            logger.debug(
+                "Rejecting partial %s futures-volume cache: %.1f%% "
+                "(%d/%d timestamps; minimum %.0f%%)",
+                symbol,
+                coverage * 100,
+                matched,
+                len(latest_session_keys),
+                self._FUTURES_VOLUME_MIN_SESSION_COVERAGE * 100,
+            )
+            return None
+
+        if not any(
+            safe_int(cached.get(key, 0)) > 0
+            for key in latest_session_keys if key in cached
+        ):
+            return None
+
+        # Retain zeroes for observed zero-volume candles. Missing timestamps
+        # remain absent from the cache and count against coverage.
+        return [
+            safe_int(cached[key])
+            if key is not None and key in cached else 0
+            for key in normalized
+        ]
 
     async def _refresh_futures_volume_proxy(
         self,
@@ -845,9 +1168,15 @@ class DataFetcher:
         """Best-effort background refresh of front-month futures volumes."""
         symbol = str(symbol).upper().strip()
         interval = str(interval).upper().strip()
+        cache_key = (symbol, interval)
 
         try:
-            from app.services.angel_one import angel_session
+            from app.services.angel_one import (
+                ANGEL_PRIORITY_BACKGROUND,
+                angel_session,
+                reset_angel_call_priority,
+                set_angel_call_priority,
+            )
         except Exception as e:
             logger.debug(
                 "Futures volume proxy import unavailable for %s: %s",
@@ -857,12 +1186,14 @@ class DataFetcher:
             return
 
         try:
+            priority_token = None
             if not angel_session.is_configured:
                 return
 
             if symbol not in {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}:
                 return
 
+            priority_token = set_angel_call_priority(ANGEL_PRIORITY_BACKGROUND)
             candles = await angel_session.get_futures_candle_data(
                 symbol,
                 interval=interval,
@@ -888,13 +1219,13 @@ class DataFetcher:
                 if key is None:
                     continue
 
-                volume = safe_int(candle.get("volume", 0))
-                if volume > 0:
-                    volume_map[key] = volume
+                volume = max(0, safe_int(candle.get("volume", 0)))
+                # Retain observed zero-volume timestamps for coverage checks.
+                volume_map[key] = volume
 
-            if volume_map:
-                self._FUTURES_VOLUME_CACHE[symbol] = volume_map
-                self._FUTURES_VOLUME_CACHE_TS[symbol] = time.time()
+            if volume_map and any(value > 0 for value in volume_map.values()):
+                self._FUTURES_VOLUME_CACHE[cache_key] = volume_map
+                self._FUTURES_VOLUME_CACHE_TS[cache_key] = time.time()
 
                 logger.info(
                     "Futures volume proxy cache refreshed: %s %s — %d bars",
@@ -918,7 +1249,9 @@ class DataFetcher:
                 e,
             )
         finally:
-            self._FUTURES_VOLUME_TASKS.pop(symbol, None)
+            if priority_token is not None:
+                reset_angel_call_priority(priority_token)
+            self._FUTURES_VOLUME_TASKS.pop(cache_key, None)
 
     def _schedule_futures_volume_refresh(
         self,
@@ -926,14 +1259,27 @@ class DataFetcher:
         interval: str,
         from_str: str,
         to_str: str,
-    ) -> None:
-        """Start at most one background futures-volume refresh per symbol."""
+    ) -> bool:
+        """Start at most one background futures-volume refresh per symbol/interval."""
         symbol = str(symbol).upper().strip()
+        interval = str(interval).upper().strip()
+        cache_key = (symbol, interval)
 
-        existing = self._FUTURES_VOLUME_TASKS.get(symbol)
+        existing = self._FUTURES_VOLUME_TASKS.get(cache_key)
         if existing is not None and not existing.done():
-            return
+            return False
 
+        now = time.time()
+        last_scheduled = self._FUTURES_VOLUME_LAST_SCHEDULED_TS.get(
+            cache_key, 0.0
+        )
+        if (
+            last_scheduled > 0
+            and now - last_scheduled < self._FUTURES_VOLUME_REFRESH_COOLDOWN
+        ):
+            return False
+
+        self._FUTURES_VOLUME_LAST_SCHEDULED_TS[cache_key] = now
         task = asyncio.create_task(
             self._refresh_futures_volume_proxy(
                 symbol,
@@ -942,7 +1288,8 @@ class DataFetcher:
                 to_str,
             )
         )
-        self._FUTURES_VOLUME_TASKS[symbol] = task
+        self._FUTURES_VOLUME_TASKS[cache_key] = task
+        return True
 
     async def _angel_intraday_ohlc(self, symbol: str, interval: str, bars: int) -> Dict:
         """
@@ -1023,14 +1370,19 @@ class DataFetcher:
         # Once the background refresh completes, subsequent analysis requests
         # receive timestamp-aligned real futures volumes.
 
-        if not any(volumes):
+        if not self._has_positive_volume_in_latest_session(
+            volumes, timestamps, interval
+        ):
             cached_futures_volumes = self._get_cached_futures_volumes(
                 symbol,
                 timestamps,
+                interval,
             )
 
             if cached_futures_volumes is not None:
-                volumes = cached_futures_volumes
+                volumes = self._merge_latest_session_proxy_volumes(
+                    volumes, timestamps, cached_futures_volumes, interval
+                )
                 logger.info(
                     "Using cached %s futures volume as VWAP proxy — %d bars",
                     symbol.upper(),
@@ -1499,10 +1851,21 @@ class DataFetcher:
         }
 
     async def _refresh_futures_premium_background(self, symbol: str) -> None:
-        """Refresh one futures premium without blocking the HTTP caller."""
+        """Refresh futures premium at background broker priority."""
         symbol = str(symbol).upper().strip()
+        priority_token = None
 
         try:
+            from app.services.angel_one import (
+                ANGEL_PRIORITY_BACKGROUND,
+                reset_angel_call_priority,
+                set_angel_call_priority,
+            )
+
+            # asyncio.create_task inherits its creator's ContextVar values.
+            # Explicitly lower this optional refresh to background priority.
+            priority_token = set_angel_call_priority(ANGEL_PRIORITY_BACKGROUND)
+
             async with self._futures_premium_lock:
                 result = await self._fetch_futures_premium_live(symbol)
 
@@ -1522,7 +1885,11 @@ class DataFetcher:
                 e,
             )
         finally:
-            self._futures_premium_refresh_tasks.pop(symbol, None)
+            try:
+                if priority_token is not None:
+                    reset_angel_call_priority(priority_token)
+            finally:
+                self._futures_premium_refresh_tasks.pop(symbol, None)
 
     def _schedule_futures_premium_refresh(self, symbol: str) -> None:
         """Start at most one background refresh for this symbol."""
@@ -1532,65 +1899,58 @@ class DataFetcher:
         if task is not None and not task.done():
             return
 
+        now = time.monotonic()
+        last_scheduled = self._futures_premium_refresh_last_scheduled_ts.get(
+            symbol, 0.0
+        )
+        if (
+            last_scheduled > 0
+            and now - last_scheduled < self._futures_premium_refresh_cooldown
+        ):
+            return
+
+        self._futures_premium_refresh_last_scheduled_ts[symbol] = now
         task = asyncio.create_task(
             self._refresh_futures_premium_background(symbol)
         )
         self._futures_premium_refresh_tasks[symbol] = task
 
     async def get_futures_premium(self, symbol: str) -> Dict:
-        """
-        Return the latest futures premium without making normal HTTP requests
-        wait for every 25-second cache expiry.
-
-        Cache policy:
-          <=15s   : return immediately
-          15-60s  : return immediately + one background refresh
-          >60s    : perform a foreground refresh
-        """
+        """Return optional futures data without blocking HTTP on refreshes."""
         symbol = str(symbol).upper().strip()
-        now = time.time()
-
         cached = self._futures_premium_cache.get(symbol)
         cached_ts = self._futures_premium_cache_ts.get(symbol, 0.0)
-        age = now - cached_ts if cached is not None and cached_ts > 0 else float("inf")
+        age = (
+            time.time() - cached_ts
+            if cached is not None and cached_ts > 0
+            else float("inf")
+        )
 
         if cached is not None and cached.get("status") == "live":
             if age <= self._futures_premium_refresh_after:
                 return cached
 
+            self._schedule_futures_premium_refresh(symbol)
             if age <= self._futures_premium_hard_stale_after:
-                self._schedule_futures_premium_refresh(symbol)
                 return cached
 
-        # No usable cache, or cache is too old: one caller refreshes.
-        async with self._futures_premium_lock:
-            # Another request may have refreshed while we waited.
-            cached = self._futures_premium_cache.get(symbol)
-            cached_ts = self._futures_premium_cache_ts.get(symbol, 0.0)
-            age = (
-                time.time() - cached_ts
-                if cached is not None and cached_ts > 0
-                else float("inf")
-            )
+            stale = dict(cached)
+            stale.update({
+                "status": "stale",
+                "stale_age_sec": round(age, 1),
+                "reason": "Futures premium is stale; background refresh scheduled",
+            })
+            return stale
 
-            if (
-                cached is not None
-                and cached.get("status") == "live"
-                and age <= self._futures_premium_hard_stale_after
-            ):
-                if age > self._futures_premium_refresh_after:
-                    self._schedule_futures_premium_refresh(symbol)
-                return cached
+        self._schedule_futures_premium_refresh(symbol)
+        return {
+            "status": "unavailable",
+            "premium": 0.0,
+            "premium_pct": 0.0,
+            "reason": "No cached live futures premium; background refresh scheduled",
+        }
 
-            result = await self._fetch_futures_premium_live(symbol)
-
-            if result.get("status") == "live":
-                self._futures_premium_cache[symbol] = result
-                self._futures_premium_cache_ts[symbol] = time.time()
-
-            return result
-
-    @async_cache(ttl=1800)
+    @async_cache(ttl=1800, failure_ttl=60)
     async def _get_historical_prices_base(
         self,
         symbol: str,
@@ -1621,6 +1981,19 @@ class DataFetcher:
         }
         index_name = index_map.get(symbol.upper())
         if not index_name:
+            if symbol.upper() == "SENSEX":
+                logger.warning(
+                    "NSE historical fallback unsupported for %s after broker "
+                    "historical sources failed",
+                    symbol,
+                )
+                return {
+                    "closes": [],
+                    "volumes": [],
+                    "available": False,
+                    "data_source": "unavailable",
+                    "reason": "NSE historical fallback is not supported for SENSEX",
+                }
             raise ValueError(f"Unsupported symbol: {symbol}")
 
         to_date = current_ist().date()
@@ -1632,10 +2005,31 @@ class DataFetcher:
             "to": to_date.strftime("%d-%m-%Y"),
         }
 
-        raw = await self._get(
-            "historicalOR/indicesHistory",
-            params=params,
-        )
+        def unavailable(reason: str) -> Dict:
+            # Preserve the established closes/volumes contract. Never invent
+            # prices when all historical providers fail.
+            return {
+                "closes": [],
+                "volumes": [],
+                "available": False,
+                "data_source": "unavailable",
+                "reason": reason,
+            }
+
+        try:
+            raw = await self._get(
+                "historicalOR/indicesHistory",
+                params=params,
+            )
+        except Exception as exc:
+            logger.warning(
+                "NSE historical fallback failed for %s (%s)",
+                symbol,
+                type(exc).__name__,
+            )
+            return unavailable(
+                f"NSE historical request failed: {type(exc).__name__}"
+            )
 
         rows = None
 
@@ -1664,9 +2058,11 @@ class DataFetcher:
                         rows = inner
 
         if not rows:
-            raise MarketDataError(
-                "Unexpected NSE historical response shape"
+            logger.warning(
+                "NSE historical fallback returned no rows for %s",
+                symbol,
             )
+            return unavailable("NSE historical response contained no rows")
 
         parsed = []
 
@@ -1704,9 +2100,11 @@ class DataFetcher:
             parsed.append((dt, safe_float(cv)))
 
         if not parsed:
-            raise MarketDataError(
-                "NSE historical response had no parseable rows"
+            logger.warning(
+                "NSE historical fallback had no parseable rows for %s",
+                symbol,
             )
+            return unavailable("NSE historical response had no parseable rows")
 
         parsed.sort(key=lambda r: r[0])
 
@@ -1800,6 +2198,11 @@ class DataFetcher:
 
     @async_cache(ttl=10)
     async def get_spot(self, symbol: str) -> Dict:
+        """Return the cached public spot result."""
+        return await self._get_spot_uncached(symbol)
+
+    async def _get_spot_uncached(self, symbol: str) -> Dict:
+        """Fetch spot through the provider chain without an outer cache hit."""
         # Prefer fresh Angel One WebSocket LTP.
         # If the exchange timestamp is stale/missing, the existing
         # Angel REST -> Zerodha -> NSE fallback chain remains intact.
@@ -1901,7 +2304,7 @@ class DataFetcher:
         if not all_strikes:
             raise MarketDataError("NSE option-chain-v3: empty data for expiry")
 
-        chain_rows = [r for r in all_strikes if r.get("expiryDate") == expiry] or all_strikes
+        chain_rows = [r for r in all_strikes if canonical_expiry(r.get("expiryDate")) == canonical_expiry(expiry)] or all_strikes
         underlying = safe_float(records.get("underlyingValue", (raw or {}).get("underlyingValue", 0)))
         sorted_expiries = sorted(expiry_list, key=_parse_expiry_date)
         return {
@@ -1911,6 +2314,7 @@ class DataFetcher:
             "underlying_price": underlying,
             "data":             chain_rows,
             "data_source":      f"nse_curl_cffi_v3/{IMPERSONATE}",
+            "fetched_at": current_ist().isoformat(),
         }
 
     # BUG FIX (2026-08-22): TTL == the dashboard's own 30s auto-refresh
@@ -1995,7 +2399,7 @@ class DataFetcher:
             expiry = future[0][1]
 
         all_strikes = records.get("data", [])
-        chain_rows  = [r for r in all_strikes if r.get("expiryDate") == expiry]
+        chain_rows  = [r for r in all_strikes if canonical_expiry(r.get("expiryDate")) == canonical_expiry(expiry)]
         if not chain_rows:
             raise MarketDataError(f"No option chain rows for expiry {expiry}")
 
@@ -2009,6 +2413,7 @@ class DataFetcher:
             "underlying_price": safe_float(records.get("underlyingValue", 0)),
             "data":             chain_rows,
             "data_source":      f"nse_curl_cffi/{IMPERSONATE}",
+            "fetched_at": current_ist().isoformat(),
         }
 
     # LIVE_OPTION_WS_MERGE_20260923
@@ -2028,9 +2433,24 @@ class DataFetcher:
         if chain.get("data_source") != "angel_one":
             return chain
 
+        # Do not mutate the shared option-chain cache.
+        chain = copy.deepcopy(chain)
         rows = chain.get("data")
         if not isinstance(rows, list) or not rows:
             return chain
+
+        chain.pop("live_option_data_source", None)
+        chain["live_option_ticks_merged"] = 0
+        fields = ("live_ws", "live_ws_received_at", "live_ws_age_sec",
+                  "live_ws_source", "live_ws_exchange_timestamp",
+                  "live_ws_exchange_timestamp_ms", "live_ws_quote")
+        for row in rows:
+            if isinstance(row, dict):
+                for name in ("CE", "PE"):
+                    leg = row.get(name)
+                    if isinstance(leg, dict):
+                        for field in fields:
+                            leg.pop(field, None)
 
         try:
             from app.services.angel_live_feed import angel_live_feed
@@ -2082,63 +2502,52 @@ class DataFetcher:
                 if chain_expiry and tick_expiry and tick_expiry != chain_expiry:
                     continue
 
-                changed = False
-
-                # Fast-changing live market fields.
-                if tick.get("ltp") is not None:
+                # REST remains authoritative for analytics/history.
+                # Store a complete, timestamped WS quote separately.
+                quote = {}
+                for tick_key, quote_key in (
+                    ("ltp", "ltp"),
+                    ("bidprice", "bid"),
+                    ("askPrice", "ask"),
+                ):
+                    value = tick.get(tick_key)
                     try:
-                        leg["lastPrice"] = float(tick["ltp"])
-                        changed = True
+                        value = float(value)
                     except (TypeError, ValueError):
-                        pass
+                        continue
+                    if value > 0:
+                        quote[quote_key] = value
 
-                if tick.get("volume_trade_for_the_day") is not None:
-                    try:
-                        leg["totalTradedVolume"] = float(
-                            tick["volume_trade_for_the_day"]
-                        )
-                        changed = True
-                    except (TypeError, ValueError):
-                        pass
+                if not quote:
+                    continue
 
-                if tick.get("open_interest") is not None:
-                    try:
-                        leg["openInterest"] = float(tick["open_interest"])
-                        changed = True
-                    except (TypeError, ValueError):
-                        pass
+                # Keep WS OI/volume visible for diagnostics without mixing
+                # those values into the REST analytics columns.
+                for key in (
+                    "open_interest",
+                    "volume_trade_for_the_day",
+                    "open_interest_change_percentage_raw",
+                    "last_traded_quantity",
+                    "total_buy_quantity",
+                    "total_sell_quantity",
+                ):
+                    if tick.get(key) is not None:
+                        quote[key] = tick[key]
 
-                if tick.get("bidprice") is not None:
-                    try:
-                        leg["bidprice"] = float(tick["bidprice"])
-                        changed = True
-                    except (TypeError, ValueError):
-                        pass
+                quote["received_at"] = float(received_at)
+                quote["age_sec"] = round(max(0.0, age), 3)
+                quote["source"] = "angel_one_websocket"
+                quote["exchange_timestamp"] = tick.get("timestamp")
+                quote["exchange_timestamp_ms"] = tick.get("exchange_timestamp")
+                leg["live_ws_quote"] = quote
 
-                if tick.get("askPrice") is not None:
-                    try:
-                        leg["askPrice"] = float(tick["askPrice"])
-                        changed = True
-                    except (TypeError, ValueError):
-                        pass
-
-                if tick.get("last_traded_quantity") is not None:
-                    leg["lastTradedQuantity"] = tick["last_traded_quantity"]
-
-                if tick.get("total_buy_quantity") is not None:
-                    leg["totalBuyQuantity"] = tick["total_buy_quantity"]
-
-                if tick.get("total_sell_quantity") is not None:
-                    leg["totalSellQuantity"] = tick["total_sell_quantity"]
-
-                # Explicitly expose freshness/source without replacing the
-                # provider identity "angel_one".
-                if changed:
-                    leg["live_ws"] = True
-                    leg["live_ws_received_at"] = received_at
-                    leg["live_ws_age_sec"] = round(max(0.0, age), 3)
-                    leg["live_ws_source"] = "angel_one_websocket"
-                    merged += 1
+                leg["live_ws"] = True
+                leg["live_ws_received_at"] = received_at
+                leg["live_ws_age_sec"] = round(max(0.0, age), 3)
+                leg["live_ws_source"] = "angel_one_websocket"
+                leg["live_ws_exchange_timestamp"] = tick.get("timestamp")
+                leg["live_ws_exchange_timestamp_ms"] = tick.get("exchange_timestamp")
+                merged += 1
 
         if merged:
             chain["live_option_ticks_merged"] = merged
@@ -2157,7 +2566,27 @@ class DataFetcher:
         # REST/contract data stays 40-sec cached; only the live overlay is
         # performed outside that cache so every caller sees fresh WS values.
         chain = await self._get_option_chain_cached(symbol, expiry, strikes_each_side=strikes_each_side)
-        return self._merge_live_option_ticks(chain)
+        try:
+            # Persist the original REST snapshot before overlaying WS quotes.
+            await _persist_option_chain_snapshot_if_due(chain, symbol)
+        except Exception as exc:
+            # Persistence must never make a live option-chain request fail.
+            logger.warning(
+                "Option snapshot persistence failed for %s (%s)",
+                symbol,
+                type(exc).__name__,
+            )
+        merged_chain = self._merge_live_option_ticks(chain)
+        try:
+            # Keep the legacy REST snapshot for OI history unchanged. Store
+            # the strategy-facing merged quote in a separate history table.
+            await _persist_option_quote_history_if_due(merged_chain, symbol)
+        except Exception as exc:
+            logger.warning(
+                "Option quote history persistence failed for %s (%s)",
+                symbol, type(exc).__name__,
+            )
+        return merged_chain
 
     async def get_spot_multiple(self, symbols: List[str]) -> Dict:
         results = await asyncio.gather(
@@ -2179,15 +2608,13 @@ class DataFetcher:
         return await self._get("allIndices")
 
     @async_cache(ttl=30)
-    async def get_volatility(self) -> float:
-        """India VIX — NSE allIndices first, Angel One fallback.
+    async def get_volatility_info(self) -> Dict:
+        """India VIX with explicit availability and source metadata.
 
-        NSE allIndices is already shared/cached for VIX, breadth and sectors.
-        Prefer that source so a normal VIX lookup does not consume an
-        additional Angel One throttle slot. Angel One remains a fallback
-        when NSE is unavailable or VIX is missing from the response.
+        Zero is an unavailable sentinel, not an observed VIX value.
+        fetched_at represents when this application obtained the result;
+        observed_at is populated only when the provider supplies a timestamp.
         """
-        # Primary: shared NSE allIndices cache.
         try:
             data = await self._get_all_indices()
             items = (data or {}).get("data", [])
@@ -2195,44 +2622,64 @@ class DataFetcher:
             for item in items:
                 if not isinstance(item, dict):
                     continue
-
                 sym = str(item.get("indexSymbol", "")).upper()
-                if "VIX" in sym:
-                    val = safe_float(
-                        item.get("last", item.get("lastPrice", 0))
-                    )
-                    if val > 0:
-                        logger.info(
-                            "India VIX from allIndices (%s): %s",
-                            sym,
-                            val,
-                        )
-                        return val
+                if "VIX" not in sym:
+                    continue
+
+                value = safe_float(item.get("last", item.get("lastPrice", 0)))
+                if value > 0:
+                    return {
+                        "value": value,
+                        "available": True,
+                        "source": "nse_allIndices",
+                        "fetched_at": current_ist().isoformat(),
+                        "observed_at": (
+                            item.get("lastUpdateTime")
+                            or item.get("timeVal")
+                            or item.get("timestamp")
+                        ),
+                        "reason": None,
+                    }
 
             logger.warning(
                 "VIX not found in NSE allIndices; using Angel One fallback"
             )
-
-        except Exception as e:
+        except Exception as exc:
             logger.warning(
-                "NSE allIndices VIX fetch failed; "
-                "using Angel One fallback: %s",
-                e,
+                "NSE allIndices VIX fetch failed; using Angel One fallback: %s",
+                exc,
             )
 
-        # Fallback: Angel One.
         try:
             from app.services.angel_one import angel_session
 
             if angel_session is not None and angel_session.is_configured:
-                vix = await angel_session.get_india_vix()
-                if vix and vix > 0:
-                    return vix
+                value = await angel_session.get_india_vix()
+                if value and value > 0:
+                    return {
+                        "value": float(value),
+                        "available": True,
+                        "source": "angel_one",
+                        "fetched_at": current_ist().isoformat(),
+                        "observed_at": None,
+                        "reason": None,
+                    }
+        except Exception as exc:
+            logger.warning("India VIX via Angel One fallback failed: %s", exc)
 
-        except Exception as e:
-            logger.warning("India VIX via Angel One fallback failed: %s", e)
+        return {
+            "value": 0.0,
+            "available": False,
+            "source": "unavailable",
+            "fetched_at": current_ist().isoformat(),
+            "observed_at": None,
+            "reason": "No valid VIX value returned by NSE or Angel One",
+        }
 
-        return 0.0
+    async def get_volatility(self) -> float:
+        """Backwards-compatible numeric API for existing callers."""
+        info = await self.get_volatility_info()
+        return safe_float(info.get("value", 0.0))
 
     @async_cache(ttl=30)
     async def get_market_breadth(self) -> Dict:

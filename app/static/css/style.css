@@ -33,7 +33,7 @@ body {
               var(--bg);
   background-attachment: fixed;
   color: var(--text);
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'Noto Sans Tamil', 'Latha', 'Nirmala UI', 'Segoe UI', system-ui, -apple-system, sans-serif;
   font-size: 15px;
   line-height: 1.5;
   min-height: 100vh;
@@ -474,4 +474,58 @@ body:has(#lt-root) main {
 }
 body:has(#lt-root) {
   background: #F5F7FA;
+}
+
+
+/* Tamil-first Live View candlestick controls */
+.live-chart-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    margin: 0.75rem 0;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: rgba(255,255,255,0.025);
+}
+.live-chart-title {
+    color: var(--text);
+    font-size: 0.92rem;
+    font-weight: 700;
+}
+.live-chart-status {
+    color: var(--text2);
+    font-size: 0.76rem;
+}
+.live-chart-status[data-state="live"] { color: var(--green); }
+.live-chart-status[data-state="warning"] { color: var(--yellow); }
+.live-chart-status[data-state="historical"] { color: var(--text2); }
+.live-chart-intervals {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+}
+.live-chart-interval {
+    min-height: 36px;
+    padding: 0.35rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--glass2);
+    color: var(--text2);
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+.live-chart-interval.is-active {
+    color: #fff;
+    border-color: var(--primary);
+    background: rgba(64,196,255,0.14);
+}
+#liveChart { min-height: 340px; }
+@media (max-width: 640px) {
+    .live-chart-toolbar { align-items: flex-start; }
+    .live-chart-status { width: 100%; order: 3; }
+    #liveChart { min-height: 300px; }
 }

@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 
 from app.services.market_regime import classify_market_regime
+from app.services.decision_trace import record_decision_trace
 
 logger = logging.getLogger(__name__)
 
@@ -319,10 +320,14 @@ def apply_persistent_signal_lifecycle(
         decision.get("raw_preferred_side", decision.get("preferred_side", "NONE"))
     ).upper()
     margin = float(decision.get("margin", 0) or 0)
-    market_open = bool(decision.get("market_open", True))
+    market_open = decision.get("market_open") is True
+    regime_hard_no_trade = decision.get(
+        "market_regime_hard_no_trade",
+        decision.get("market_regime_no_trade", False),
+    )
     hard_gated = (
         bool(decision.get("hard_gated", False))
-        or bool(decision.get("market_regime_no_trade", False))
+        or bool(regime_hard_no_trade)
         or not market_open
     )
 
@@ -366,6 +371,21 @@ def apply_persistent_signal_lifecycle(
         )
 
         out = dict(decision)
+
+        # A stale gated response must be safe without overwriting newer
+        # persisted lifecycle state from a more recent market snapshot.
+        if hard_gated:
+            out["signal_lifecycle"] = "WAIT"
+            out["signal_candidate"] = "NONE"
+            out["signal_confirmations"] = 0
+            out["signal_reversal_confirmations"] = 0
+            out["signal_active_side"] = "NONE"
+            out["signal_lifecycle_reason"] = (
+                "Hard safety gate is active; no directional signal is allowed."
+            )
+            out["preferred_side"] = "NONE"
+            return out, state
+
         out["signal_lifecycle"] = lifecycle
         out["signal_candidate"] = candidate
         out["signal_confirmations"] = confirmations
@@ -797,15 +817,93 @@ def _score_pcr(pcr: float) -> Tuple[str, int, str]:
         return "neutral", 0, f"PCR {pcr:.2f} — Neutral zone"
 
 
-def _score_oi_change(oi: Dict) -> Tuple[str, int, str]:
-    ce_chg = oi.get("ce_change", 0)
-    pe_chg = oi.get("pe_change", 0)
-    if pe_chg > ce_chg and pe_chg > 0:
-        return "bull", WEIGHTS["oi_change"], f"PE OI buildup (+{pe_chg:,}) > CE — bullish"
-    elif ce_chg > pe_chg and ce_chg > 0:
-        return "bear", WEIGHTS["oi_change"], f"CE OI buildup (+{ce_chg:,}) > PE — bearish"
-    return "neutral", 0, "OI change neutral"
+# OI_TRACKED_SCORING_20261015
+# The provider's day-change OI field is 0 for these chains, so oi_change always
+# scored neutral. Prefer this app's own 15-minute tracked change when available.
+def _oi_change_for_scoring(market_data):
+    # If the tracked-OI contract is present, it is authoritative for
+    # same-session scoring. Do not fall back to provider zeros when tracking
+    # is missing, unavailable, or incomplete.
+    if "oi_change_tracked" in market_data:
+        tracked = market_data.get("oi_change_tracked")
+        if not isinstance(tracked, dict) or tracked.get("available") is not True:
+            reason = (
+                tracked.get("reason") if isinstance(tracked, dict) else None
+            ) or "tracked OI reference coverage is unavailable"
+            return {"available": False, "reason": str(reason)}
 
+        ce_raw = tracked.get("ce_oi_change")
+        pe_raw = tracked.get("pe_oi_change")
+        if ce_raw is None or pe_raw is None:
+            return {
+                "available": False,
+                "reason": "tracked CE/PE OI-change values are incomplete",
+            }
+
+        try:
+            return {
+                "available": True,
+                "ce_change": int(ce_raw),
+                "pe_change": int(pe_raw),
+            }
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "available": False,
+                "reason": "tracked CE/PE OI-change values are invalid",
+            }
+
+    # Compatibility for older callers with no tracked-OI field at all.
+    # Explicit unavailability above must never reach this fallback.
+    provider = market_data.get("oi_change")
+    if not isinstance(provider, dict):
+        return {
+            "available": False,
+            "reason": "provider OI-change data is unavailable",
+        }
+
+    ce_raw = provider.get("ce_change")
+    pe_raw = provider.get("pe_change")
+    if ce_raw is None or pe_raw is None:
+        return {
+            "available": False,
+            "reason": "provider CE/PE OI-change values are incomplete",
+        }
+
+    try:
+        return {
+            "available": True,
+            "ce_change": int(ce_raw),
+            "pe_change": int(pe_raw),
+        }
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "available": False,
+            "reason": "provider CE/PE OI-change values are invalid",
+        }
+
+def _score_oi_change(oi: Dict) -> Tuple[str, int, str]:
+    if not isinstance(oi, dict):
+        return "neutral", 0, "OI change unavailable: invalid OI data"
+
+    if oi.get("available") is False:
+        reason = str(
+            oi.get("reason") or "reliable OI-change comparison unavailable"
+        )
+        return "neutral", 0, f"OI change unavailable: {reason}"
+
+    ce_chg = oi.get("ce_change")
+    pe_chg = oi.get("pe_change")
+    if ce_chg is None or pe_chg is None:
+        return (
+            "neutral", 0,
+            "OI change unavailable: CE/PE change values are incomplete",
+        )
+
+    if pe_chg > ce_chg and pe_chg > 0:
+        return "bull", WEIGHTS["oi_change"], f"PE OI buildup (+{pe_chg:,}) > CE ? bullish"
+    elif ce_chg > pe_chg and ce_chg > 0:
+        return "bear", WEIGHTS["oi_change"], f"CE OI buildup (+{ce_chg:,}) > PE ? bearish"
+    return "neutral", 0, "OI change neutral"
 
 def _score_max_pain(spot: float, max_pain: float) -> Tuple[str, int, str]:
     if max_pain <= 0:
@@ -818,7 +916,7 @@ def _score_max_pain(spot: float, max_pain: float) -> Tuple[str, int, str]:
     return "neutral", int(WEIGHTS["max_pain"] * 0.3), f"Spot near Max Pain {max_pain:.0f}"
 
 
-def _score_call_writing(df_summary: Dict) -> Tuple[str, int, str]:
+def _score_call_writing_legacy(df_summary: Dict) -> Tuple[str, int, str]:
     """OI buildup classification at max-CE-OI strike.
 
     Max OI alone ≠ Call writing — it could be long positioning, old
@@ -858,15 +956,21 @@ def _score_call_writing(df_summary: Dict) -> Tuple[str, int, str]:
             return "bear", int(WEIGHTS["call_writing"] * 0.5), f"Call OI buildup near {ce_top_oi:.0f} (price direction unclear)"
         return "neutral", 0, f"Call OI at {ce_top_oi:.0f} — direction unclear"
 
-    # Fallback: proximity only (no OI-change data) — reduced weight since less certain
+    # Proximity-only fallback when OI change or ATM option price direction is unavailable — reduced weight since less certain
+    missing_fields = []
+    if ce_oi_chg is None:
+        missing_fields.append("OI change")
+    if ce_price_chg is None:
+        missing_fields.append("ATM option price change")
+    fallback_note = f"{' and '.join(missing_fields)} unavailable; proximity-only fallback"
     if 0 < dist < spot * 0.02:
-        return "bear", int(WEIGHTS["call_writing"] * 0.5), f"Max Call OI near {ce_top_oi:.0f} — possible resistance (OI change unavailable)"
+        return "bear", int(WEIGHTS["call_writing"] * 0.5), f"Max Call OI near {ce_top_oi:.0f} — possible resistance ({fallback_note})"
     elif dist > spot * 0.03:
-        return "bull", int(WEIGHTS["call_writing"] * 0.3), f"Max Call OI far OTM at {ce_top_oi:.0f} — less resistance"
-    return "neutral", 0, "Call OI pattern neutral"
+        return "bull", int(WEIGHTS["call_writing"] * 0.3), f"Max Call OI far OTM at {ce_top_oi:.0f} — less resistance ({fallback_note})"
+    return "neutral", 0, f"Call OI pattern neutral: {fallback_note}"
 
 
-def _score_put_writing(df_summary: Dict) -> Tuple[str, int, str]:
+def _score_put_writing_legacy(df_summary: Dict) -> Tuple[str, int, str]:
     """OI buildup classification at max-PE-OI strike.
 
     Same principle as call writing — max OI alone ≠ put writing.
@@ -900,12 +1004,97 @@ def _score_put_writing(df_summary: Dict) -> Tuple[str, int, str]:
             return "bull", int(WEIGHTS["put_writing"] * 0.5), f"Put OI buildup near {pe_top_oi:.0f} (price direction unclear)"
         return "neutral", 0, f"Put OI at {pe_top_oi:.0f} — direction unclear"
 
-    # Fallback: proximity only
+    # Proximity-only fallback when OI change or ATM option price direction is unavailable
+    missing_fields = []
+    if pe_oi_chg is None:
+        missing_fields.append("OI change")
+    if pe_price_chg is None:
+        missing_fields.append("ATM option price change")
+    fallback_note = f"{' and '.join(missing_fields)} unavailable; proximity-only fallback"
     if 0 < dist < spot * 0.02:
-        return "bull", int(WEIGHTS["put_writing"] * 0.5), f"Max Put OI near {pe_top_oi:.0f} — possible support (OI change unavailable)"
+        return "bull", int(WEIGHTS["put_writing"] * 0.5), f"Max Put OI near {pe_top_oi:.0f} — possible support ({fallback_note})"
     elif dist > spot * 0.03:
-        return "bear", int(WEIGHTS["put_writing"] * 0.3), f"Max Put OI far OTM at {pe_top_oi:.0f} — weak support"
-    return "neutral", 0, "Put OI pattern neutral"
+        return "bear", int(WEIGHTS["put_writing"] * 0.3), f"Max Put OI far OTM at {pe_top_oi:.0f} — weak support ({fallback_note})"
+    return "neutral", 0, f"Put OI pattern neutral: {fallback_note}"
+
+
+
+
+def _score_tracked_wall(summary, side):
+    """Score only valid tracked evidence matching the exact current OI wall."""
+    import math
+    is_ce = side == "ce"
+    strike_key = "ce_max_oi_strike" if is_ce else "pe_max_oi_strike"
+    evidence = summary.get("_wall_evidence")
+    wall = evidence.get(side) if isinstance(evidence, dict) else None
+    if not isinstance(wall, dict) or wall.get("available") is not True:
+        return None
+    try:
+        strike = float(summary.get(strike_key) or 0)
+        wall_strike = float(wall["strike"])
+        spot = float(summary.get("spot") or 0)
+        oi_raw = float(wall["oi_change"])
+        price_delta = float(wall["price_change"])
+        current_price = float(wall["current_price"])
+        previous_price = float(wall["previous_price"])
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(v) for v in
+               (strike, wall_strike, spot, oi_raw, price_delta,
+                current_price, previous_price)):
+        return None
+    if strike <= 0 or spot <= 0 or abs(strike - wall_strike) > 1e-6:
+        return None
+    if current_price <= 0 or previous_price <= 0:
+        return None
+    if abs((current_price - previous_price) - price_delta) > 0.02:
+        return None
+    if not oi_raw.is_integer():
+        return None
+
+    oi_delta = int(oi_raw)
+    weight = WEIGHTS["call_writing" if is_ce else "put_writing"]
+    side_name = "CE" if is_ce else "PE"
+    if oi_delta == 0 or price_delta == 0:
+        return ("neutral", 0,
+                f"Tracked {side_name} wall at {strike:.0f}: "
+                "zero OI or price change; directional score withheld")
+
+    distance = strike - spot if is_ce else spot - strike
+    near_wall = 0 < distance < spot * 0.025
+
+    if oi_delta > 0 and price_delta < 0:
+        if not near_wall:
+            return ("neutral", 0,
+                    f"Tracked {side_name} short buildup at {strike:.0f}; "
+                    "wall outside nearby support/resistance range")
+        direction = "bear" if is_ce else "bull"
+        return (direction, weight,
+                f"Tracked {side_name} short buildup at {strike:.0f}; "
+                "OI up, option price down")
+    if oi_delta > 0 and price_delta > 0:
+        direction = "bull" if is_ce else "bear"
+        return (direction, int(weight * 0.6),
+                f"Tracked {side_name} long buildup at {strike:.0f}")
+    if oi_delta < 0 and price_delta > 0:
+        direction = "bull" if is_ce else "bear"
+        return (direction, int(weight * 0.4),
+                f"Tracked {side_name} short covering at {strike:.0f}")
+    if oi_delta < 0 and price_delta < 0:
+        direction = "bear" if is_ce else "bull"
+        return (direction, int(weight * 0.4),
+                f"Tracked {side_name} long unwinding at {strike:.0f}")
+    return ("neutral", 0, f"Tracked {side_name} wall direction unavailable")
+
+
+def _score_call_writing(df_summary: Dict) -> Tuple[str, int, str]:
+    tracked = _score_tracked_wall(df_summary, "ce")
+    return tracked if tracked is not None else _score_call_writing_legacy(df_summary)
+
+
+def _score_put_writing(df_summary: Dict) -> Tuple[str, int, str]:
+    tracked = _score_tracked_wall(df_summary, "pe")
+    return tracked if tracked is not None else _score_put_writing_legacy(df_summary)
 
 
 def _score_futures_premium(premium: float, status: str = "live") -> Tuple[str, int, str]:
@@ -954,6 +1143,49 @@ def _score_ema(spot: float, ema20: float, ema50: float) -> Tuple[Tuple, Tuple]:
         s50 = ("neutral", 0, "EMA50 unavailable")
 
     return s20, s50
+
+
+# TREND_AWARE_MOMENTUM_20261015
+# In a strong, established trend RSI overbought/oversold and a lagging MACD
+# are normal, not reversal evidence. Applied ONLY when ADX and DI agree and
+# price is beyond both EMAs.
+STRONG_TREND_ADX_MIN = 30
+STRONG_TREND_DI_SPREAD_MIN = 15
+
+
+def _strong_trend_direction(spot, technicals):
+    try:
+        adx = float(technicals.get("adx", 0) or 0)
+        dip = float(technicals.get("di_plus", 0) or 0)
+        dim = float(technicals.get("di_minus", 0) or 0)
+        ema20 = float(technicals.get("ema20", 0) or 0)
+        ema50 = float(technicals.get("ema50", 0) or 0)
+        spot = float(spot or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if adx < STRONG_TREND_ADX_MIN or spot <= 0:
+        return None
+    if dip - dim >= STRONG_TREND_DI_SPREAD_MIN and ema20 > 0 and ema50 > 0 and spot > ema20 and spot > ema50:
+        return "bull"
+    if dim - dip >= STRONG_TREND_DI_SPREAD_MIN and ema20 > 0 and ema50 > 0 and spot < ema20 and spot < ema50:
+        return "bear"
+    return None
+
+
+def _trend_aware_rsi(result, trend_dir):
+    direction, pts, reason = result
+    if trend_dir == "bull" and direction == "bear" and pts >= WEIGHTS["rsi"]:
+        return "neutral", 0, reason + " - overbought inside a strong uptrend, not counted as bearish"
+    if trend_dir == "bear" and direction == "bull" and pts >= WEIGHTS["rsi"]:
+        return "neutral", 0, reason + " - oversold inside a strong downtrend, not counted as bullish"
+    return result
+
+
+def _trend_aware_macd(result, trend_dir):
+    direction, pts, reason = result
+    if (trend_dir == "bull" and direction == "bear") or (trend_dir == "bear" and direction == "bull"):
+        return direction, int(pts * 0.5), reason + " - weight halved (strong opposite trend)"
+    return result
 
 
 def _score_rsi(rsi: float) -> Tuple[str, int, str]:
@@ -1296,12 +1528,42 @@ def _mtf_live_valid(multi_tf: Dict) -> bool:
     )
 
 
+def _option_chain_quality_state(market_data: Dict) -> Dict:
+    quality = market_data.get("option_chain_quality")
+    if not isinstance(quality, dict) or not quality:
+        meta = market_data.get("pcr_quality")
+        quality = meta.get("chain_quality") if isinstance(meta, dict) else None
+
+    if not isinstance(quality, dict) or not quality:
+        return {
+            "reported": False, "oi_usable": True, "volume_usable": True,
+            "oi_reason": "", "volume_reason": "",
+        }
+
+    available = quality.get("available") is True
+    return {
+        "reported": True,
+        "oi_usable": available and quality.get("oi_usable") is True,
+        "volume_usable": available and quality.get("volume_usable") is True,
+        "oi_reason": str(quality.get("reason") or "OI coverage insufficient"),
+        "volume_reason": str(
+            quality.get("volume_reason") or "Volume coverage insufficient"
+        ),
+    }
+
+
 def _data_availability(market_data: Dict, tech_src: str) -> Dict[str, bool]:
     # PCR/OI-change/max-pain/writing patterns all derive from the same
     # option-chain fetch — pcr<=0 is that fetch's own "empty/unavailable"
     # sentinel (see _score_pcr fix above), so it's a more direct signal
     # than the oi_summary truthiness check used before.
+    quality = _option_chain_quality_state(market_data)
     chain_available = market_data.get("pcr", 0) > 0
+    if quality["reported"]:
+        chain_available = chain_available and quality["oi_usable"]
+        writing_available = chain_available and quality["volume_usable"]
+    else:
+        writing_available = chain_available
     # SAFETY FIX 2026-09-11:
     # Daily historical close data is useful for context, but it must NOT be
     # counted as LIVE intraday technical data for directional-signal safety.
@@ -1325,9 +1587,21 @@ def _data_availability(market_data: Dict, tech_src: str) -> Dict[str, bool]:
         and mtf_live_valid
     )
 
+    # Missing/incomplete OI tracking must be omitted from the scoring
+    # denominator instead of being counted as a valid neutral observation.
+    oi_change_input = _oi_change_for_scoring(market_data)
+    oi_change_available = (
+        isinstance(oi_change_input, dict)
+        and oi_change_input.get("available") is not False
+        and oi_change_input.get("ce_change") is not None
+        and oi_change_input.get("pe_change") is not None
+    )
+
     return {
-        "pcr": chain_available, "oi_change": chain_available, "max_pain": chain_available,
-        "call_writing": chain_available, "put_writing": chain_available,
+        "pcr": chain_available,
+        "oi_change": chain_available and oi_change_available,
+        "max_pain": chain_available,
+        "call_writing": writing_available, "put_writing": writing_available,
         "futures_premium": market_data.get("futures_premium_status") == "live",
 
         # SAFETY FIX:
@@ -1369,23 +1643,62 @@ def run_decision_engine(market_data: Dict) -> Dict:
     scores = {"bull": 0, "bear": 0, "neutral": 0}
     reasons: List[str] = []
     recorded_items: List[Tuple[str, str, int]] = []  # (indicator_name, direction, points) — for bucket dampening
+    indicator_trace_items: List[Dict] = []  # diagnostics only
+
+    option_quality = _option_chain_quality_state(market_data)
 
     def record(name: str, result: Tuple):
         direction, pts, reason = result
+        if option_quality["reported"]:
+            if name in ("pcr", "oi_change", "max_pain") and not option_quality["oi_usable"]:
+                direction, pts = "neutral", 0
+                reason = (
+                    "Option-chain OI quality limited - "
+                    f"{option_quality['oi_reason']}; {name} score withheld"
+                )
+            elif name in ("call_writing", "put_writing"):
+                if not option_quality["oi_usable"]:
+                    direction, pts = "neutral", 0
+                    reason = (
+                        "Option-chain OI quality limited - "
+                        f"{option_quality['oi_reason']}; writing score withheld"
+                    )
+                elif not option_quality["volume_usable"]:
+                    wall_side = "ce" if name == "call_writing" else "pe"
+                    wall_score = _score_tracked_wall(writing_summary, wall_side)
+                    if (wall_score is not None
+                            and wall_score[0] in ("bull", "bear")
+                            and wall_score[1] > 0):
+                        direction, pts, wall_reason = wall_score
+                        reason = (
+                            f"{wall_reason}; full-chain volume coverage limited "
+                            "(confidence completeness penalty retained)"
+                        )
+                    else:
+                        direction, pts = "neutral", 0
+                        reason = (
+                            "Option-chain volume coverage limited - "
+                            f"{option_quality['volume_reason']}; writing score withheld"
+                        )
         scores[direction] = scores.get(direction, 0) + pts
         recorded_items.append((name, direction, pts))
+        indicator_trace_items.append({"name": name, "direction": direction, "points": pts, "reason": reason})
         reasons.append(f"{'🟢' if direction=='bull' else '🔴' if direction=='bear' else '⚪'} {reason}")
 
     # 1. PCR
     record("pcr", _score_pcr(market_data.get("pcr", 0)))
     # 2. OI Change
-    record("oi_change", _score_oi_change(market_data.get("oi_change", {})))
+    record("oi_change", _score_oi_change(_oi_change_for_scoring(market_data)))
     # 3. Max Pain
     record("max_pain", _score_max_pain(spot, market_data.get("max_pain", 0)))
     # 4. Call Writing
-    record("call_writing", _score_call_writing(oi_summary))
+    tracked_oi = market_data.get("oi_change_tracked") or {}
+    wall_evidence = tracked_oi.get("wall_evidence") if isinstance(tracked_oi, dict) else None
+    writing_summary = dict(oi_summary) if isinstance(oi_summary, dict) else {}
+    writing_summary["_wall_evidence"] = wall_evidence
+    record("call_writing", _score_call_writing(writing_summary))
     # 5. Put Writing
-    record("put_writing", _score_put_writing(oi_summary))
+    record("put_writing", _score_put_writing(writing_summary))
     # 6. Futures Premium
     record("futures_premium", _score_futures_premium(
         market_data.get("futures_premium", 0),
@@ -1397,9 +1710,10 @@ def run_decision_engine(market_data: Dict) -> Dict:
     s20, s50 = _score_ema(spot, technicals.get("ema20", 0), technicals.get("ema50", 0))
     record("ema20", s20); record("ema50", s50)
     # 10. RSI
-    record("rsi", _score_rsi(market_data.get("rsi", 50)))
+    _trend_dir = _strong_trend_direction(spot, technicals)
+    record("rsi", _trend_aware_rsi(_score_rsi(market_data.get("rsi", 50)), _trend_dir))
     # 11. MACD
-    record("macd", _score_macd(market_data.get("macd", {})))
+    record("macd", _trend_aware_macd(_score_macd(market_data.get("macd", {})), _trend_dir))
     # 12. ADX
     record("adx", _score_adx(technicals.get("adx", 0), technicals.get("di_plus", 0), technicals.get("di_minus", 0)))
     # 13. ATR Risk
@@ -1510,7 +1824,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # Market closed → no live edge to read; be explicit about it rather
     # than showing a stale intraday bias.
     hard_gated = False
-    if not spot_data.get("market_open", True):
+    if spot_data.get("market_open") is not True:
         market_bias = "Sideways"
         preferred_side = "NONE"
         hard_gated = True
@@ -2024,7 +2338,7 @@ def run_decision_engine(market_data: Dict) -> Dict:
     # The market-closed hard gate above already blocks directional signals.
     # Do not let unavailable sentinel values (ADX/VIX/ATR = 0) generate a
     # live-market strategy description such as RANGE / Iron Condor.
-    if not spot_data.get("market_open", True):
+    if spot_data.get("market_open") is not True:
         forecast = "Market Closed"
         strategy = "WAIT"
         strategy_reason = (
@@ -2137,8 +2451,46 @@ def run_decision_engine(market_data: Dict) -> Dict:
     else:
         recommended_strike = "ATM+1"
 
+    # DECISION_TRACE_V1: observational only.
+    _trace_gate_reasons = [str(r) for r in reasons if str(r).lstrip().startswith("🚫")]
+    try:
+        record_decision_trace(
+            market_data=market_data, indicators=indicator_trace_items,
+            raw_scores=scores, bull_score=bull, bear_score=bear,
+            margin=margin, data_completeness_pct=data_completeness_pct,
+            data_availability=availability, regime=regime,
+            regime_confidence=regime_info.get("confidence", "LOW"),
+            regime_reasons=regime_info.get("reasons", []),
+            regime_no_trade_reason=regime_info.get("no_trade_reason", ""),
+            session_context=session_context, raw_preferred_side=raw_preferred_side,
+            preferred_side=preferred_side, lifecycle=lifecycle,
+            hard_gated=hard_gated, gate_reasons=_trace_gate_reasons,
+            thresholds={
+                "directional_margin": 10,
+                "confirmation_margin": SIGNAL_CONFIRMATION_MIN_MARGIN,
+                "hold_margin": SIGNAL_HOLD_MIN_MARGIN,
+                "reversal_margin": SIGNAL_REVERSAL_MIN_MARGIN,
+                "required_confirmations": SIGNAL_CONFIRMATIONS_REQUIRED,
+                "required_reversal_confirmations": SIGNAL_REVERSAL_CONFIRMATIONS_REQUIRED,
+                "confirmation_min_interval_seconds": SIGNAL_CONFIRMATION_MIN_INTERVAL_SECONDS,
+            },
+            gate_state={
+                "market_open": spot_data.get("market_open") is True,
+                "spot_valid": spot_valid,
+                "option_chain_available": chain_available,
+                "technical_data_available": tech_available,
+                "live_intraday_technical_data": live_intraday_tech,
+                "mtf_live_valid": mtf_live_valid,
+                "regime_no_trade": regime == "NO_TRADE",
+                "market_regime_no_trade_flag": bool(
+                    regime_info.get("hard_no_trade", regime_info.get("no_trade", False))
+                ),
+            },
+        )
+    except Exception:
+        logger.warning("Decision trace observer failed; decision remains unchanged", exc_info=True)
     return {
-        "market_open":           spot_data.get("market_open", True),
+        "market_open":           spot_data.get("market_open") is True,
         "market_bias":           market_bias,
         "bullish_probability":   bullish_probability,
         "bearish_probability":   bearish_probability,
@@ -2179,7 +2531,12 @@ def run_decision_engine(market_data: Dict) -> Dict:
         "market_regime_reasons": regime_info.get("reasons", []),
         "market_regime_reasons_ta": regime_info.get("reasons_ta", []),
         "market_regime_no_trade_reason_ta": regime_info.get("no_trade_reason_ta", ""),
-        "market_regime_no_trade": regime_info.get("no_trade", False),
+        "market_regime_no_trade": regime_info.get(
+            "hard_no_trade", regime_info.get("no_trade", False)
+        ),
+        "market_regime_hard_no_trade": regime_info.get(
+            "hard_no_trade", regime_info.get("no_trade", False)
+        ),
         "market_regime_no_trade_reason": regime_info.get("no_trade_reason", ""),
         "margin":                margin,
         "signal_lifecycle":      lifecycle.get("state", "WAIT"),

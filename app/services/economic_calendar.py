@@ -63,21 +63,27 @@ def _prior_trading_day(d: date) -> date:
     return d
 
 
+# NIFTY-PRO FIX: since 1-Sep-2025 NSE weekly (Nifty) expiry is TUESDAY and the
+# monthly expiry is the LAST TUESDAY (BSE Sensex stays Thursday). The original
+# code assumed Thursday. Only Nifty (NSE) and Sensex (BSE) have weekly contracts.
+_EXPIRY_WEEKDAY = 1  # Tuesday
+
+
 def _next_weekly_expiry(today: date) -> date:
-    """Next Thursday from `today` (inclusive), holiday-adjusted backward."""
-    days_ahead = (3 - today.weekday()) % 7  # Thursday = weekday 3
+    """Next Tuesday (NSE Nifty weekly) from `today` (inclusive), holiday-adjusted backward."""
+    days_ahead = (_EXPIRY_WEEKDAY - today.weekday()) % 7
     candidate = today + timedelta(days=days_ahead)
     return _prior_trading_day(candidate)
 
 
 def _monthly_expiry(year: int, month: int) -> date:
-    """Last Thursday of the given month, holiday-adjusted backward."""
+    """Last Tuesday (NSE monthly) of the given month, holiday-adjusted backward."""
     if month == 12:
         first_of_next = date(year + 1, 1, 1)
     else:
         first_of_next = date(year, month + 1, 1)
     last_day = first_of_next - timedelta(days=1)
-    offset = (last_day.weekday() - 3) % 7  # back up to Thursday
+    offset = (last_day.weekday() - _EXPIRY_WEEKDAY) % 7  # back up to Tuesday
     candidate = last_day - timedelta(days=offset)
     return _prior_trading_day(candidate)
 

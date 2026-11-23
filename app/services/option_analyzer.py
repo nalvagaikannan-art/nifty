@@ -8,6 +8,11 @@ from app.utils.helpers import safe_float, safe_int, days_to_expiry
 from app.services.options_greeks import black_scholes_greeks, mid_price, spread_pct
 
 
+MIN_CHAIN_QUALITY_STRIKES = 10
+MIN_OI_COVERAGE_PCT = 70.0
+MIN_VOLUME_COVERAGE_PCT = 50.0
+
+
 class OptionAnalyzer:
 
     def process_option_chain(self, chain_data: Dict) -> pd.DataFrame:
@@ -47,6 +52,104 @@ class OptionAnalyzer:
             })
         df = pd.DataFrame(records)
         return df if not df.empty else pd.DataFrame()
+
+    def assess_chain_quality(self, df: pd.DataFrame) -> Dict:
+        """Report OI and volume coverage separately; do not conflate them
+        with structural chain validity or with each other.
+        """
+        if df is None or df.empty:
+            return {
+                "available": False,
+                "status": "unavailable",
+                "strike_count": 0,
+                "contract_legs": 0,
+                "oi_positive_legs": 0,
+                "oi_coverage_pct": 0.0,
+                "oi_usable": False,
+                "volume_positive_legs": 0,
+                "volume_coverage_pct": 0.0,
+                "volume_usable": False,
+                "ltp_coverage_pct": 0.0,
+                "reason": "No parsed option-chain rows",
+                "volume_reason": "No parsed option-chain rows",
+            }
+
+        strike_count = (
+            int(df["strike"].dropna().nunique())
+            if "strike" in df.columns else 0
+        )
+        contract_legs = int(len(df) * 2)
+
+        def positive_count(column: str) -> int:
+            if column not in df.columns:
+                return 0
+            values = pd.to_numeric(df[column], errors="coerce").fillna(0)
+            return int(values.gt(0).sum())
+
+        oi_positive = (
+            positive_count("ce_oi") + positive_count("pe_oi")
+        )
+        volume_positive = (
+            positive_count("ce_volume") + positive_count("pe_volume")
+        )
+        ltp_positive = (
+            positive_count("ce_ltp") + positive_count("pe_ltp")
+        )
+
+        def coverage_pct(count: int) -> float:
+            return round(count / contract_legs * 100, 1) if contract_legs else 0.0
+
+        oi_pct = coverage_pct(oi_positive)
+        volume_pct = coverage_pct(volume_positive)
+        ltp_pct = coverage_pct(ltp_positive)
+
+        enough_strikes = strike_count >= MIN_CHAIN_QUALITY_STRIKES
+        oi_usable = enough_strikes and oi_pct >= MIN_OI_COVERAGE_PCT
+        volume_usable = (
+            enough_strikes and volume_pct >= MIN_VOLUME_COVERAGE_PCT
+        )
+
+        reasons = []
+        if not enough_strikes:
+            reasons.append(
+                f"Only {strike_count} strikes; "
+                f"{MIN_CHAIN_QUALITY_STRIKES} required"
+            )
+        if oi_pct < MIN_OI_COVERAGE_PCT:
+            reasons.append(
+                f"Positive OI coverage {oi_pct:.1f}% is below "
+                f"{MIN_OI_COVERAGE_PCT:.0f}%"
+            )
+
+        volume_reasons = []
+        if not enough_strikes:
+            volume_reasons.append(
+                f"Only {strike_count} strikes; "
+                f"{MIN_CHAIN_QUALITY_STRIKES} required"
+            )
+        if volume_pct < MIN_VOLUME_COVERAGE_PCT:
+            volume_reasons.append(
+                f"Positive volume coverage {volume_pct:.1f}% is below "
+                f"{MIN_VOLUME_COVERAGE_PCT:.0f}%"
+            )
+
+        return {
+            "available": True,
+            "status": "adequate" if oi_usable else "limited",
+            "strike_count": strike_count,
+            "contract_legs": contract_legs,
+            "oi_positive_legs": oi_positive,
+            "oi_coverage_pct": oi_pct,
+            "oi_usable": oi_usable,
+            "volume_positive_legs": volume_positive,
+            "volume_coverage_pct": volume_pct,
+            "volume_usable": volume_usable,
+            "ltp_coverage_pct": ltp_pct,
+            "reason": "; ".join(reasons) if reasons else None,
+            "volume_reason": (
+                "; ".join(volume_reasons) if volume_reasons else None
+            ),
+        }
 
     def attach_greeks(self, df: pd.DataFrame, spot: float, expiry_str: str) -> pd.DataFrame:
         """Adds ce_delta/ce_theta_per_day/ce_vega/ce_gamma (and pe_*) columns.

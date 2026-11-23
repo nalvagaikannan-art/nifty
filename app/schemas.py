@@ -420,7 +420,7 @@ class AccuracyIndicatorResponse(BaseModel):
     title_ta: str
     hits: int
     total: int
-    success_rate: float
+    success_rate: float | None
     insufficient_data: bool
     metric_type: str
     model_config = {"extra": "allow"}
@@ -457,6 +457,8 @@ class AccuracySignalsResponse(BaseModel):
     headline_horizon_minutes: int
     no_directional_recommendation: int
     no_price_data: int
+    session_unavailable_at_headline_horizon: int
+    session_unavailable_by_horizon: Dict
     overall: Dict
     pending_at_headline_horizon: int
     put_buy_accuracy: Dict
@@ -510,10 +512,15 @@ class AccuracyLedgerPerformanceResponse(BaseModel):
     option_data_available: int
     full_pnl_ready: int
     missing_lot_size: int
+    contract_episodes: int
+    contract_matured_rows: int
+    contract_pending_rows: int
+    contract_invalid_rows: int
     spot_direction: Dict
     option_premium: Dict
     pnl: Dict
     episodes: List[Dict]
+    contract_episode_results: List[Dict]
     model_config = {"extra": "allow"}
 
 

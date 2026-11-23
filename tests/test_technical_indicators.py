@@ -153,3 +153,43 @@ def test_combine_support_resistance_falls_back_when_no_sources():
     assert result["support"]      # never empty — always has a fallback
     assert result["resistance"]
     assert result["sources"]["oi_walls"] is False
+
+def test_mtf_vwap_uses_only_explicit_session_bars():
+    from app.services.technical_indicators import TechnicalIndicators
+
+    closes = [22000.0 + i for i in range(20)]
+    highs = [v + 2.0 for v in closes]
+    lows = [v - 2.0 for v in closes]
+    historical_volumes = [100.0 + i for i in range(20)]
+
+    session = {
+        "highs": [101.0, 111.0],
+        "lows": [99.0, 109.0],
+        "closes": [100.0, 110.0],
+        "volumes": [10.0, 30.0],
+    }
+
+    result = TechnicalIndicators.compute_from_ohlc(
+        highs, lows, closes, historical_volumes,
+        session_data=session,
+    )
+
+    assert result["vwap"] == 107.5
+
+
+def test_mtf_vwap_empty_session_does_not_fallback_to_history():
+    from app.services.technical_indicators import TechnicalIndicators
+
+    closes = [22000.0 + i for i in range(20)]
+    highs = [v + 2.0 for v in closes]
+    lows = [v - 2.0 for v in closes]
+    historical_volumes = [100.0 + i for i in range(20)]
+
+    result = TechnicalIndicators.compute_from_ohlc(
+        highs, lows, closes, historical_volumes,
+        session_data={
+            "highs": [], "lows": [], "closes": [], "volumes": [],
+        },
+    )
+
+    assert result["vwap"] == 0.0

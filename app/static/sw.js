@@ -4,7 +4,7 @@
 // BUG FIX (2026-08-22): bumped v1 -> v2 so browsers that already installed
 // the old (broken) service worker register this fixed one instead of
 // continuing to run the cached old version indefinitely.
-const CACHE_NAME = 'nifty-ai-v2';
+const CACHE_NAME = 'nifty-ai-v3';
 
 // App shell: static assets that rarely change
 const SHELL_URLS = [

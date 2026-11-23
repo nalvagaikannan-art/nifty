@@ -10,6 +10,7 @@ CURRENT_CONTRACT_LOT_SIZES = {
     "NIFTY": 65,
     "BANKNIFTY": 30,
     "FINNIFTY": 60,
+    "SENSEX": 20,
 }
 
 

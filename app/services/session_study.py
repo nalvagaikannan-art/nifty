@@ -1,3 +1,4 @@
+from app.utils.expiry import expiry_matches
 from datetime import datetime, timedelta, timezone, time
 from statistics import median
 from typing import Dict, List, Optional, Tuple
@@ -215,7 +216,7 @@ async def compute_session_study(
         if contracts:
             filters = [
                 and_(
-                    OptionData.expiry == expiry,
+                    expiry_matches(OptionData.expiry, expiry),
                     OptionData.strike == strike,
                     OptionData.option_type == opt,
                 )

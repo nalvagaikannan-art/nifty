@@ -31,6 +31,8 @@ def _mock_fetcher(spot_price: float = 24650.0, prices=None, market_open: bool = 
         "prev_close": spot_price - 50, "volume": 100000,
         "market_open": market_open, "market_status_source": "nse",
     }
+    fetcher._try_angel_live_feed_spot.return_value = None
+    fetcher._get_spot_uncached.return_value = fetcher.get_spot.return_value
     fetcher.get_option_chain.return_value = {
         "symbol": "NIFTY", "expiry": "28-Aug-2025", "all_expiries": ["28-Aug-2025"],
         "underlying_price": spot_price,
@@ -118,6 +120,12 @@ async def test_full_overview_runs_end_to_end_with_insufficient_history():
     assert result["decision"]["market_bias"] in ("Bullish", "Bearish", "Sideways")
     assert "tamil_indicators" in result
     assert "reasons" in result["decision"]
+    quality = result["option_chain_quality"]
+    assert quality["available"] is True
+    assert quality["status"] == "limited"  # fixture has only two strikes
+    assert quality["oi_coverage_pct"] == 100.0
+    assert quality["volume_coverage_pct"] == 100.0
+    assert result["pcr_quality"]["chain_quality"] == quality
 
 
 @pytest.mark.asyncio
@@ -272,3 +280,385 @@ async def test_safe_multi_timeframe_excludes_current_live_5m_bucket():
     assert five["timestamps"][-1] == "2026-10-08T11:00:00+05:30"
     assert "2026-10-08T11:05:00+05:30" not in five["timestamps"]
 
+@pytest.mark.asyncio
+async def test_safe_multi_timeframe_ws_zero_volume_preserves_rest_proxy_volume():
+    """Zero-volume WS candles must not erase aligned REST/proxy volume."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    fixed_now = datetime(2026, 10, 8, 11, 7, 0, tzinfo=ist)
+
+    timestamps = []
+    cur = datetime(2026, 10, 8, 9, 15, tzinfo=ist)
+    end = datetime(2026, 10, 8, 11, 5, tzinfo=ist)
+    while cur <= end:
+        timestamps.append(cur.isoformat())
+        cur += timedelta(minutes=5)
+
+    count = len(timestamps)
+    proxy_volumes = [2000 + i for i in range(count)]
+
+    fetcher = _mock_fetcher()
+    fetcher.get_intraday_ohlc.return_value = {
+        "available": True,
+        "data_source": "angel_one_intraday",
+        "opens": [100.0 + i for i in range(count)],
+        "highs": [101.0 + i for i in range(count)],
+        "lows": [99.0 + i for i in range(count)],
+        "closes": [100.5 + i for i in range(count)],
+        "volumes": proxy_volumes,
+        "timestamps": timestamps,
+    }
+
+    # Simulate the index WS feed reporting zero volume at REST timestamps.
+    ws_candles = []
+    for i, text in enumerate(timestamps):
+        ts = datetime.fromisoformat(text)
+        ws_candles.append({
+            "timestamp": ts.timestamp(),
+            "high": 101.0 + i,
+            "low": 99.0 + i,
+            "close": 100.5 + i,
+            "volume": 0.0,
+        })
+
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    with (
+        patch("app.services.market_analyzer.current_ist", return_value=fixed_now),
+        patch(
+            "app.services.market_analyzer.angel_live_feed.get_completed_5m_candles",
+            return_value=ws_candles,
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.save_intraday_ohlc_snapshot",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        result = await analyzer._safe_multi_timeframe("NIFTY")
+
+    five = result["5min"]
+    assert five["timestamps"][-1] == "2026-10-08T11:00:00+05:30"
+    assert five["volumes"] == proxy_volumes[:-1]
+    assert all(v > 0 for v in five["volumes"])
+
+
+
+
+@pytest.mark.asyncio
+async def test_safe_multi_timeframe_ws_merge_keeps_ws_ohlc_open_aligned():
+    """Persist WS open with WS high/low/close when REST open disagrees."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    fixed_now = datetime(2026, 10, 8, 11, 7, 0, tzinfo=ist)
+    timestamps = []
+    cur = datetime(2026, 10, 8, 9, 15, tzinfo=ist)
+    end = datetime(2026, 10, 8, 11, 5, tzinfo=ist)
+    while cur <= end:
+        timestamps.append(cur.isoformat())
+        cur += timedelta(minutes=5)
+
+    count = len(timestamps)
+    fetcher = _mock_fetcher()
+    fetcher.get_intraday_ohlc.return_value = {
+        "available": True,
+        "data_source": "angel_one_intraday",
+        "opens": [102.0 + i for i in range(count)],
+        "highs": [101.0 + i for i in range(count)],
+        "lows": [99.0 + i for i in range(count)],
+        "closes": [100.5 + i for i in range(count)],
+        "volumes": [2000 + i for i in range(count)],
+        "timestamps": timestamps,
+    }
+
+    ws_candles = []
+    for i, text in enumerate(timestamps):
+        ts = datetime.fromisoformat(text)
+        ws_candles.append({
+            "timestamp": ts.timestamp(),
+            "open": 100.25 + i,
+            "high": 101.0 + i,
+            "low": 99.0 + i,
+            "close": 100.5 + i,
+            "volume": 0.0,
+        })
+
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    save_snapshot = AsyncMock(return_value=None)
+    with (
+        patch("app.services.market_analyzer.current_ist", return_value=fixed_now),
+        patch(
+            "app.services.market_analyzer.angel_live_feed.get_completed_5m_candles",
+            return_value=ws_candles,
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.save_intraday_ohlc_snapshot",
+            new=save_snapshot,
+        ),
+    ):
+        result = await analyzer._safe_multi_timeframe("NIFTY")
+
+    assert result["5min"]["timestamps"][-1] == "2026-10-08T11:00:00+05:30"
+    assert save_snapshot.await_args is not None
+
+    persisted_rows = save_snapshot.await_args.args[1]
+    open_map = save_snapshot.await_args.kwargs["open_by_timestamp"]
+    first_ts = datetime.fromisoformat(timestamps[0])
+    first_row = next(row for row in persisted_rows if row[0] == first_ts)
+
+    assert open_map[first_ts] == pytest.approx(100.25)
+    assert first_row[1] == pytest.approx(101.0)
+    assert first_row[2] == pytest.approx(99.0)
+    assert first_row[3] == pytest.approx(100.5)
+
+    for row in persisted_rows:
+        op = open_map[row[0]]
+        hi, lo, close = row[1], row[2], row[3]
+        assert hi >= max(op, close)
+        assert lo <= min(op, close)
+        assert lo <= hi
+
+@pytest.mark.asyncio
+async def test_live_refresh_uses_uncached_fallback_when_ws_tick_is_unavailable():
+    fetcher = _mock_fetcher()
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    cached = await analyzer._get_full_market_overview_cached(
+        "NIFTY", cache_bust="spot-fallback-regression"
+    )
+
+    fallback_spot = dict(fetcher.get_spot.return_value)
+    fallback_spot.update({
+        "price": 24725.0,
+        "change": 125.0,
+        "change_percent": 0.51,
+        "data_source": "zerodha",
+        "timestamp": "2026-10-15T11:00:00+05:30",
+    })
+    fetcher._try_angel_live_feed_spot.return_value = None
+    fetcher._get_spot_uncached.return_value = fallback_spot
+
+    result = await analyzer._refresh_live_calculations(cached, "NIFTY")
+
+    assert result["spot"]["price"] == 24725.0
+    assert result["spot"]["data_source"] == "zerodha"
+    fetcher._get_spot_uncached.assert_awaited_once_with("NIFTY")
+
+
+@pytest.mark.asyncio
+async def test_live_refresh_does_not_fake_new_timestamp_when_all_spot_sources_fail():
+    fetcher = _mock_fetcher()
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    cached = await analyzer._get_full_market_overview_cached(
+        "NIFTY", cache_bust="spot-unavailable-regression"
+    )
+    old_timestamp = "2026-10-15T10:30:00+05:30"
+    cached["timestamp"] = old_timestamp
+
+    fetcher._try_angel_live_feed_spot.return_value = None
+    fetcher._get_spot_uncached.return_value = None
+
+    result = await analyzer._refresh_live_calculations(cached, "NIFTY")
+
+    assert result is cached
+    assert result["timestamp"] == old_timestamp
+    fetcher._get_spot_uncached.assert_awaited_once_with("NIFTY")
+
+
+@pytest.mark.asyncio
+async def test_live_refresh_preserves_cached_ohlc_when_ws_fields_are_zero():
+    fetcher = _mock_fetcher()
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    cached = await analyzer._get_full_market_overview_cached(
+        "NIFTY", cache_bust="spot-zero-ohlc-regression"
+    )
+    previous_spot = dict(cached["spot"])
+
+    live_spot = dict(previous_spot)
+    live_spot.update({
+        "price": 24700.0,
+        "open": 0.0,
+        "high": 0.0,
+        "low": 0.0,
+        "prev_close": 0.0,
+        "change": 0.0,
+        "change_percent": 0.0,
+        "volume": 0,
+        "data_source": "angel_one_websocket",
+        "timestamp": "2026-10-15T11:00:00+05:30",
+        "exchange_timestamp": 1792033200000,
+        "tick_age_sec": 0.5,
+    })
+    fetcher._try_angel_live_feed_spot.return_value = live_spot
+
+    result = await analyzer._refresh_live_calculations(cached, "NIFTY")
+
+    assert result["spot"]["price"] == 24700.0
+    for field in ("open", "high", "low"):
+        assert result["spot"][field] == previous_spot[field]
+    assert result["spot"]["prev_close"] == previous_spot["prev_close"]
+    assert result["option_chain_quality"]["status"] == "limited"
+    assert (
+        result["pcr_quality"]["chain_quality"]
+        == result["option_chain_quality"]
+    )
+
+def _closed_market_test_spot():
+    return {
+        "symbol": "NIFTY", "price": 24650.0,
+        "change": 50.0, "change_percent": 0.2,
+        "high": 24750.0, "low": 24550.0, "open": 24630.0,
+        "prev_close": 24600.0, "volume": 100000,
+        "timestamp": "2026-10-21T09:59:00+00:00",
+        "market_open": False,
+    }
+
+
+def _closed_market_test_chain(expiry="27OCT2026"):
+    chain = dict(_mock_fetcher().get_option_chain.return_value)
+    chain.update({
+        "symbol": "NIFTY", "expiry": expiry,
+        "all_expiries": [expiry, "17NOV2026"],
+        "data_source": "history_db_closed_fallback",
+        "snapshot_timestamp": "2026-10-21T09:59:28",
+        "market_open": False, "stale": True,
+    })
+    return chain
+
+
+@pytest.mark.asyncio
+async def test_closed_market_default_expiry_uses_persisted_nearest_chain():
+    fetcher = _mock_fetcher(market_open=False)
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    nearest_lookup = AsyncMock(return_value=_closed_market_test_chain())
+
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=False),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_market_snapshot_before",
+            new=AsyncMock(return_value=_closed_market_test_spot()),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_option_chain_snapshot_for_nearest_expiry_before",
+            new=nearest_lookup,
+        ),
+    ):
+        result = await analyzer.get_full_market_overview(
+            "NIFTY", cache_bust="closed-default-expiry-regression"
+        )
+
+    nearest_lookup.assert_awaited_once()
+    assert nearest_lookup.await_args.args[0] == "NIFTY"
+    assert result["option_chain"]["expiry"] == "27OCT2026"
+    assert result["option_chain"]["all_expiries"] == [
+        "27OCT2026", "17NOV2026"
+    ]
+    assert result["market_open"] is False
+    assert result["decision"]["preferred_side"] == "NONE"
+    assert result["option_chain_quality"]["status"] == "limited"
+    assert (
+        result["pcr_quality"]["chain_quality"]
+        == result["option_chain_quality"]
+    )
+    fetcher.get_option_chain.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_market_missing_chain_still_waits_without_live_fetch():
+    fetcher = _mock_fetcher(market_open=False)
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    nearest_lookup = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=False),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_market_snapshot_before",
+            new=AsyncMock(return_value=_closed_market_test_spot()),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_option_chain_snapshot_for_nearest_expiry_before",
+            new=nearest_lookup,
+        ),
+    ):
+        result = await analyzer.get_full_market_overview(
+            "NIFTY", cache_bust="closed-no-chain-regression"
+        )
+
+    nearest_lookup.assert_awaited_once()
+    assert result["option_chain"]["data"] == []
+    assert result["decision"]["preferred_side"] == "NONE"
+    fetcher.get_option_chain.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_market_explicit_expiry_keeps_exact_snapshot_and_full_catalogue():
+    fetcher = _mock_fetcher(market_open=False)
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+
+    exact_chain = _closed_market_test_chain("17NOV2026")
+    exact_lookup = AsyncMock(return_value=exact_chain)
+
+    expiry_catalog = _closed_market_test_chain("27OCT2026")
+    full_expiry_list = [
+        "27OCT2026",
+        "17NOV2026",
+        "30MAR2027",
+        "28SEP2027",
+        "26DEC2028",
+    ]
+    expiry_catalog["all_expiries"] = full_expiry_list
+    catalogue_lookup = AsyncMock(return_value=expiry_catalog)
+
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=False),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_market_snapshot_before",
+            new=AsyncMock(return_value=_closed_market_test_spot()),
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_option_chain_snapshot_before",
+            new=exact_lookup,
+        ),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_option_chain_snapshot_for_nearest_expiry_before",
+            new=catalogue_lookup,
+        ),
+    ):
+        result = await analyzer.get_full_market_overview(
+            "NIFTY",
+            expiry="17NOV2026",
+            cache_bust="closed-explicit-expiry-full-catalogue-regression",
+        )
+
+    exact_lookup.assert_awaited_once()
+    assert exact_lookup.await_args.args[:2] == ("NIFTY", "17NOV2026")
+    catalogue_lookup.assert_awaited_once()
+
+    # Preserve the selected expiry, without shrinking the dropdown catalogue.
+    assert result["option_chain"]["expiry"] == "17NOV2026"
+    assert result["option_chain"]["all_expiries"] == full_expiry_list
+    assert result["option_chain"]["data"]
+    assert result["decision"]["preferred_side"] == "NONE"
+    fetcher.get_option_chain.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_missing_spot_market_open_fails_closed_in_overview(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_analyzer.is_market_hours_ist",
+        lambda *_args: True,
+    )
+
+    fetcher = _mock_fetcher()
+    fetcher.get_spot.return_value.pop("market_open", None)
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+
+    result = await analyzer.get_full_market_overview(
+        "NIFTY",
+        cache_bust="market-open-missing-status-regression",
+    )
+
+    assert result["market_open"] is False
+    assert result["decision"]["market_open"] is False
+    assert result["decision"]["hard_gated"] is True
+    assert result["decision"]["preferred_side"] == "NONE"

@@ -239,3 +239,24 @@ async def accuracy_status(symbol: str):
         logger.exception("Persistence status failed for %s", sym)
         record_error("status", sym, f"Persistence status failed: {e}")
         raise HTTPException(500, detail="Persistence status failed")
+
+# CALL_TRACKER_ENDPOINT_20261026
+@router.get("/call-tracker")
+async def call_tracker(
+    symbol: str = Query("ALL", description="ALL or one supported symbol"),
+    days: int = Query(15, ge=1, le=60),
+):
+    """Read-only call/level-touch history; it never places or records trades."""
+    from app.services.call_tracker import compute_call_tracker
+
+    sym = str(symbol or "ALL").strip().upper()
+    if sym != "ALL":
+        sym = _check_symbol(sym)
+
+    return await _run_with_timeout(
+        compute_call_tracker(sym, days=days),
+        endpoint="call-tracker",
+        sym=sym,
+        timeout_detail="Call Tracker is taking too long; try a shorter date range.",
+        error_detail="Call Tracker could not be loaded",
+    )

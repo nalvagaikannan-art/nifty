@@ -8,6 +8,7 @@ import logging
 import json
 
 from sqlalchemy import select, delete
+from sqlalchemy.exc import IntegrityError
 from app.database import AsyncSessionLocal
 from app.models import SignalState, SignalHistory, DailySignalLedger
 from app.utils.helpers import now_utc_naive
@@ -156,6 +157,26 @@ async def record_signal_persistent(symbol: str, strategy: str, score: int,
                 .order_by(SignalHistory.id.desc()).limit(1)
             )
             prev = result.scalar_one_or_none()
+
+            # CLOSED_WAIT_HISTORY_DEDUPE:
+            # Repeated reads of an unchanged closed-market WAIT state are not
+            # new signal events. Preserve history when any meaningful field
+            # changes, and never apply this suppression to market-open rows.
+            if (
+                strategy == "WAIT"
+                and (market_state or "UNKNOWN") == "MARKET CLOSED"
+                and prev is not None
+                and prev.strategy == "WAIT"
+                and prev.market_state == "MARKET CLOSED"
+                and float(prev.score or 0) == float(score or 0)
+                and float(prev.confidence or 0) == float(confidence or 0)
+                and float(prev.spot or 0) == float(spot or 0)
+                and float(prev.pcr or 0) == float(pcr or 0)
+                and float(prev.vix or 0) == float(vix or 0)
+                and (prev.reasons or []) == (reasons or [])
+            ):
+                return _to_signal_dict(prev)
+
             prev_strategy = prev.strategy if prev else None
             reversal = bool(prev_strategy and prev_strategy not in (strategy, "WAIT")
                             and strategy not in ("WAIT", ""))
@@ -350,6 +371,49 @@ async def record_daily_signal_ledger(
                 "duplicate": False,
             }
 
+    except IntegrityError as exc:
+        # A concurrent request may have inserted this exact ledger key first.
+        # Return duplicate only if that key can now be read from the database.
+        try:
+            async with AsyncSessionLocal() as db:
+                existing = await db.execute(
+                    select(DailySignalLedger)
+                    .where(DailySignalLedger.ledger_key == ledger_key)
+                    .limit(1)
+                )
+                row = existing.scalar_one_or_none()
+
+            if row is not None:
+                logger.info(
+                    "DAILY_SIGNAL_LEDGER_DUPLICATE_RECOVERED "
+                    "symbol=%s action=%s key=%s",
+                    symbol,
+                    action,
+                    ledger_key,
+                )
+                return {
+                    "id": row.id,
+                    "ledger_key": row.ledger_key,
+                    "duplicate": True,
+                }
+        except Exception as lookup_exc:
+            logger.warning(
+                "Daily signal ledger duplicate recovery failed for %s %s "
+                "after integrity error (%s): %s",
+                symbol,
+                action,
+                exc,
+                lookup_exc,
+            )
+            return None
+
+        logger.warning(
+            "Daily signal ledger write failed for %s %s: %s",
+            symbol,
+            action,
+            exc,
+        )
+        return None
     except Exception as exc:
         logger.warning(
             "Daily signal ledger write failed for %s %s: %s",

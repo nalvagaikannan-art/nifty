@@ -1,5 +1,7 @@
 import asyncio
+import concurrent.futures
 import logging
+import socket
 import threading
 import time
 from collections import defaultdict
@@ -28,6 +30,105 @@ class _CompatibleSmartWebSocketV2(SmartWebSocketV2):
     Keep the original SmartApi callback behavior while accepting
     the newer websocket-client callback signature.
     """
+
+    def _on_error(self, wsapp, error):
+        """Make SDK retry waits cancellable and stop retries during shutdown."""
+        shutdown_event = getattr(self, "_shutdown_event", None)
+
+        if shutdown_event is not None and shutdown_event.is_set():
+            self.RESUBSCRIBE_FLAG = False
+            self.DISCONNECT_FLAG = True
+            self.close_connection()
+            return
+
+        self.RESUBSCRIBE_FLAG = True
+
+        if self.current_retry_attempt < self.MAX_RETRY_ATTEMPT:
+            logger.warning(
+                "Attempting to resubscribe/reconnect (Attempt %s)...",
+                self.current_retry_attempt + 1,
+            )
+            self.current_retry_attempt += 1
+
+            if self.retry_strategy == 0:
+                delay = self.retry_delay
+            elif self.retry_strategy == 1:
+                delay = self.retry_delay * (
+                    self.retry_multiplier ** (self.current_retry_attempt - 1)
+                )
+            else:
+                raise Exception(
+                    f"Invalid retry strategy {self.retry_strategy}"
+                )
+
+            # Unlike SDK time.sleep(), this wait returns immediately on shutdown.
+            if shutdown_event is not None:
+                stopping = shutdown_event.wait(delay)
+            else:
+                time.sleep(delay)
+                stopping = False
+
+            if stopping or (
+                shutdown_event is not None and shutdown_event.is_set()
+            ):
+                self.RESUBSCRIBE_FLAG = False
+                self.DISCONNECT_FLAG = True
+                self.close_connection()
+                return
+
+            try:
+                self.close_connection()
+
+                if (
+                    shutdown_event is not None
+                    and shutdown_event.is_set()
+                ):
+                    return
+
+                self.connect()
+
+            except Exception as exc:
+                if (
+                    shutdown_event is not None
+                    and shutdown_event.is_set()
+                ):
+                    self.RESUBSCRIBE_FLAG = False
+                    self.DISCONNECT_FLAG = True
+                    self.close_connection()
+                    return
+
+                logger.error(
+                    "Error occurred during resubscribe/reconnect: %s", exc
+                )
+                if hasattr(self, "on_error"):
+                    self.on_error(
+                        "Reconnect Error",
+                        str(exc) if str(exc) else "Unknown error",
+                    )
+        else:
+            self.close_connection()
+            if hasattr(self, "on_error"):
+                self.on_error("Max retry attempt reached", "Connection closed")
+
+            if (
+                self.retry_duration is not None
+                and self.last_pong_timestamp is not None
+                and time.time() - self.last_pong_timestamp
+                > self.retry_duration * 60
+            ):
+                logger.warning("Connection closed due to inactivity.")
+            else:
+                logger.warning("Connection closed due to max retry attempts reached.")
+
+    def connect(self):
+        """Refuse an SDK reconnect once the owning feed starts shutting down."""
+        shutdown_event = getattr(self, "_shutdown_event", None)
+        if shutdown_event is not None and shutdown_event.is_set():
+            self.RESUBSCRIBE_FLAG = False
+            self.DISCONNECT_FLAG = True
+            return
+
+        super().connect()
 
     def _on_close(self, wsapp, close_status_code=None, close_msg=None):
         self.on_close(wsapp)
@@ -110,6 +211,12 @@ class AngelLiveFeed:
         self._option_refresh_thread: Optional[threading.Thread] = None
         self._option_refresh_stop = threading.Event()
         self._option_refresh_now = threading.Event()
+        self._option_refresh_future_lock = threading.Lock()
+        self._option_refresh_future = None
+        self._option_refresh_completion = None
+        self._option_refresh_started = None
+        self._option_pending_sends_lock = threading.Lock()
+        self._option_pending_sends = set()
         self._option_last_refresh_at: Optional[float] = None
         self._option_last_error: Optional[str] = None
         # OPTION_REFRESH_EVENTLOOP_FIX_20260923
@@ -119,7 +226,51 @@ class AngelLiveFeed:
         """Ensure Angel session exists, then start WS in a background thread."""
 
         if self._thread and self._thread.is_alive():
+            if self._stop_event.is_set():
+                logger.warning(
+                    "Angel live feed start refused while previous feed is stopping"
+                )
+                return False
             return True
+
+        if (
+            self._option_refresh_thread
+            and self._option_refresh_thread.is_alive()
+        ):
+            logger.warning(
+                "Angel live feed start refused: previous option refresh worker is still alive"
+            )
+            return False
+
+        if self._watchdog_thread and self._watchdog_thread.is_alive():
+            logger.warning(
+                "Angel live feed start refused: previous watchdog is still alive"
+            )
+            return False
+
+        with self._option_refresh_future_lock:
+            previous_completion = self._option_refresh_completion
+            if previous_completion is not None and not previous_completion.is_set():
+                logger.warning(
+                    "Angel live feed start refused: previous refresh coroutine is still active"
+                )
+                return False
+            if previous_completion is not None:
+                self._option_refresh_completion = None
+                self._option_refresh_started = None
+
+        pending_lock = getattr(self, "_option_pending_sends_lock", None)
+        if pending_lock is not None:
+            with pending_lock:
+                pending_sends = [
+                    event for event in self._option_pending_sends
+                    if not event.is_set()
+                ]
+            if pending_sends:
+                logger.warning(
+                    "Angel live feed start refused: previous option socket send is still active"
+                )
+                return False
 
         await angel_session.ensure_session()
         # OPTION_REFRESH_EVENTLOOP_FIX_20260923
@@ -162,36 +313,129 @@ class AngelLiveFeed:
         logger.info("Angel live feed thread started")
         return True
 
-    def stop(self):
-        """Stop the WebSocket and background thread."""
-
+    def stop(self) -> bool:
+        """Stop Angel feed workers and report whether all threads terminated."""
         self._stop_event.set()
-        self._connected.clear()
-
-        # OPTION_WS_PATCH_20260923
         self._option_refresh_stop.set()
         self._option_refresh_now.set()
+        with self._lock:
+            self._connected.clear()
+        self._option_refresh_now.set()
+
+        # Cancelling the coroutine alone cannot stop an already-running
+        # asyncio.to_thread() socket send. Interrupt the underlying socket too.
+        with self._option_refresh_future_lock:
+            refresh_future = self._option_refresh_future
+            refresh_completion = self._option_refresh_completion
+        if refresh_future is not None:
+            refresh_future.cancel()
 
         ws = self._ws
         if ws is not None:
+            try:
+                self._interrupt_websocket_socket(ws)
+            except Exception:
+                logger.exception("Error interrupting Angel WebSocket socket")
             try:
                 ws.close_connection()
             except Exception:
                 logger.exception("Error closing Angel WebSocket")
 
-        thread = self._thread
-        if thread and thread.is_alive():
-            thread.join(timeout=5)
+        threads = (
+            ("option refresh", self._option_refresh_thread, 5),
+            ("live feed", self._thread, 5),
+            ("watchdog", self._watchdog_thread, 2),
+        )
+        for label, thread, timeout in threads:
+            if thread and thread.is_alive():
+                if thread is threading.current_thread():
+                    logger.warning(
+                        "Angel %s thread cannot join itself during shutdown", label
+                    )
+                    continue
+                thread.join(timeout=timeout)
 
-        watchdog = self._watchdog_thread
-        if watchdog and watchdog.is_alive():
-            watchdog.join(timeout=2)
+        refresh_coroutine_alive = False
+        if refresh_completion is not None:
+            refresh_completion.wait(timeout=5.0)
+            refresh_coroutine_alive = not refresh_completion.is_set()
 
-        self._thread = None
-        self._watchdog_thread = None
-        self._ws = None
+        # The concurrent future can be cancelled before its to_thread()
+        # socket operation has actually returned. Wait for those operations.
+        send_deadline = time.monotonic() + 5.0
+        with self._option_pending_sends_lock:
+            pending_snapshot = tuple(self._option_pending_sends)
 
-        logger.info("Angel live feed stopped")
+        for send_done in pending_snapshot:
+            send_done.wait(
+                timeout=max(0.0, send_deadline - time.monotonic())
+            )
+
+        with self._option_pending_sends_lock:
+            for send_done in tuple(self._option_pending_sends):
+                if send_done.is_set():
+                    self._option_pending_sends.discard(send_done)
+            pending_sends_alive = any(
+                not send_done.is_set()
+                for send_done in self._option_pending_sends
+            )
+
+        option_alive = bool(
+            self._option_refresh_thread
+            and self._option_refresh_thread.is_alive()
+        )
+        feed_alive = bool(self._thread and self._thread.is_alive())
+        watchdog_alive = bool(
+            self._watchdog_thread and self._watchdog_thread.is_alive()
+        )
+
+        if not option_alive:
+            self._option_refresh_thread = None
+        if (
+            not option_alive
+            and not pending_sends_alive
+            and not refresh_coroutine_alive
+        ):
+            with self._option_refresh_future_lock:
+                if self._option_refresh_future is refresh_future:
+                    self._option_refresh_future = None
+                if self._option_refresh_completion is refresh_completion:
+                    self._option_refresh_completion = None
+                    self._option_refresh_started = None
+        if not feed_alive:
+            self._thread = None
+        if not watchdog_alive:
+            self._watchdog_thread = None
+
+        all_stopped = not (
+            option_alive
+            or feed_alive
+            or watchdog_alive
+            or pending_sends_alive
+            or refresh_coroutine_alive
+        )
+        if all_stopped:
+            self._ws = None
+            self._async_loop = None
+            logger.info("Angel live feed and all workers stopped")
+        else:
+            still_alive = []
+            if option_alive:
+                still_alive.append("option-refresh")
+            if feed_alive:
+                still_alive.append("live-feed")
+            if watchdog_alive:
+                still_alive.append("watchdog")
+            if pending_sends_alive:
+                still_alive.append("option-socket-send")
+            if refresh_coroutine_alive:
+                still_alive.append("option-refresh-coroutine")
+            logger.warning(
+                "Angel live feed shutdown incomplete; threads still alive: %s",
+                ", ".join(still_alive),
+            )
+
+        return all_stopped
 
     def _run(self):
         while not self._stop_event.is_set():
@@ -208,7 +452,7 @@ class AngelLiveFeed:
                 api_key = getattr(settings, "angel_api_key", None)
                 client_code = getattr(settings, "angel_client_id", None)
 
-                self._ws = _CompatibleSmartWebSocketV2(
+                ws = _CompatibleSmartWebSocketV2(
                     auth_token,
                     api_key,
                     client_code,
@@ -219,6 +463,18 @@ class AngelLiveFeed:
                     retry_multiplier=2,
                     retry_duration=30,
                 )
+                # The SDK callback uses this event to abort retries during shutdown.
+                ws._shutdown_event = self._stop_event
+                self._ws = ws
+
+                if self._stop_event.is_set():
+                    try:
+                        ws.close_connection()
+                    except Exception:
+                        logger.exception(
+                            "Angel WebSocket close failed during startup/shutdown race"
+                        )
+                    break
 
                 self._ws.on_open = self._on_open
                 self._ws.on_data = self._on_data
@@ -316,6 +572,14 @@ class AngelLiveFeed:
                     )
 
     def _on_open(self, wsapp):
+        # Shutdown may race with SDK connection initialization. If the
+        # connection finishes after stop() has begun, never subscribe it.
+        if self._stop_event.is_set():
+            ws = self._ws
+            if ws is not None:
+                self._close_stopping_websocket(ws)
+            return
+
         logger.info("Angel WebSocket connected")
 
         token_list = []
@@ -345,25 +609,28 @@ class AngelLiveFeed:
             )
 
             with self._lock:
-                self._last_tick_received_at.clear()
-                self._last_exchange_timestamp.clear()
+                stopping = self._stop_event.is_set()
+                if not stopping:
+                    self._last_tick_received_at.clear()
+                    self._last_exchange_timestamp.clear()
 
-                # OPTION_WS_PATCH_20260923
-                # Token mappings belong to this socket connection.
-                self._option_ticks.clear()
-                self._option_token_meta.clear()
-                self._option_tokens_by_symbol.clear()
+                    # OPTION_WS_PATCH_20260923
+                    # Token mappings belong to this socket connection.
+                    self._option_ticks.clear()
+                    self._option_token_meta.clear()
+                    self._option_tokens_by_symbol.clear()
 
-            self._connected.set()
+                    self._connected.set()
+                    self._option_refresh_now.set()
+
+            if stopping:
+                self._close_stopping_websocket(self._ws)
+                return
 
             logger.info(
                 "Angel WebSocket subscribed: "
                 "NIFTY/BANKNIFTY/FINNIFTY(NSE) + SENSEX(BSE)"
             )
-
-            # Rebuild NFO subscriptions immediately after every
-            # successful socket connection.
-            self._option_refresh_now.set()
 
         except Exception as exc:
             self._last_error = str(exc)
@@ -394,67 +661,181 @@ class AngelLiveFeed:
                 self._option_refresh_now.clear()
                 continue
 
+            future = None
+            completion_event = threading.Event()
+            started_event = threading.Event()
+
             try:
-                # OPTION_REFRESH_EVENTLOOP_FIX_20260923
                 loop = self._async_loop
                 if loop is None or loop.is_closed():
                     raise RuntimeError(
                         "Angel option refresh event loop is unavailable"
                     )
 
+                with self._option_refresh_future_lock:
+                    self._option_refresh_completion = completion_event
+                    self._option_refresh_started = started_event
+                    cancel_now = self._option_refresh_stop.is_set()
+
+                if cancel_now:
+                    completion_event.set()
+                    break
+
                 future = asyncio.run_coroutine_threadsafe(
-                    self._refresh_option_subscriptions(),
+                    self._run_option_refresh_tracked(
+                        started_event,
+                        completion_event,
+                    ),
                     loop,
                 )
+
+                with self._option_refresh_future_lock:
+                    self._option_refresh_future = future
+                    cancel_now = self._option_refresh_stop.is_set()
+
+                if cancel_now:
+                    future.cancel()
+
                 future.result()
+
+            except concurrent.futures.CancelledError:
+                if not self._option_refresh_stop.is_set():
+                    self._option_last_error = "Angel option refresh future cancelled"
+                    logger.warning(self._option_last_error)
             except Exception as exc:
-                self._option_last_error = str(exc)
-                logger.exception(
-                    "Angel option websocket refresh failed"
-                )
+                if not self._option_refresh_stop.is_set():
+                    self._option_last_error = str(exc)
+                    logger.exception(
+                        "Angel option websocket refresh failed"
+                    )
+            finally:
+                # If cancellation happened before the coroutine began,
+                # there is no coroutine left whose finally block can signal.
+                if future is None or (
+                    future.cancelled() and not started_event.is_set()
+                ):
+                    completion_event.set()
+
+                with self._option_refresh_future_lock:
+                    if self._option_refresh_future is future and future is not None:
+                        self._option_refresh_future = None
+
+                    if (
+                        completion_event.is_set()
+                        and self._option_refresh_completion is completion_event
+                    ):
+                        self._option_refresh_completion = None
+                        self._option_refresh_started = None
 
             self._option_refresh_now.wait(
                 self.OPTION_REFRESH_INTERVAL_SEC
             )
             self._option_refresh_now.clear()
 
+    @staticmethod
+    def _interrupt_websocket_socket(ws) -> None:
+        """Interrupt a blocked SDK socket send before asking the SDK to close."""
+        wsapp = getattr(ws, "wsapp", None)
+        protocol_socket = getattr(wsapp, "sock", None)
+        raw_socket = getattr(protocol_socket, "sock", None)
+        if raw_socket is None:
+            return
+
+        try:
+            # socket.close() alone does not reliably interrupt another thread's
+            # blocked send(). SHUT_RDWR wakes that operation so SDK cleanup can
+            # acquire its send lock and finish.
+            raw_socket.shutdown(socket.SHUT_RDWR)
+        except OSError as exc:
+            logger.debug(
+                "Angel WebSocket socket shutdown was already complete: %s", exc
+            )
+
+    def _close_stopping_websocket(self, ws):
+        """Interrupt and close a late-opened socket on its worker thread."""
+        try:
+            self._interrupt_websocket_socket(ws)
+            ws.close_connection()
+        except Exception:
+            logger.exception("Angel WebSocket late-open shutdown failed")
+
+    async def _run_option_refresh_tracked(self, started_event, completion_event):
+        started_event.set()
+        try:
+            await self._refresh_option_subscriptions()
+        finally:
+            completion_event.set()
+
+    async def _run_option_ws_operation(self, operation, *args):
+        """Track a blocking WebSocket send until its worker thread exits."""
+        send_done = threading.Event()
+        with self._option_pending_sends_lock:
+            if self._stop_event.is_set() or self._option_refresh_stop.is_set():
+                raise asyncio.CancelledError()
+            self._option_pending_sends.add(send_done)
+
+        started = threading.Event()
+        abandoned = threading.Event()
+
+        def _invoke():
+            started.set()
+            try:
+                if (
+                    abandoned.is_set()
+                    or self._stop_event.is_set()
+                    or self._option_refresh_stop.is_set()
+                ):
+                    return None
+                return operation(*args)
+            finally:
+                send_done.set()
+                with self._option_pending_sends_lock:
+                    self._option_pending_sends.discard(send_done)
+
+        try:
+            result = await asyncio.to_thread(_invoke)
+        except BaseException:
+            abandoned.set()
+            if not started.is_set():
+                send_done.set()
+                with self._option_pending_sends_lock:
+                    self._option_pending_sends.discard(send_done)
+            raise
+
+        if self._stop_event.is_set() or self._option_refresh_stop.is_set():
+            raise asyncio.CancelledError()
+        return result
+
     async def _refresh_option_subscriptions(self):
         for symbol in self.SYMBOL_TOKENS:
             try:
-                chain = await angel_session.get_option_chain(
-                    symbol
+                # LIVEFEED_TOKEN_METADATA_ONLY_20261008
+                # Token discovery must not fetch FULL option-chain quotes.
+                # The WebSocket itself supplies live option ticks.
+                spot_price = None
+                try:
+                    tick = self.get_tick(symbol)
+                    if isinstance(tick, dict):
+                        raw_ltp = tick.get("ltp")
+                        if raw_ltp is not None:
+                            value = float(raw_ltp)
+                            if value > 0:
+                                spot_price = value
+                except Exception:
+                    spot_price = None
+
+                metadata = await angel_session.resolve_option_tokens(
+                    symbol,
+                    strikes_each_side=10,
+                    spot_price=spot_price,
                 )
 
-                desired_meta = {}
-
-                for row in (chain.get("data") if isinstance(chain, dict) else chain) or []:
-                    for leg_name in ("CE", "PE"):
-                        leg = row.get(leg_name)
-
-                        if not isinstance(leg, dict):
-                            continue
-
-                        token = leg.get("token")
-                        if token is None:
-                            continue
-
-                        token = str(token).strip()
-                        if not token:
-                            continue
-
-                        desired_meta[token] = {
-                            "symbol": symbol,
-                            "token": token,
-                            "expiry": leg.get("expiryDate"),
-                            "strike": leg.get("strikePrice"),
-                            "optionType": str(
-                                leg.get("optionType")
-                                or leg_name
-                            ).upper(),
-                            "tradingsymbol": leg.get(
-                                "tradingsymbol"
-                            ),
-                        }
+                desired_meta = {
+                    str(item["token"]).strip(): item
+                    for item in metadata
+                    if isinstance(item, dict)
+                    and item.get("token")
+                }
 
                 if not desired_meta:
                     logger.warning(
@@ -479,39 +860,32 @@ class AngelLiveFeed:
                         )
                     )
 
-                stale_tokens = (
-                    current_tokens - desired_tokens
-                )
-                new_tokens = (
-                    desired_tokens - current_tokens
-                )
+                stale_tokens = current_tokens - desired_tokens
+                new_tokens = desired_tokens - current_tokens
 
-                # ------------------------------------------------
-                # Remove obsolete tokens
-                # ------------------------------------------------
+                # Keep local tracking aligned with subscription operations
+                # that completed without exceptions. Failed unsubscriptions
+                # remain tracked so the next refresh can retry them.
+                active_tokens = set(current_tokens)
+
                 if stale_tokens:
                     try:
-                        self._ws.unsubscribe(
+                        await self._run_option_ws_operation(
+                            self._ws.unsubscribe,
                             "nifty-live-options",
                             self.OPTION_MODE_SNAP_QUOTE,
                             [{
-                                "exchangeType":
-                                    option_exchange_type,
-                                "tokens":
-                                    sorted(stale_tokens),
+                                "exchangeType": option_exchange_type,
+                                "tokens": sorted(stale_tokens),
                             }],
                         )
 
                         with self._lock:
                             for token in stale_tokens:
-                                self._option_token_meta.pop(
-                                    token,
-                                    None,
-                                )
-                                self._option_ticks.pop(
-                                    token,
-                                    None,
-                                )
+                                self._option_token_meta.pop(token, None)
+                                self._option_ticks.pop(token, None)
+
+                        active_tokens.difference_update(stale_tokens)
 
                         logger.info(
                             "Angel option websocket unsubscribed: "
@@ -522,68 +896,51 @@ class AngelLiveFeed:
 
                     except Exception:
                         logger.exception(
-                            "Angel option websocket unsubscribe "
-                            "failed: %s",
+                            "Angel option websocket unsubscribe failed: %s",
                             symbol,
                         )
 
-                # ------------------------------------------------
-                # Add new tokens
-                # ------------------------------------------------
                 if new_tokens:
                     try:
-                        self._ws.subscribe(
+                        await self._run_option_ws_operation(
+                            self._ws.subscribe,
                             "nifty-live-options",
                             self.OPTION_MODE_SNAP_QUOTE,
                             [{
-                                "exchangeType":
-                                    option_exchange_type,
-                                "tokens":
-                                    sorted(new_tokens),
+                                "exchangeType": option_exchange_type,
+                                "tokens": sorted(new_tokens),
                             }],
                         )
 
-                        # Only record successful subscriptions.
-                        # Failed tokens remain absent and will retry
-                        # on the next refresh.
-                        with self._lock:
-                            for token in new_tokens:
-                                self._option_token_meta[token] = (
-                                    desired_meta[token]
-                                )
-
-                            self._option_tokens_by_symbol[symbol] = (
-                                set(desired_tokens)
-                            )
+                        active_tokens.update(new_tokens)
 
                         logger.info(
                             "Angel option websocket subscribed: "
                             "%s tokens=%s mode=SNAP_QUOTE exchange=%s",
                             symbol,
                             len(new_tokens),
-                              "BFO" if symbol == "SENSEX" else "NFO",
+                            "BFO" if symbol == "SENSEX" else "NFO",
                         )
 
                     except Exception:
                         logger.exception(
-                            "Angel option websocket subscribe "
-                            "failed: %s tokens=%s",
+                            "Angel option websocket subscribe failed: "
+                            "%s tokens=%s",
                             symbol,
                             len(new_tokens),
                         )
 
-                elif desired_tokens == current_tokens:
-                    with self._lock:
-                        for token, meta in desired_meta.items():
-                            self._option_token_meta[token] = meta
+                # A successful unsubscribe removes stale tokens even if the
+                # subsequent subscribe fails. A failed unsubscribe preserves
+                # the old tokens and metadata for retries and incoming ticks.
+                with self._lock:
+                    self._option_tokens_by_symbol[symbol] = set(active_tokens)
 
-                else:
-                    # All required new tokens were already represented
-                    # or only stale tokens changed.
-                    with self._lock:
-                        self._option_tokens_by_symbol[symbol] = (
-                            set(desired_tokens)
-                        )
+                    # Refresh metadata only for desired tokens that are
+                    # currently tracked; do not invent metadata for failed
+                    # new subscriptions or overwrite metadata for stale tokens.
+                    for token in desired_tokens.intersection(active_tokens):
+                        self._option_token_meta[token] = desired_meta[token]
 
             except Exception as exc:
                 self._option_last_error = (

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}PRO — SELL சிக்னல் / MCX / ஆர்டர் - AI NIFTY Option Analyzer{% endblock %}
+{% block content %}
+<style>
+  .pro-grid{display:grid;gap:1rem;grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+  .pro-card{border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:1rem;background:rgba(255,255,255,.04)}
+  .pro-chip{display:inline-block;margin:.15rem .3rem .15rem 0;padding:.2rem .55rem;border-radius:999px;background:rgba(255,255,255,.09);font-size:.82rem}
+  .pro-badge{padding:.25rem .7rem;border-radius:6px;font-weight:700}
+  .pro-paper{background:#1f6f3d;color:#fff}.pro-live{background:#b3261e;color:#fff}
+  .pro-warn{color:#f4b942;font-size:.88rem;margin:.25rem 0}
+  .pro-bad{color:#ff6b6b}.pro-good{color:#5fd38d}
+  .pro-card table{width:100%;border-collapse:collapse;font-size:.85rem;margin:.4rem 0}
+  .pro-card td,.pro-card th{padding:.2rem .4rem;text-align:left;border-bottom:1px solid rgba(255,255,255,.08)}
+  .pro-btn{padding:.4rem .9rem;border-radius:8px;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08);color:inherit;cursor:pointer}
+  .pro-btn.danger{background:#b3261e;border-color:#b3261e;color:#fff}
+  .pro-row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin:.4rem 0}
+</style>
+<div class="options-page">
+  <div class="options-header">
+    <h2>💎 PRO — SELL சிக்னல் • MCX • ஆர்டர் பேனல்</h2>
+    <div class="pro-row">
+      <span id="pro-mode" class="pro-badge pro-paper">…</span>
+      <button class="pro-btn danger" id="pro-kill-on">🛑 KILL SWITCH ON</button>
+      <button class="pro-btn" id="pro-kill-off">Kill OFF</button>
+      <input id="pro-pin" type="password" placeholder="Order PIN (live-க்கு மட்டும்)" autocomplete="off" style="min-width:12rem">
+    </div>
+  </div>
+  <p class="pro-warn">⚠ இவை பரிந்துரைகள் மட்டுமே; முதலில் PAPER mode-ல் சோதிக்கவும். Premium விற்பனையில் இழப்பு அதிகமாகலாம் (naked = வரம்பற்றது).</p>
+
+  <div class="pro-row">
+    <select id="pro-symbol"><option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option><option>SENSEX</option></select>
+    <button class="pro-btn" id="pro-refresh">🔄 Refresh</button>
+    <span id="pro-msg" class="pro-warn"></span>
+  </div>
+
+  <div class="pro-grid">
+    <div class="pro-card" style="grid-column:1/-1">
+      <h3>🧠 SELL சிக்னல்கள்</h3>
+      <div id="pro-context"></div><div id="pro-waits"></div><div id="pro-signals">ஏற்றுகிறது…</div>
+    </div>
+    <div class="pro-card"><h3>🛢 MCX / கமாடிட்டி</h3><div id="pro-comm">…</div></div>
+    <div class="pro-card"><h3>📰 செய்தி சென்டிமென்ட்</h3><div id="pro-news">…</div></div>
+    <div class="pro-card" style="grid-column:1/-1"><h3>📒 ஆர்டர் லெட்ஜர்</h3><div id="pro-orders">…</div></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const num = (v,d=2) => (v===null||v===undefined||isNaN(v)) ? '—' : Number(v).toFixed(d);
+  const hdr = () => { const h={'Content-Type':'application/json'}; const p=$('pro-pin').value; if(p) h['X-Order-Pin']=p; return h; };
+  async function api(path, opt){ const r = await fetch('/api/pro'+path, opt); let j={}; try{ j=await r.json(); }catch(e){} if(!r.ok) throw new Error(JSON.stringify(j.detail||j)); return j; }
+  const say = (t,bad) => { $('pro-msg').textContent=t; $('pro-msg').className = bad?'pro-warn pro-bad':'pro-warn'; };
+
+  async function loadStatus(){
+    try{ const s = await api('/status'); const b=$('pro-mode');
+      b.textContent = (s.mode==='live'?'🔴 LIVE':'🟢 PAPER') + (s.kill_switch?' • KILL ON':'');
+      b.className = 'pro-badge ' + (s.mode==='live'?'pro-live':'pro-paper'); }catch(e){ $('pro-mode').textContent='status error'; }
+  }
+
+  function legsTable(legs){
+    return '<table><tr><th>Side</th><th>Strike</th><th>Type</th><th>Price</th><th>Role</th></tr>' +
+      legs.map(l=>`<tr><td>${esc(l.side)}</td><td>${esc(l.strike)}</td><td>${esc(l.option_type)}</td><td>₹${num(l.price)}</td><td>${esc(l.role)}</td></tr>`).join('') + '</table>';
+  }
+
+  function renderSignals(d){
+    const c = d.context||{};
+    $('pro-context').innerHTML = [
+      `Spot ${num(d.spot,0)}`, `Expiry ${esc(d.expiry)} (DTE ${esc(d.dte)})`, `Lot ${esc(d.lot_size)}`,
+      `IV Rank ${c.iv_rank ?? '—'} / %ile ${c.iv_percentile ?? '—'} (n=${esc(c.iv_samples)})`,
+      `ATM IV ${num(c.atm_iv)}`, `VIX ${num(c.vix)}`, `PCR ${num(c.pcr,3)} ${esc(c.pcr_bias||'')}`,
+      `Max pain ${num(c.max_pain,0)}`, `Call wall ${num(c.call_wall,0)}`, `Put wall ${num(c.put_wall,0)}`, `1σ ≈ ${num(c.sigma_move,0)} pts`
+    ].map(t=>`<span class="pro-chip">${t}</span>`).join('');
+    $('pro-waits').innerHTML = (d.wait_reasons||[]).map(w=>`<div class="pro-warn">• ${esc(w)}</div>`).join('');
+    const sigs = d.signals||[];
+    if(!sigs.length){ $('pro-signals').innerHTML = '<div>இப்போது SELL சிக்னல் இல்லை (WAIT).</div>'; return; }
+    $('pro-signals').innerHTML = sigs.map((s,i)=>`
+      <div class="pro-card" style="margin:.6rem 0">
+        <b>${esc(s.type)}</b> <span class="pro-chip">Confidence ${esc(s.confidence)}</span>
+        <span class="pro-chip ${s.defined_risk?'pro-good':'pro-bad'}">${s.defined_risk?'Defined risk':'NAKED — வரம்பற்ற அபாயம்'}</span>
+        ${s.expiry_note?`<div class="pro-warn">${esc(s.expiry_note)}</div>`:''}
+        ${legsTable((s.hedge_legs||[]).concat(s.legs||[]))}
+        <div>Credit ${num(s.credit_points)} pts • SL (combined) ${num(s.stop_loss_points)} • Target ${num(s.target_points)}
+          • Max profit ₹${num(s.max_profit_inr,0)} • Max loss ${s.max_loss_inr==null?'—':'₹'+num(s.max_loss_inr,0)} • SL loss ≈ ₹${num(s.sl_loss_inr,0)}</div>
+        <ul>${(s.reasons||[]).map(r=>`<li>${esc(r)}</li>`).join('')}</ul>
+        ${(s.warnings||[]).map(w=>`<div class="pro-warn">⚠ ${esc(w)}</div>`).join('')}
+        ${s.executable===false?'<div class="pro-warn">Advisory மட்டும்</div>':`
+        <div class="pro-row">Lots <input type="number" min="1" value="1" id="lots-${i}" style="width:4rem">
+          <label><input type="checkbox" id="hedge-${i}" checked> Hedge wings சேர்</label>
+          <button class="pro-btn" data-act="preview" data-i="${i}">👁 Preview</button>
+          <button class="pro-btn danger" data-act="execute" data-i="${i}">▶ Execute</button></div>`}
+      </div>`).join('');
+    $('pro-signals').querySelectorAll('button[data-act]').forEach(b=>b.onclick=()=>act(b.dataset.act, sigs[+b.dataset.i], +b.dataset.i));
+  }
+
+  async function act(kind, s, i){
+    const body = JSON.stringify({symbol:s.symbol, signal_id:s.id, expiry:s.expiry, lots:+$('lots-'+i).value||1, include_hedge:$('hedge-'+i).checked});
+    try{
+      if(kind==='execute'){
+        const mode = $('pro-mode').textContent;
+        if(!confirm(`${mode}\n${s.type} ${s.symbol} ${s.expiry}\nஆர்டர் அனுப்பவா?`)) return;
+      }
+      const r = await api('/orders/'+kind, {method:'POST', headers:hdr(), body});
+      say(kind==='preview' ? `Preview OK (${r.mode}): ${r.orders.length} legs` : `${r.mode.toUpperCase()}: ${r.complete?'முழுமை':'பகுதி!'} — ${r.legs.map(l=>l.status).join(', ')}${r.warning?' — '+r.warning:''}`, kind==='execute' && !r.complete);
+      loadOrders();
+    }catch(e){ say('❌ '+e.message, true); }
+  }
+
+  async function loadSignals(){
+    say('ஏற்றுகிறது…');
+    try{ renderSignals(await api('/overview/'+$('pro-symbol').value)); say(''); }
+    catch(e){ $('pro-signals').textContent=''; say('❌ '+e.message, true); }
+  }
+
+  async function loadComm(){
+    try{
+      const d = await api('/commodities'); const s = d.snapshot||{};
+      const rows = ['GOLD','SILVER','CRUDEOIL','USDINR'].map(k=>{ const x=s[k]||{};
+        return `<tr><td>${k}</td><td>${num(x.ltp)}</td><td class="${(x.change_pct||0)>=0?'pro-good':'pro-bad'}">${num(x.change_pct)}%</td><td>${x.rsi15==null?'—':x.rsi15}</td><td>${esc(x.source)}</td></tr>`;}).join('');
+      const imp = d.impact ? `<div class="pro-chip">Crude ${num(d.impact.crude_change_pct)}% → Nifty தாக்கம் ${num(d.impact.nifty_impact_pct)}% (heuristic β ${d.impact.beta})</div>` : '';
+      const ideas = (d.ideas||[]).map(i=>`<div>• <b>${esc(i.symbol)} ${esc(i.bias)}</b> — ${esc(i.reason)}</div>`).join('') || '<div>தற்போது ஐடியா இல்லை.</div>';
+      $('pro-comm').innerHTML = `<table><tr><th>Sym</th><th>LTP</th><th>Δ%</th><th>RSI15</th><th>Source</th></tr>${rows}</table>${imp}${ideas}` +
+        (s._kite_error?`<div class="pro-warn">Kite: ${esc(s._kite_error)}</div>`:'') + (s._kite_live?'':'<div class="pro-warn">Kite MCX இணைக்கப்படவில்லை — global % மட்டும்.</div>');
+    }catch(e){ $('pro-comm').textContent='❌ '+e.message; }
+  }
+
+  async function loadNews(){
+    try{ const d = await api('/news/markets');
+      $('pro-news').innerHTML = d.source==='unavailable' ? `<div class="pro-warn">${esc(d.reason||'unavailable')}</div>` :
+        `<div class="pro-chip">Score ${num(d.score)} (+${d.positive}/−${d.negative}, ${d.headlines} headlines)</div>` + (d.sample_titles||[]).map(t=>`<div>• ${esc(t)}</div>`).join('');
+    }catch(e){ $('pro-news').textContent='❌ '+e.message; }
+  }
+
+  async function loadOrders(){
+    try{ const d = await api('/orders?limit=30');
+      $('pro-orders').innerHTML = (d.orders.length? '<table><tr><th>Time</th><th>Mode</th><th>Leg</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th></tr>' +
+        d.orders.map(o=>`<tr><td>${esc(o.time)}</td><td>${esc(o.mode)}</td><td>${esc(o.leg)}</td><td>${esc(o.side)}</td><td>${esc(o.qty)}</td><td>${num(o.price)}</td><td>${esc(o.status)}</td></tr>`).join('')+'</table>' : 'ஆர்டர்கள் இல்லை.');
+    }catch(e){ $('pro-orders').textContent='❌ '+e.message; }
+  }
+
+  $('pro-refresh').onclick = ()=>{ loadSignals(); loadComm(); loadNews(); loadOrders(); loadStatus(); };
+  $('pro-symbol').onchange = loadSignals;
+  $('pro-kill-on').onclick  = async()=>{ try{ await api('/kill-switch',{method:'POST',headers:hdr(),body:JSON.stringify({on:true})}); loadStatus(); say('🛑 Kill switch ON'); }catch(e){ say('❌ '+e.message,true);} };
+  $('pro-kill-off').onclick = async()=>{ try{ await api('/kill-switch',{method:'POST',headers:hdr(),body:JSON.stringify({on:false})}); loadStatus(); say('Kill switch OFF'); }catch(e){ say('❌ '+e.message,true);} };
+  $('pro-refresh').click();
+  setInterval(loadStatus, 30000);
+})();
+</script>
+{% endblock %}

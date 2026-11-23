@@ -34,7 +34,9 @@ class Settings(BaseSettings):
     kite_access_token: Optional[str] = Field(None, alias="KITE_ACCESS_TOKEN")
 
     # Database
-    sqlite_db_path: str = Field("./data/analyzer.db", alias="SQLITE_DB_PATH")
+    # NIFTY-PRO: default DB is analyzer_pro.db so this app can never collide with the
+    # production ./data/analyzer.db even if SQLITE_DB_PATH is forgotten.
+    sqlite_db_path: str = Field("./data/analyzer_pro.db", alias="SQLITE_DB_PATH")
     # Set DATABASE_URL to switch to Postgres, e.g.
     #   postgresql+asyncpg://user:pass@host:5432/nifty_analyzer
     # Leave unset to keep using the SQLite path above (default, single-user/
@@ -129,6 +131,23 @@ class Settings(BaseSettings):
     # BUG FIX (2026-08-16): was hardcoded 200000 inside strategy.py with a
     # "settings-இல் இருக்கணும்" comment — now actually wired through config.
     default_capital: int = Field(200000, alias="DEFAULT_CAPITAL")
+
+    # ── NIFTY-PRO: sell-signal engine / commodities / news / order execution ──
+    # SAFETY DEFAULTS: paper mode, live disabled, PIN required, naked sell blocked.
+    trading_mode:          str            = Field("paper", alias="TRADING_MODE")            # paper | live
+    live_trading_enabled:  bool           = Field(False,   alias="LIVE_TRADING_ENABLED")    # must be true for live
+    order_pin:             Optional[str]  = Field(None,    alias="ORDER_PIN")               # required header X-Order-Pin
+    max_lots_per_order:    int            = Field(1,       alias="MAX_LOTS_PER_ORDER")
+    max_orders_per_day:    int            = Field(10,      alias="MAX_ORDERS_PER_DAY")
+    allow_naked_sell:      bool           = Field(False,   alias="ALLOW_NAKED_SELL")
+    min_free_cash_per_sell_lot: int       = Field(150000,  alias="MIN_FREE_CASH_PER_SELL_LOT")
+    order_product_type:    str            = Field("INTRADAY", alias="ORDER_PRODUCT_TYPE")   # INTRADAY | CARRYFORWARD
+    kill_switch_file:      str            = Field("./data/KILL_SWITCH", alias="KILL_SWITCH_FILE")
+    newsapi_key:           Optional[str]  = Field(None,    alias="NEWSAPI_KEY")
+    iv_rank_min_samples:   int            = Field(30,      alias="IV_RANK_MIN_SAMPLES")
+    sell_sl_multiple:      float          = Field(1.4,     alias="SELL_SL_MULTIPLE")        # SL = sold premium x 1.4
+    sell_target_fraction:  float          = Field(0.5,     alias="SELL_TARGET_FRACTION")    # book at 50% decay
+    crude_nifty_beta:      float          = Field(-0.4,    alias="CRUDE_NIFTY_BETA")        # heuristic, NOT fitted
 
     @property
     def cors_allowed_origins(self) -> List[str]:

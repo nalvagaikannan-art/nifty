@@ -91,3 +91,142 @@ def test_recommended_option_sell_pe_preserves_sell_levels():
     assert rec["available"] is True
     assert rec["type"] == "PE"
     assert rec["sl"] > rec["entry_price"] > rec["t1"] > rec["t2"] > rec["t3"]
+
+def test_picked_strike_preserves_option_quote_timestamps():
+    chain = _chain("28-Aug-2025")
+    feed_time = "2026-10-09T14:00:00+05:30"
+    trade_time = "2026-10-09T13:59:58+05:30"
+
+    for row in chain["data"]:
+        row["CE"]["exchangeFeedTime"] = feed_time
+        row["CE"]["exchangeTradeTime"] = trade_time
+
+    strikes = _pick_strikes(chain, is_call=True, spot=24650.0)
+
+    assert len(strikes) == 3
+    for picked in strikes:
+        assert picked["exchange_feed_time"] == feed_time
+        assert picked["exchange_trade_time"] == trade_time
+
+
+
+def test_picked_strike_uses_complete_fresh_websocket_quote(monkeypatch):
+    from types import SimpleNamespace
+    import app.api.routes.strategy as strategy_module
+
+    chain = _chain("28-Aug-2025")
+    now = 1791870925.0
+    monkeypatch.setattr(
+        strategy_module, "time", SimpleNamespace(time=lambda: now)
+    )
+
+    for row in chain["data"]:
+        side = row["CE"]
+        live_ltp = side["lastPrice"] + 5.0
+        side.update({
+            "live_ws": True,
+            "live_ws_source": "angel_one_websocket",
+            "live_ws_quote": {
+                "ltp": live_ltp,
+                "bid": live_ltp - 0.5,
+                "ask": live_ltp + 0.5,
+                "received_at": now - 0.4,
+                "source": "angel_one_websocket",
+                "exchange_timestamp": "2026-10-13T11:25:25+05:30",
+                "exchange_timestamp_ms": 1791870925000,
+            },
+        })
+
+    picked = _pick_strikes(chain, is_call=True, spot=24650.0)
+    assert len(picked) == 3
+
+    for item in picked:
+        row = next(r for r in chain["data"] if r["strikePrice"] == item["strike"])
+        side = row["CE"]
+        live_ltp = side["lastPrice"] + 5.0
+        assert item["ltp"] == live_ltp
+        assert item["bid"] == live_ltp - 0.5
+        assert item["ask"] == live_ltp + 0.5
+        assert item["price_source"] == "angel_one_websocket"
+        assert item["live_ws"] is True
+        assert item["live_ws_received_at"] == now - 0.4
+        assert item["live_ws_age_sec"] == 0.4
+        assert item["live_ws_exchange_timestamp"] == "2026-10-13T11:25:25+05:30"
+
+
+def test_picker_does_not_trust_legacy_ws_markers_without_nested_quote(monkeypatch):
+    from types import SimpleNamespace
+    import app.api.routes.strategy as strategy_module
+
+    chain = _chain("28-Aug-2025")
+    now = 1791870925.0
+    monkeypatch.setattr(
+        strategy_module, "time", SimpleNamespace(time=lambda: now)
+    )
+
+    for row in chain["data"]:
+        side = row["CE"]
+        side["bidprice"] = side["lastPrice"] - 0.5
+        side["askPrice"] = side["lastPrice"] + 0.5
+        # Simulate old flat markers left by a former quote pipeline.
+        side.update({
+            "live_ws": True,
+            "live_ws_received_at": now - 0.2,
+            "live_ws_age_sec": 0.2,
+            "live_ws_source": "angel_one_websocket",
+            "live_ws_exchange_timestamp": "old-marker-only",
+        })
+
+    picked = _pick_strikes(chain, is_call=True, spot=24650.0)
+    assert len(picked) == 3
+
+    for item in picked:
+        row = next(r for r in chain["data"] if r["strikePrice"] == item["strike"])
+        side = row["CE"]
+        assert item["ltp"] == side["lastPrice"]
+        assert item["bid"] == side["bidprice"]
+        assert item["ask"] == side["askPrice"]
+        assert item["price_source"] == "rest_unknown"
+        assert item["live_ws"] is False
+        assert item["live_ws_received_at"] is None
+        assert item["live_ws_source"] is None
+
+
+def test_picker_rejects_incomplete_ws_quote_instead_of_mixing_rest_prices(monkeypatch):
+    from types import SimpleNamespace
+    import app.api.routes.strategy as strategy_module
+
+    chain = _chain("28-Aug-2025")
+    now = 1791870925.0
+    monkeypatch.setattr(
+        strategy_module, "time", SimpleNamespace(time=lambda: now)
+    )
+
+    for row in chain["data"]:
+        side = row["CE"]
+        side["bidprice"] = side["lastPrice"] - 0.5
+        side["askPrice"] = side["lastPrice"] + 0.5
+        side.update({
+            "live_ws": True,
+            "live_ws_source": "angel_one_websocket",
+            "live_ws_quote": {
+                # Deliberately invalid: ask is absent; do not mix this LTP
+                # and bid with REST ask.
+                "ltp": side["lastPrice"] + 100.0,
+                "bid": side["lastPrice"] + 99.5,
+                "received_at": now - 0.2,
+                "source": "angel_one_websocket",
+            },
+        })
+
+    picked = _pick_strikes(chain, is_call=True, spot=24650.0)
+    assert len(picked) == 3
+
+    for item in picked:
+        row = next(r for r in chain["data"] if r["strikePrice"] == item["strike"])
+        side = row["CE"]
+        assert item["ltp"] == side["lastPrice"]
+        assert item["bid"] == side["bidprice"]
+        assert item["ask"] == side["askPrice"]
+        assert item["price_source"] == "rest_unknown"
+        assert item["live_ws"] is False

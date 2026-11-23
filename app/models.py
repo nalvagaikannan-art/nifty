@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Text, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON, Text, UniqueConstraint, Index, ForeignKey
 from sqlalchemy.sql import func
 from app.database import Base
 
@@ -158,5 +158,112 @@ class IntradayOHLC(Base):
             "ix_intraday_ohlc_symbol_timestamp",
             "symbol",
             "timestamp",
+        ),
+    )
+
+
+class OptionQuoteHistory(Base):
+    """Append-only quote snapshots for later execution-aware signal replay.
+
+    recorded_at is the database capture time, not a claim about exchange
+    observation time. Provider and WebSocket timestamps are retained separately.
+    """
+    __tablename__ = "option_quote_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    recorded_at = Column(DateTime, nullable=False)
+    symbol = Column(String, nullable=False)
+    expiry = Column(String, nullable=False)
+    strike = Column(Float, nullable=False)
+    option_type = Column(String, nullable=False)
+    last_price = Column(Float, nullable=True)
+    bid = Column(Float, nullable=True)
+    ask = Column(Float, nullable=True)
+    quote_source = Column(String(120), nullable=False)
+    exchange_feed_time = Column(String, nullable=True)
+    exchange_trade_time = Column(String, nullable=True)
+    ws_received_at = Column(Float, nullable=True)
+    ws_exchange_timestamp = Column(String, nullable=True)
+    ws_exchange_timestamp_ms = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_option_quote_contract_recorded",
+            "symbol", "expiry", "strike", "option_type", "recorded_at",
+        ),
+    )
+
+
+class ForwardPaperOutcome(Base):
+    """Persisted per-ledger, per-horizon replay; never a broker trade."""
+
+    __tablename__ = "forward_paper_outcomes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ledger_id = Column(
+        Integer,
+        ForeignKey("daily_signal_ledger.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol = Column(String, nullable=False, index=True)
+    horizon_minutes = Column(Integer, nullable=False)
+    event_timestamp = Column(DateTime, nullable=False)
+    target_timestamp = Column(DateTime, nullable=False)
+    status = Column(String(40), nullable=False, default="pending", index=True)
+    status_reason = Column(Text, nullable=True)
+    last_evaluated_at = Column(DateTime, nullable=True)
+
+    entry_source = Column(String(120), nullable=True)
+    option_entry_price = Column(Float, nullable=True)
+    option_entry_bid = Column(Float, nullable=True)
+    option_entry_ask = Column(Float, nullable=True)
+
+    spot_entry_price = Column(Float, nullable=True)
+    spot_target_price = Column(Float, nullable=True)
+    spot_target_observed_at = Column(DateTime, nullable=True)
+    spot_target_offset_seconds = Column(Float, nullable=True)
+    spot_return_pct = Column(Float, nullable=True)
+    spot_directional_return_pct = Column(Float, nullable=True)
+
+    option_target_ltp = Column(Float, nullable=True)
+    option_target_bid = Column(Float, nullable=True)
+    option_target_ask = Column(Float, nullable=True)
+    option_target_recorded_at = Column(DateTime, nullable=True)
+    option_target_offset_seconds = Column(Float, nullable=True)
+    option_quote_source = Column(String(120), nullable=True)
+    option_ws_received_at = Column(Float, nullable=True)
+    option_ws_exchange_timestamp = Column(String, nullable=True)
+    option_ws_exchange_timestamp_ms = Column(String, nullable=True)
+
+    premium_raw_return_pct = Column(Float, nullable=True)
+    premium_action_adjusted_return_pct = Column(Float, nullable=True)
+    execution_aware_return_pct = Column(Float, nullable=True)
+    execution_aware_pnl_per_lot = Column(Float, nullable=True)
+    mfe_pct = Column(Float, nullable=True)
+    mae_pct = Column(Float, nullable=True)
+    option_quote_count = Column(Integer, nullable=True)
+
+    details = Column(JSON, nullable=True)
+    created_at = Column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+    updated_at = Column(
+        DateTime, nullable=False,
+        server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "ledger_id",
+            "horizon_minutes",
+            name="uq_forward_paper_outcome_ledger_horizon",
+        ),
+        Index(
+            "ix_forward_paper_outcome_symbol_horizon_status",
+            "symbol", "horizon_minutes", "status",
+        ),
+        Index(
+            "ix_forward_paper_outcome_target_status",
+            "target_timestamp", "status",
         ),
     )

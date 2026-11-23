@@ -43,7 +43,7 @@
         <div class="intro-card">
             <div class="intro-title">🔄 Spot vs Premium</div>
             <div class="intro-text">
-                <b>Spot Direction</b> = NIFTY திசை சரியா?
+                <b>Spot Direction</b> = Selected index திசை சரியா?
                 <br>
                 <b>Premium Accuracy</b> = recommended CE/PE premium outcome எப்படி?
                 <br>
@@ -114,6 +114,33 @@
         </div>
     </div>
     <div id="ledger-status" class="card glass acc-block">Loading ledger performance...</div>
+
+    <h3 style="margin:1.25rem 0 0.75rem;">Fresh Entry Only - Option Premium / P&amp;L (60min)</h3>
+    <div class="dashboard-grid" id="fresh-entry-performance" style="margin-bottom:0.5rem; display:none;">
+        <div class="card glass">
+            <h3>Fresh Entry Premium</h3>
+            <div class="price" id="fresh-entry-premium-return">--</div>
+            <div class="sub" id="fresh-entry-premium-n">Matured fresh-entry option observations</div>
+        </div>
+        <div class="card glass">
+            <h3>Premium Net of Est. Costs</h3>
+            <div class="price" id="fresh-entry-premium-net">--</div>
+            <div class="sub" id="fresh-entry-premium-net-n">After estimated round-trip cost</div>
+        </div>
+        <div class="card glass">
+            <h3>Estimated Net P&amp;L / Lot</h3>
+            <div class="price" id="fresh-entry-pnl-net">--</div>
+            <div class="sub" id="fresh-entry-pnl-n">Frozen historical lot size only</div>
+        </div>
+        <div class="card glass">
+            <h3>Fresh Entry Coverage</h3>
+            <div class="price" id="fresh-entry-coverage">--</div>
+            <div class="sub">Contract episodes with matured premium data</div>
+        </div>
+    </div>
+    <div id="fresh-entry-status" class="card glass acc-block">
+        Fresh-entry-only performance requires the updated replay backend.
+    </div>
 
     <div class="card glass acc-block" id="session-study-block">
         <h3>📈 Session Study — Opening / Closing / 14:40 Evidence</h3>
@@ -233,7 +260,8 @@
     </div>
 
     <div class="card glass acc-block" id="indicator-block" style="display:none;">
-        <h3>Per-Indicator Accuracy (20-condition scoring engine)</h3>
+        <h3>Indicator Diagnostics - Directional Hit Rate vs Risk / Range Checks</h3>
+      <div class="sub" style="margin-bottom:.75rem;">Directional hit rate and range/risk checks measure different things. VIX / ATR coverage and distance-to-Max-Pain metrics are not directional prediction accuracy. Treat small samples as diagnostics, not reliable forecasts.</div>
         <table class="acc-table" id="indicator-table">
             <thead><tr><th>Indicator / Metric</th><th>Result</th><th>Hits / Total</th></tr></thead>
             <tbody></tbody>
@@ -306,6 +334,7 @@
 <script>
 let currentSymbol = 'NIFTY';
 let currentDays = 15;
+let accuracyLoadGeneration = 0;
 
 $(document).ready(function() {
     loadAll();
@@ -314,31 +343,78 @@ $(document).ready(function() {
 });
 
 function loadAll() {
-    // Bug fix (Tamil review): these 4 calls used to fire in PARALLEL the
-    // instant this page opened. Each one independently scans up to
-    // `currentDays` days of history — 4 of those running at once was
-    // enough to overload the process on a low-memory host (Render free
-    // tier), which is why this page sometimes crashed and showed a dead
-    // "server error" / "Data unavailable" instead of real numbers.
-    // Running them one after another (status first, since it's cheapest
-    // and tells us whether there's even any data worth computing on)
-    // trades a little load time for the page actually working reliably.
-    loadPersistenceStatus()
+    const loadId = ++accuracyLoadGeneration;
+    const symbol = currentSymbol;
+    const days = currentDays;
+
+    // Clear old-symbol data immediately so the page never presents it as
+    // belonging to the newly selected symbol or date range.
+    window.__spotAccuracy = null;
+    window.__premiumAccuracy = null;
+    window.__ledgerPerformance = null;
+    window.__indicatorAccuracy = null;
+
+    $(
+        '#signal-summary, #signal-breakdown-block, #accuracy-chart-block,' +
+        '#premium-summary, #premium-breakdown-block, #premium-horizon-block,' +
+        '#ledger-performance, #fresh-entry-performance, #horizon-block, #moneyness-block, #mfemae-block,' +
+        '#calibration-block, #regime-block, #confidence-block,' +
+        '#indicator-chart-block, #indicator-block'
+    ).hide();
+
+    $('#persistence-status').text('Checking saved history...');
+    $('#signal-status').removeClass('error')
+        .text('Loading signal accuracy for ' + symbol + '...')
+        .show();
+    $('#premium-status').removeClass('error')
+        .text('Loading premium accuracy for ' + symbol + '...')
+        .show();
+    $('#ledger-status').removeClass('error')
+        .text('Loading ledger performance for ' + symbol + '...')
+        .show();
+    $('#indicator-status').removeClass('error')
+        .text('Loading indicator accuracy for ' + symbol + '...')
+        .show();
+    $('#session-study-status').text('Loading Session Study for ' + symbol + '...');
+
+    $('#ss-gap, #ss-gap-n, #ss-boundary, #ss-cont-rev, #ss-close, ' +
+      '#ss-close-n, #ss-calls, #ss-spot, #ss-premium').text('--');
+
+    // Keep expensive history calculations sequential. Each continuation
+    // checks its generation so an older filter chain cannot launch more work.
+    return loadPersistenceStatus(loadId, symbol)
         .catch(function() {})
-        .then(function() { return loadIndicatorAccuracy(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadIndicatorAccuracy(loadId, symbol, days);
+        })
         .catch(function() {})
-        .then(function() { return loadSignalAccuracy(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadSignalAccuracy(loadId, symbol, days);
+        })
         .catch(function() {})
-        .then(function() { return loadPremiumAccuracy(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadPremiumAccuracy(loadId, symbol, days);
+        })
         .catch(function() {})
-        .then(function() { return loadLedgerPerformance(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadLedgerPerformance(loadId, symbol, days);
+        })
         .catch(function() {})
-        .then(function() { return loadSessionStudy(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadSessionStudy(loadId, symbol, days);
+        })
         .catch(function() {})
-        .then(function() { return loadCalibration(); })
+        .then(function() {
+            if (loadId !== accuracyLoadGeneration) return null;
+            return loadCalibration(loadId, symbol, days);
+        })
         .catch(function() {});
 }
-
 function renderBreakdown(targetSel, d, gradedField) {
     // Review #2: flat/pending/no-data shown as their own chips, never
     // folded into (or hidden behind) the headline % — so "75% accuracy"
@@ -347,11 +423,13 @@ function renderBreakdown(targetSel, d, gradedField) {
     const graded = overall.total_graded || 0;
     const flat = overall.flat || 0;
     const pending = d.pending_at_headline_horizon || 0;
+    const sessionUnavailable = d.session_unavailable_at_headline_horizon || 0;
     const noData = d[gradedField] || 0;
     $(targetSel).html(
         '<span class="chip graded"><b>' + graded + '</b> Graded episodes (correct ' + (overall.correct||0) + ', wrong ' + (overall.wrong||0) + ')</span>' +
         '<span class="chip flat"><b>' + flat + '</b> Flat (no real move)</span>' +
         '<span class="chip pending"><b>' + pending + '</b> Pending (horizon not reached yet)</span>' +
+        '<span class="chip session-unavailable"><b>' + sessionUnavailable + '</b> Session unavailable (market close before horizon)</span>' +
         '<span class="chip nodata"><b>' + noData + '</b> No data</span>'
     );
 }
@@ -367,9 +445,10 @@ function fmtRate(rate, insufficient) {
     return rate.toFixed(1) + '%' + (insufficient ? ' (low n)' : '');
 }
 
-function loadPersistenceStatus() {
-    return $.get('/api/accuracy/status/' + currentSymbol)
+function loadPersistenceStatus(loadId = accuracyLoadGeneration, symbol = currentSymbol) {
+    return $.get('/api/accuracy/status/' + encodeURIComponent(symbol))
       .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
         const s = d.saved || {};
         const db = d.database_configured;
         const cls = (s.market_snapshots > 0 || s.ai_signals > 0) ? 'persist-ok' : 'persist-warn';
@@ -380,7 +459,7 @@ function loadPersistenceStatus() {
         html += '<div>Last market save: ' + (d.last_saved_utc.market || '--') +
           ' &nbsp; | &nbsp; Last analysis save: ' + (d.last_saved_utc.analysis || '--') + '</div>';
         if (!db) {
-          html += '<div class="persist-warn">⚠️ Render-ல் DATABASE_URL அமைக்கப்படவில்லை. SQLite history restart/redeploy-ல் அழிந்துவிடலாம்.</div>';
+          html += '<div class="persist-warn">DATABASE_URL is not configured. Local database history durability depends on the host disk and deployment setup. Confirm backups for long-term retention.</div>';
         } else {
           html += '<div class="persist-ok">✅ External database configured.</div>';
         }
@@ -398,6 +477,7 @@ function loadPersistenceStatus() {
         $('#persistence-status').html(html);
       })
       .fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
         const status = xhr.status;
         const detail = (xhr.responseJSON && xhr.responseJSON.detail);
         // A clean JSON error means the server itself responded (e.g. a
@@ -520,7 +600,7 @@ function renderAccuracyCharts(d) {
         });
     }
 
-    const inds = (d._indicator_cache || []).filter(i => i.metric_type !== 'non_directional');
+    const inds = (d._indicator_cache || []).filter(i => i.metric_type !== 'non_directional' && !i.insufficient_data && i.success_rate !== null && i.success_rate !== undefined);
     if (inds.length) {
         $('#indicator-chart-block').show();
         Plotly.newPlot('indicator-accuracy-chart', [{
@@ -557,12 +637,13 @@ function renderAccuracyCharts(d) {
         });
     }
 }
-function loadSignalAccuracy() {
-    $('#signal-status').removeClass('error').text('Loading signal accuracy for ' + currentSymbol + '...').show();
+function loadSignalAccuracy(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
+    $('#signal-status').removeClass('error').text('Loading signal accuracy for ' + symbol + '...').show();
     $('#signal-summary, #horizon-block, #signal-breakdown-block').hide();
 
-    return $.get('/api/accuracy/signals/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/signals/' + encodeURIComponent(symbol) + '?days=' + encodeURIComponent(days))
         .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
             $('#signal-status').hide();
             $('#signal-summary, #horizon-block, #signal-breakdown-block').show();
 
@@ -603,18 +684,20 @@ function loadSignalAccuracy() {
             maybeRenderDisagreement();
         })
         .fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
             let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
                 (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#signal-status').addClass('error').text('⚠️ Signal accuracy could not be loaded: ' + detail);
         });
 }
 
-function loadPremiumAccuracy() {
-    $('#premium-status').removeClass('error').text('Loading premium accuracy for ' + currentSymbol + '...').show();
+function loadPremiumAccuracy(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
+    $('#premium-status').removeClass('error').text('Loading premium accuracy for ' + symbol + '...').show();
     $('#premium-summary, #premium-horizon-block, #premium-breakdown-block, #moneyness-block, #mfemae-block, #calibration-block').hide();
 
-    return $.get('/api/accuracy/premium/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/premium/' + encodeURIComponent(symbol) + '?days=' + encodeURIComponent(days))
         .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
             $('#premium-status').hide();
             $('#premium-summary, #premium-horizon-block, #premium-breakdown-block').show();
 
@@ -666,20 +749,26 @@ function loadPremiumAccuracy() {
             maybeRenderDisagreement();
         })
         .fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
             let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
                 (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#premium-status').addClass('error').text('⚠️ Premium accuracy could not be loaded: ' + detail);
         })
 }
 
-function loadLedgerPerformance() {
+function loadLedgerPerformance(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
     $('#ledger-status').removeClass('error')
-        .text('Loading ledger performance for ' + currentSymbol + '...')
+        .text('Loading ledger performance for ' + symbol + '...')
         .show();
     $('#ledger-performance').hide();
+    $('#fresh-entry-performance').hide();
+    $('#fresh-entry-status').removeClass('error')
+        .text('Loading fresh-entry performance for ' + symbol + '...')
+        .show();
 
-    return $.get('/api/accuracy/ledger/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/ledger/' + encodeURIComponent(symbol) + '?days=' + encodeURIComponent(days))
         .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
             const spot = d.spot_direction || {};
             const premium = d.option_premium || {};
             const pnl = d.pnl || {};
@@ -732,17 +821,87 @@ function loadLedgerPerformance() {
                     : missingLot + ' rows without frozen historical lot size'
             );
 
+            // Fresh-entry results remain separate from the legacy all-episode metrics.
+            const fresh = d.fresh_entry_performance;
+            $('#fresh-entry-performance').hide();
+
+            if (!fresh || fresh.metadata_version !== 1) {
+                $('#fresh-entry-status').removeClass('error')
+                    .text(
+                        'Fresh-entry-only metrics are not available from the current backend. ' +
+                        'Deploy/restart with the updated ledger replay code to enable this panel.'
+                    )
+                    .show();
+            } else {
+                const fp = fresh.option_premium || {};
+                const fn = fresh.pnl || {};
+                const fpNet = fn.estimated_net_pnl_per_lot || {};
+                const freshAvg = fp.action_adjusted_return_pct &&
+                    fp.action_adjusted_return_pct.average_pct;
+                const freshNetAvg = fp.estimated_net_return_pct &&
+                    fp.estimated_net_return_pct.average_pct;
+                const freshCoverage = Number(fn.coverage_rows || 0);
+                const freshOptionRows = Number(fresh.option_data_available || 0);
+
+                function money(v) {
+                    if (v === null || v === undefined || !Number.isFinite(Number(v))) {
+                        return '--';
+                    }
+                    const n = Number(v);
+                    return (n < 0 ? '-INR ' : 'INR ') + Math.abs(n).toFixed(2);
+                }
+
+                $('#fresh-entry-premium-return').text(pct(freshAvg));
+                $('#fresh-entry-premium-net').text(pct(freshNetAvg));
+                $('#fresh-entry-pnl-net').text(money(fpNet.average));
+                $('#fresh-entry-coverage').text(String(freshOptionRows));
+
+                $('#fresh-entry-premium-n').text(
+                    Number(fresh.contract_episodes || 0) +
+                    ' independent fresh-entry contract episodes; ' +
+                    freshOptionRows + ' matured option observations'
+                );
+                const freshCost = fp.estimated_round_trip_cost_pct == null
+                    ? 2 : Number(fp.estimated_round_trip_cost_pct);
+                $('#fresh-entry-premium-net-n').text(
+                    'After estimated ' + freshCost + '% round-trip cost'
+                );
+                $('#fresh-entry-pnl-n').text(
+                    freshCoverage + ' rows with frozen historical lot size; average per lot'
+                );
+
+                $('#fresh-entry-status').removeClass('error')
+                    .text(
+                        'Fresh-entry replay only. Approved: ' +
+                        Number(fresh.ledger_rows_fresh_entry_allowed || 0) +
+                        '; denied: ' +
+                        Number(fresh.ledger_rows_fresh_entry_denied || 0) +
+                        '; HOLD existing direction (not a new entry): ' +
+                          Number(fresh.ledger_rows_hold_existing_direction || 0) +
+                          '; unclassified/legacy excluded: ' +
+                        Number(fresh.ledger_rows_unclassified || 0) +
+                        '. Estimated historical replay, not executed broker trades.'
+                    )
+                    .show();
+                $('#fresh-entry-performance').show();
+            }
+
             $('#ledger-performance').show();
             $('#ledger-status').hide();
             window.__ledgerPerformance = d;
         })
         .fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
             let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
                 (xhr.status === 0
                     ? 'Connection lost — server busy/restarting.'
                     : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#ledger-status').addClass('error')
                 .text('⚠️ Ledger performance could not be loaded: ' + detail);
+            $('#fresh-entry-performance').hide();
+            $('#fresh-entry-status').addClass('error')
+                .text('Fresh-entry performance could not be loaded: ' + detail)
+                .show();
         });
 }
 
@@ -786,12 +945,13 @@ function renderMfeMae(mfeMae) {
     });
 }
 
-function loadSessionStudy() {
+function loadSessionStudy(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
     return $.getJSON(
         '/api/accuracy/session-study/' +
-        encodeURIComponent(currentSymbol) +
-        '?days=' + encodeURIComponent(currentDays)
+        encodeURIComponent(symbol) +
+        '?days=' + encodeURIComponent(days)
     ).done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
         var op = d.opening_profile || {};
         var gap = op.gap || {};
         var boundary = op.open_boundary_09_15_to_09_30 || {};
@@ -854,6 +1014,7 @@ function loadSessionStudy() {
             );
         }
     }).fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
         var detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
             (xhr.status === 0
                 ? 'Connection lost — try again shortly.'
@@ -865,12 +1026,13 @@ function loadSessionStudy() {
     });
 }
 
-function loadCalibration() {
+function loadCalibration(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
     // Signal Strength calibration curve — the curve itself (every bucket's
     // historical win rate) doesn't depend on which confidence you pass in,
     // so a fixed mid-range lookup is enough to render the full table.
-    $.get('/api/accuracy/calibration/' + currentSymbol + '?confidence=60&days=' + currentDays)
+    return $.get('/api/accuracy/calibration/' + encodeURIComponent(symbol) + '?confidence=60&days=' + encodeURIComponent(days))
         .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
             $('#calibration-block').show();
             $('#calibration-disclaimer').text(d.disclaimer || '');
             const body = $('#calibration-table tbody').empty();
@@ -882,7 +1044,8 @@ function loadCalibration() {
                 </tr>`);
             });
         })
-        .fail(function() { $('#calibration-block').hide(); });
+        .fail(function() {
+            if (loadId !== accuracyLoadGeneration) return; $('#calibration-block').hide(); });
 }
 
 function maybeRenderDisagreement() {
@@ -964,12 +1127,13 @@ function renderBucketTable(tableSel, blockSel, buckets) {
     $(blockSel).show();
 }
 
-function loadIndicatorAccuracy() {
-    $('#indicator-status').removeClass('error').text('Loading indicator accuracy for ' + currentSymbol + '...').show();
+function loadIndicatorAccuracy(loadId = accuracyLoadGeneration, symbol = currentSymbol, days = currentDays) {
+    $('#indicator-status').removeClass('error').text('Loading indicator accuracy for ' + symbol + '...').show();
     $('#indicator-block').hide();
 
-    return $.get('/api/accuracy/indicators/' + currentSymbol + '?days=' + currentDays)
+    return $.get('/api/accuracy/indicators/' + encodeURIComponent(symbol) + '?days=' + encodeURIComponent(days))
         .done(function(d) {
+            if (loadId !== accuracyLoadGeneration) return;
             window.__indicatorAccuracy = d.indicators || [];
             const body = $('#indicator-table tbody').empty();
             (d.indicators || []).forEach(function(ind) {
@@ -990,6 +1154,7 @@ function loadIndicatorAccuracy() {
             renderAccuracyCharts({by_horizon:{}, _indicator_cache: window.__indicatorAccuracy});
         })
         .fail(function(xhr) {
+            if (loadId !== accuracyLoadGeneration) return;
             let detail = (xhr.responseJSON && xhr.responseJSON.detail) ||
                 (xhr.status === 0 ? 'Connection lost — server busy/restarting, try again shortly.' : 'Data unavailable (HTTP ' + xhr.status + ').');
             $('#indicator-status').addClass('error').text('⚠️ Indicator accuracy could not be loaded: ' + detail);

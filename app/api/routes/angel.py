@@ -115,6 +115,20 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = None):
         )
     try:
         data = await angel_session.get_option_chain(symbol.upper(), expiry)
+
+        # Reuse the shared, rate-limited persistence path for direct Angel
+        # requests too. This adds no additional broker request.
+        try:
+            from app.services.data_fetcher import _persist_option_chain_snapshot_if_due
+            await _persist_option_chain_snapshot_if_due(data, symbol.upper())
+        except Exception as persist_exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Option snapshot persistence failed for direct Angel route %s (%s)",
+                symbol.upper(),
+                type(persist_exc).__name__,
+            )
+
         return {"symbol": symbol.upper(), "expiry": expiry, "data": data}
     except AngelOneError as e:
         raise HTTPException(status_code=502, detail=str(e))

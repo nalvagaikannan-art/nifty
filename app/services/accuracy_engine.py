@@ -22,6 +22,7 @@ NOTE: இது small-sample, best-effort backtest — analysis calls எவ்�
 density-ஐ பொறுத்து துல்லியம் மாறும். "insufficient_data" flag குறைந்த
 sample-க்கு காட்டப்படும்.
 """
+from bisect import bisect_right
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 import math
@@ -32,6 +33,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models import AnalysisResult, MarketData
 from app.services.accuracy_time import analysis_event_timestamp
+from app.services.signal_accuracy import _target_within_nse_session
 from app.utils.helpers import now_utc_naive
 
 logger = logging.getLogger(__name__)
@@ -76,19 +78,39 @@ def _parse_direction(reason_line: str) -> str:
     return "neutral"
 
 
-def _nearest_price(prices: List[Tuple[datetime, float]], target: datetime,
-                    max_gap_minutes: Optional[float] = None) -> Optional[float]:
-    """prices ஒரு (timestamp, price) list, timestamp-படி sorted ஆ இருக்கணும்."""
-    best_price, best_gap = None, None
-    for ts, price in prices:
-        gap = abs((ts - target).total_seconds()) / 60.0
-        if best_gap is None or gap < best_gap:
-            best_gap, best_price = gap, price
-    if best_price is None:
+def _nearest_price(
+    prices: List[Tuple[datetime, float]],
+    target: datetime,
+    max_gap_minutes: Optional[float] = None,
+    timestamps: Optional[List[datetime]] = None,
+) -> Optional[float]:
+    """Return the latest price at or before target; never use a future snapshot."""
+    if not prices:
         return None
-    if max_gap_minutes is not None and best_gap > max_gap_minutes:
+
+    if timestamps is None:
+        timestamps = [ts for ts, _ in prices]
+    if len(timestamps) != len(prices):
         return None
-    return best_price
+
+    # The caller's price series is sorted by timestamp.
+    idx = bisect_right(timestamps, target) - 1
+    if idx < 0:
+        return None
+
+    observed_ts, observed_price = prices[idx]
+    gap_minutes = (target - observed_ts).total_seconds() / 60.0
+    if gap_minutes < 0:
+        return None
+    if max_gap_minutes is not None and gap_minutes > max_gap_minutes:
+        return None
+    return observed_price
+
+
+def _indicator_horizon_in_session(event_ts: datetime) -> bool:
+    """Require the full indicator horizon to remain in one NSE session."""
+    target_ts = event_ts + timedelta(minutes=HORIZON_MINUTES)
+    return _target_within_nse_session(event_ts, target_ts)
 
 
 async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
@@ -111,8 +133,11 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
         )).scalars().all()
 
     prices: List[Tuple[datetime, float]] = [
-        (r.timestamp, r.price) for r in market_rows if r.price is not None
+        (r.timestamp, float(r.price))
+        for r in market_rows
+        if r.timestamp is not None and r.price is not None and float(r.price) > 0
     ]
+    price_timestamps = [ts for ts, _ in prices]
 
     totals: Dict[str, Dict[str, int]] = {
         ind_id: {"hits": 0, "total": 0} for ind_id, _, _ in INDICATOR_ORDER
@@ -128,6 +153,7 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
 
     overall_hits, overall_total = 0, 0
     snapshots_used = 0
+    session_unavailable = 0
 
     if len(prices) >= 2:
         for row in analysis_rows:
@@ -142,13 +168,22 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
             if ts is None:
                 continue
 
+            if not _indicator_horizon_in_session(ts):
+                session_unavailable += 1
+                continue
+
+            target_ts = ts + timedelta(minutes=HORIZON_MINUTES)
             price_then = _nearest_price(
-                prices, ts, max_gap_minutes=HORIZON_TOLERANCE_MIN
+                prices,
+                ts,
+                max_gap_minutes=HORIZON_TOLERANCE_MIN,
+                timestamps=price_timestamps,
             )
             price_later = _nearest_price(
                 prices,
-                ts + timedelta(minutes=HORIZON_MINUTES),
+                target_ts,
                 max_gap_minutes=HORIZON_TOLERANCE_MIN,
+                timestamps=price_timestamps,
             )
 
             if price_then is None or price_later is None or price_then <= 0:
@@ -322,6 +357,7 @@ async def compute_indicator_accuracy(symbol: str, days: int = 15) -> Dict:
     )
 
     return {
+        "session_unavailable_horizon": session_unavailable,
         "symbol": symbol,
         "days": days,
         "horizon_minutes": HORIZON_MINUTES,

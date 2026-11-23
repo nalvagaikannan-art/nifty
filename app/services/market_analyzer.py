@@ -23,6 +23,7 @@ from app.services.angel_live_feed import angel_live_feed
 from app.services.market_session_state import classify_market_session_state
 from app.utils.helpers import safe_float, expiry_filter
 from app.utils.cache import async_cache
+from app.utils.cache import _singleflight_scope
 from app.config import settings
 from app.utils.helpers import now_ist as current_ist
 from app.utils.helpers import now_utc_naive, is_market_hours_ist
@@ -32,10 +33,7 @@ logger = logging.getLogger(__name__)
 # Startup prewarm should warm the overview cache without creating
 # a historical MarketData snapshot. Normal live/collector calls keep
 # snapshot persistence enabled.
-_snapshot_persistence_enabled = __import__("contextvars").ContextVar(
-    "snapshot_persistence_enabled",
-    default=True,
-)
+from app.services.option_snapshot_state import snapshot_persistence_enabled as _snapshot_persistence_enabled
 
 # Bound live OptionData persistence without adding broker calls.
 _OPTION_SNAPSHOT_MIN_INTERVAL_SECONDS = 60.0
@@ -79,6 +77,11 @@ class MarketAnalyzer:
         # the Angel-heavy portion of one market snapshot serialized while
         # leaving NSE/global enrichment concurrent.
         self._angel_overview_lock = asyncio.Lock()
+        # SHARED_LIVE_OVERVIEW_SNAPSHOT_V1: coalesce final live refreshes.
+        self._live_refresh_lock = asyncio.Lock()
+        self._live_refresh_inflight = {}
+        self._live_refresh_cache = {}
+        self._live_refresh_snapshot_ttl_seconds = 1.0
 
     # LIVE_CALC_REFRESH_LAYER_20260923_V2
     #
@@ -99,11 +102,89 @@ class MarketAnalyzer:
         if not is_market_hours_ist(current_ist()):
             return cached
 
-        return await self._refresh_live_calculations(
-            cached,
-            symbol,
-            expiry,
+        return await self._get_shared_live_snapshot(
+            cached, symbol, expiry, cache_bust
         )
+
+    # SHARED_LIVE_OVERVIEW_SNAPSHOT_V1
+    async def _get_shared_live_snapshot(
+        self,
+        cached: Dict,
+        symbol: str,
+        expiry: str = None,
+        cache_bust: str = "",
+    ) -> Dict:
+        """Share a short-lived final live snapshot across equivalent callers.
+
+        Only callers in the same cache priority scope share work. Every caller
+        receives a deep copy because the routes apply their own lifecycle and
+        response overlays after this method returns.
+        """
+        from copy import deepcopy
+
+        loop = asyncio.get_running_loop()
+        scope = _singleflight_scope()
+        key = (
+            str(symbol or "").upper(),
+            str(expiry or ""),
+            str(cache_bust or ""),
+            scope,
+        )
+        now = loop.time()
+        ready_snapshot = None
+
+        async with self._live_refresh_lock:
+            # Bound memory even when manual refresh tokens change frequently.
+            for old_key, entry in list(self._live_refresh_cache.items()):
+                created_at, _snapshot = entry
+                if now - created_at >= self._live_refresh_snapshot_ttl_seconds:
+                    self._live_refresh_cache.pop(old_key, None)
+
+            entry = self._live_refresh_cache.get(key)
+            if entry is not None:
+                created_at, snapshot = entry
+                if now - created_at < self._live_refresh_snapshot_ttl_seconds:
+                    ready_snapshot = snapshot
+                else:
+                    self._live_refresh_cache.pop(key, None)
+
+            if ready_snapshot is None:
+                task = self._live_refresh_inflight.get(key)
+                if task is None:
+                    task = asyncio.create_task(
+                        self._run_and_cache_live_snapshot(
+                            key, cached, symbol, expiry
+                        )
+                    )
+                    self._live_refresh_inflight[key] = task
+
+        if ready_snapshot is not None:
+            return deepcopy(ready_snapshot)
+
+        result = await asyncio.shield(task)
+        return deepcopy(result)
+
+    async def _run_and_cache_live_snapshot(
+        self,
+        key: tuple,
+        cached: Dict,
+        symbol: str,
+        expiry: str = None,
+    ) -> Dict:
+        """Run one refresh and publish its result before releasing waiters."""
+        try:
+            result = await self._refresh_live_calculations(
+                cached, symbol, expiry
+            )
+            loop = asyncio.get_running_loop()
+            async with self._live_refresh_lock:
+                self._live_refresh_cache[key] = (loop.time(), result)
+            return result
+        finally:
+            async with self._live_refresh_lock:
+                current = asyncio.current_task()
+                if self._live_refresh_inflight.get(key) is current:
+                    self._live_refresh_inflight.pop(key, None)
 
     async def _refresh_live_calculations(
         self,
@@ -124,40 +205,111 @@ class MarketAnalyzer:
             # Bypass DataFetcher's 10-second get_spot cache.
             live_spot = await self.fetcher._try_angel_live_feed_spot(sym)
 
-            if isinstance(live_spot, dict):
-                spot = dict(result.get("spot") or {})
+            # SPOT_REFRESH_FALLBACK_GUARD_20261015
+            # Preserve valid cached fields that a spot provider does not supply.
+            cached_spot = dict(result.get("spot") or {})
 
-                # PRESERVE_VALID_PREV_CLOSE_20260925
-                # WebSocket LTP may expose prev_close=0. Never let an
-                # invalid live-feed value erase a valid cached value.
+            def _merge_spot_preserving_unavailable_fields(update: Dict) -> Dict:
+                spot = dict(cached_spot)
                 cached_prev_close = safe_float(spot.get("prev_close", 0))
                 cached_prev_close_source = spot.get("prev_close_source")
+                cached_ohlc = {
+                    field: safe_float(spot.get(field, 0))
+                    for field in ("open", "high", "low")
+                }
 
-                spot.update(live_spot)
+                spot.update(update)
 
-                live_prev_close = safe_float(live_spot.get("prev_close", 0))
-                if live_prev_close <= 0 and cached_prev_close > 0:
+                for field, cached_value in cached_ohlc.items():
+                    update_value = safe_float(update.get(field, 0))
+                    if update_value <= 0 and cached_value > 0:
+                        spot[field] = cached_value
+
+                update_prev_close = safe_float(update.get("prev_close", 0))
+                if update_prev_close <= 0 and cached_prev_close > 0:
                     spot["prev_close"] = cached_prev_close
                     if cached_prev_close_source:
                         spot["prev_close_source"] = cached_prev_close_source
 
-                    live_price = safe_float(spot.get("price", 0))
-                    if live_price > 0:
+                    updated_price = safe_float(spot.get("price", 0))
+                    if updated_price > 0:
                         spot["change"] = round(
-                            live_price - cached_prev_close, 2
+                            updated_price - cached_prev_close, 2
                         )
                         spot["change_percent"] = round(
-                            ((live_price - cached_prev_close) / cached_prev_close) * 100,
+                            ((updated_price - cached_prev_close) / cached_prev_close) * 100,
                             2,
                         )
 
+                return spot
+
+            if (
+                isinstance(live_spot, dict)
+                and safe_float(live_spot.get("price", 0)) > 0
+            ):
+                spot = _merge_spot_preserving_unavailable_fields(live_spot)
                 result["spot"] = spot
             else:
-                spot = result.get("spot") or {}
+                # get_spot() is TTL-cached. Use its uncached implementation so a
+                # stale WebSocket result in that cache cannot suppress REST fallback.
+                fallback_fetch = getattr(
+                    self.fetcher, "_get_spot_uncached", None
+                )
+                if not callable(fallback_fetch):
+                    fallback_fetch = getattr(self.fetcher, "get_spot", None)
+
+                fallback_spot = None
+                if callable(fallback_fetch):
+                    try:
+                        fallback_spot = await fallback_fetch(sym)
+                    except Exception as fallback_error:
+                        logger.warning(
+                            "SPOT_REFRESH_FALLBACK failed for %s: %s",
+                            sym,
+                            fallback_error,
+                        )
+
+                if (
+                    not isinstance(fallback_spot, dict)
+                    or safe_float(fallback_spot.get("price", 0)) <= 0
+                ):
+                    logger.warning(
+                        "SPOT_REFRESH_UNAVAILABLE for %s; retaining original "
+                        "snapshot and timestamp",
+                        sym,
+                    )
+                    return cached
+
+                spot = _merge_spot_preserving_unavailable_fields(
+                    fallback_spot
+                )
+                result["spot"] = spot
 
             spot_price = float(spot.get("price") or 0.0)
             if spot_price <= 0:
                 return cached
+
+            # Refresh the optional futures fields from the non-blocking cache.
+            getter = getattr(self.fetcher, "get_futures_premium", None)
+            if callable(getter):
+                try:
+                    fd = await getter(sym)
+                    if isinstance(fd, dict):
+                        status = str(fd.get("status", "unavailable")).lower()
+                        if status not in {"live", "stale", "unavailable"}:
+                            status = "unavailable"
+                        result["futures_premium_status"] = status
+                        if status == "live":
+                            result["futures_premium"] = safe_float(fd.get("premium", 0))
+                            result["futures_premium_pct"] = safe_float(fd.get("premium_pct", 0))
+                        else:
+                            result["futures_premium"] = 0.0
+                            result["futures_premium_pct"] = 0.0
+                except Exception as exc:
+                    logger.warning("Futures overlay failed for %s: %s", sym, exc)
+                    result["futures_premium_status"] = "unavailable"
+                    result["futures_premium"] = 0.0
+                    result["futures_premium_pct"] = 0.0
 
             # REST contract data remains cached; this public method overlays
             # the latest Angel WebSocket option ticks outside that cache.
@@ -171,43 +323,6 @@ class MarketAnalyzer:
             if opt_df.empty:
                 return cached
 
-            # Persist the already-fetched live chain at a bounded cadence.
-            # No additional Angel One request is made here.
-            if _snapshot_persistence_enabled.get() and is_market_hours_ist(current_ist()):
-                snapshot_symbol = str(chain.get("symbol", sym) or sym).upper()
-                snapshot_expiry = str(chain.get("expiry", expiry or "") or "")
-
-                if snapshot_expiry:
-                    snapshot_key = (snapshot_symbol, snapshot_expiry)
-                    now_mono = asyncio.get_running_loop().time()
-
-                    async with _option_snapshot_persist_lock:
-                        last_saved = _option_snapshot_last_persisted.get(
-                            snapshot_key, 0.0
-                        )
-
-                        if (
-                            now_mono - last_saved
-                            >= _OPTION_SNAPSHOT_MIN_INTERVAL_SECONDS
-                        ):
-                            saved = await save_option_chain_snapshot(
-                                snapshot_symbol,
-                                snapshot_expiry,
-                                opt_df,
-                            )
-
-                            if saved:
-                                _option_snapshot_last_persisted[
-                                    snapshot_key
-                                ] = now_mono
-
-                                logger.info(
-                                    "OPTION_SNAPSHOT_PERSISTED: %s %s rows=%d",
-                                    snapshot_symbol,
-                                    snapshot_expiry,
-                                    len(opt_df) * 2,
-                                )
-
             pcr = self.option.compute_pcr(opt_df)
             max_pain = self.option.compute_max_pain(opt_df)
             oi_change = self.option.compute_oi_change(opt_df)
@@ -216,9 +331,32 @@ class MarketAnalyzer:
                 underlying=spot_price,
             )
 
+
+            chain_quality = self.option.assess_chain_quality(opt_df)
+            chain_valid = bool(chain.get("data")) and not opt_df.empty
+            pcr_value = safe_float(pcr)
+            pcr_quality = dict(result.get("pcr_quality") or {})
+            pcr_quality.update({
+                "available": bool(chain_valid and pcr_value > 0),
+                "source": str(chain.get("data_source") or "unknown"),
+                "fetched_at": chain.get("fetched_at") or None,
+                "observed_at": chain.get("snapshot_timestamp") or None,
+                "reason": (
+                    None if (chain_valid and pcr_value > 0)
+                    else (
+                        "Option chain or parsed rows unavailable"
+                        if not chain_valid
+                        else "PCR could not be computed as a positive value"
+                    )
+                ),
+                "chain_quality": chain_quality,
+            })
+            result["pcr_quality"] = pcr_quality
+            result["option_chain_quality"] = chain_quality
+
             result["spot"] = spot
             result["option_chain"] = chain
-            result["option_chain_valid"] = True
+            result["option_chain_valid"] = chain_valid
             result["option_chain_rows"] = len(chain.get("data") or [])
             result["pcr"] = pcr
             result["max_pain"] = max_pain
@@ -356,9 +494,11 @@ class MarketAnalyzer:
             spot["data_source"] = "history_db_closed_fallback"
             spot["stale"] = True
 
-            chain = None
+            closed_market_expiries = []
 
             if expiry:
+                # Keep the exact selected chain, but also retain the complete
+                # valid expiry catalogue for the UI selector.
                 chain = (
                     await history_service
                     .get_latest_option_chain_snapshot_before(
@@ -368,11 +508,43 @@ class MarketAnalyzer:
                     )
                 )
 
+                expiry_catalog = (
+                    await history_service
+                    .get_latest_option_chain_snapshot_for_nearest_expiry_before(
+                        symbol,
+                        cutoff_utc,
+                    )
+                )
+
+                if isinstance(expiry_catalog, dict):
+                    closed_market_expiries = list(
+                        expiry_catalog.get("all_expiries") or []
+                    )
+                    if chain:
+                        chain = dict(chain)
+                        chain["all_expiries"] = closed_market_expiries
+            else:
+                # Default closed-market view: discover future expiries
+                # backed by complete persisted snapshots. No live API call.
+                chain = (
+                    await history_service
+                    .get_latest_option_chain_snapshot_for_nearest_expiry_before(
+                        symbol,
+                        cutoff_utc,
+                    )
+                )
+                if isinstance(chain, dict):
+                    closed_market_expiries = list(
+                        chain.get("all_expiries") or []
+                    )
+
             if not chain:
                 chain = {
                     "symbol": symbol,
                     "expiry": expiry or "",
-                    "all_expiries": [expiry] if expiry else [],
+                    "all_expiries": (
+                        closed_market_expiries or ([expiry] if expiry else [])
+                    ),
                     "underlying_price": safe_float(
                         spot.get("price", 0)
                     ),
@@ -457,6 +629,14 @@ class MarketAnalyzer:
             # Closed market has no fresh VIX fetch, so use 0 as the
             # unavailable sentinel; _score_vix() handles vix <= 0 safely.
             vix = 0.0
+            vix_info = {
+                "value": 0.0,
+                "available": False,
+                "source": "closed_market",
+                "fetched_at": None,
+                "observed_at": None,
+                "reason": "Fresh VIX fetch skipped while market is closed",
+            }
 
             breadth = {
                 "advance": 0,
@@ -546,7 +726,7 @@ class MarketAnalyzer:
                         angel_task = asyncio.create_task(_angel_pipeline())
 
                         vix_task = asyncio.create_task(
-                            _timed("volatility", self._safe_volatility())
+                            _timed("volatility", self._safe_volatility_info())
                         )
                         breadth_task = asyncio.create_task(
                             _timed("breadth", self._safe_breadth())
@@ -560,7 +740,7 @@ class MarketAnalyzer:
 
                         (
                             (spot, chain, hist, multi_tf, futures_data),
-                            vix,
+                            vix_info,
                             breadth,
                             global_snap,
                             fii_dii,
@@ -571,6 +751,8 @@ class MarketAnalyzer:
                             global_task,
                             fii_task,
                         )
+
+        vix = safe_float((vix_info or {}).get("value", 0.0))
 
         # Fresh Angel WebSocket provides the live LTP but its LTP payload
         # does not contain previous-close/OHLC fields.  The daily historical
@@ -624,14 +806,9 @@ class MarketAnalyzer:
         # (ce_oi_chg_atm / pe_oi_chg_atm) for buildup classification in
         # decision_engine._score_call_writing / _score_put_writing.
         oi_summary = self.option.oi_summary(opt_df, underlying=spot["price"])
+        chain_quality = self.option.assess_chain_quality(opt_df)
 
         expiry = chain.get("expiry", "")
-        if market_open_now:
-            await save_option_chain_snapshot(
-                chain.get("symbol", symbol),
-                expiry,
-                opt_df,
-            )
 
         # Our OWN OI-change-over-time, computed from snapshots this app has
         # actually saved (not the provider's single day-change field) — e.g.
@@ -639,7 +816,8 @@ class MarketAnalyzer:
         # (long/short buildup, long unwinding, short covering) per side.
         if market_open_now:
             oi_change_tracked = await self._safe_oi_change_tracked(
-                chain.get("symbol", symbol), expiry, opt_df
+                chain.get("symbol", symbol), expiry, opt_df,
+                underlying=spot.get("price", 0.0),
             )
         else:
             oi_change_tracked = {
@@ -704,6 +882,25 @@ class MarketAnalyzer:
         if isinstance(multi_tf, dict) and "1hr" in multi_tf:
             multi_tf.setdefault("1h", multi_tf["1hr"])
 
+        _chain_valid = bool(chain.get("data")) and not opt_df.empty
+        _pcr_value = safe_float(pcr)
+        _chain_source = str(chain.get("data_source") or "unknown")
+        pcr_quality = {
+            "available": bool(_chain_valid and _pcr_value > 0),
+            "source": _chain_source,
+            "fetched_at": chain.get("fetched_at") or None,
+            "observed_at": None,
+            "reason": (
+                None if (_chain_valid and _pcr_value > 0)
+                else (
+                    "Option chain or parsed rows unavailable"
+                    if not _chain_valid
+                    else "PCR could not be computed as a positive value"
+                )
+            ),
+            "chain_quality": chain_quality,
+        }
+
         market_data = {
             "symbol":        symbol,
             "spot":          spot,
@@ -712,11 +909,14 @@ class MarketAnalyzer:
             # fetched (non-empty rows). Used by decision_engine's critical
             # data gate to block CALL/PUT signals when chain is unavailable.
             # PCR > 0 is the gate's primary check; this flag is for UI display.
-            "option_chain_valid": bool(chain.get("data")),
+            "option_chain_valid": _chain_valid,
             "option_chain_rows":  len(chain.get("data") or []),
+            "option_chain_quality": chain_quality,
             "vix":           vix,
+            "vix_quality":   vix_info,
             "breadth":       breadth,
             "pcr":           pcr,
+            "pcr_quality":   pcr_quality,
             "max_pain":      max_pain,
             "oi_change":     oi_change,
             "oi_change_tracked": oi_change_tracked,
@@ -743,7 +943,7 @@ class MarketAnalyzer:
             "dii_net_cr":             safe_float(dii_raw) if dii_raw is not None else 0.0,
             "dii_status":             "live" if dii_raw is not None else "unavailable",
             "fii_dii":               fii_dii,
-            "market_open":           spot.get("market_open", True),
+            "market_open":           spot.get("market_open") is True,
             "expiry_risk":           expiry_filter(expiry),
             "timestamp":     current_ist().isoformat(),
         }
@@ -952,16 +1152,37 @@ class MarketAnalyzer:
                     # Persisted NIFTY index candles intentionally carry volume=0.
                     # Reuse the existing short-lived futures-volume proxy cache so
                     # DB fallback does not destroy VWAP/volume indicators.
-                    if not any(volumes):
+                    volume_checker = getattr(
+                        self.fetcher,
+                        "_has_positive_volume_in_latest_session",
+                        None,
+                    )
+                    has_latest_session_volume = (
+                        volume_checker(volumes, timestamps, "FIVE_MINUTE")
+                        if callable(volume_checker) else any(volumes)
+                    )
+                    if not has_latest_session_volume:
                         cached_futures_volumes = (
                             self.fetcher._get_cached_futures_volumes(
                                 symbol,
                                 timestamps,
+                                "FIVE_MINUTE",
                             )
                         )
 
                         if cached_futures_volumes is not None:
-                            volumes = cached_futures_volumes
+                            volume_merger = getattr(
+                                self.fetcher,
+                                "_merge_latest_session_proxy_volumes",
+                                None,
+                            )
+                            volumes = (
+                                volume_merger(
+                                    volumes, timestamps,
+                                    cached_futures_volumes, "FIVE_MINUTE"
+                                )
+                                if callable(volume_merger) else cached_futures_volumes
+                            )
 
                             logger.info(
                                 "Applied cached %s futures volume to DB MTF fallback — %d bars",
@@ -976,17 +1197,24 @@ class MarketAnalyzer:
                             ).strftime("%Y-%m-%d 09:15")
                             to_str = now_ist.strftime("%Y-%m-%d %H:%M")
 
-                            self.fetcher._schedule_futures_volume_refresh(
+                            scheduled = self.fetcher._schedule_futures_volume_refresh(
                                 symbol,
                                 "FIVE_MINUTE",
                                 from_str,
                                 to_str,
                             )
 
-                            logger.info(
-                                "Scheduled futures volume proxy refresh for DB MTF fallback: %s/FIVE_MINUTE",
-                                str(symbol).upper(),
-                            )
+                            if scheduled:
+                                logger.info(
+                                    "Scheduled futures volume proxy refresh for DB MTF fallback: %s/FIVE_MINUTE",
+                                    str(symbol).upper(),
+                                )
+                            else:
+                                logger.debug(
+                                    "Skipped futures volume proxy refresh for DB MTF fallback: %s/FIVE_MINUTE "
+                                    "(task active or refresh cooldown)",
+                                    str(symbol).upper(),
+                                )
 
                     logger.info(
                         "LIVE DB MTF FALLBACK: %s rows=%d latest=%s",
@@ -1114,12 +1342,68 @@ class MarketAnalyzer:
                             tz=timezone.utc,
                         ).astimezone(ws_ist)
 
+                        # Index WebSocket candles may report volume=0.
+                        # Preserve an existing REST row's futures-volume
+                        # proxy instead of overwriting it with that zero.
+                        existing = merged_by_ts.get(ts)
+                        # Validate WS OHLC as one coherent candle before merging.
+                        try:
+                            ws_open = float(candle.get("open"))
+                            ws_high = float(candle.get("high"))
+                            ws_low = float(candle.get("low"))
+                            ws_close = float(candle.get("close"))
+                        except (TypeError, ValueError, OverflowError):
+                            logger.debug(
+                                "Skipping WS 5M candle with invalid OHLC for %s at %s",
+                                symbol, ts.isoformat(),
+                            )
+                            continue
+                        ws_ohlc = (ws_open, ws_high, ws_low, ws_close)
+                        if (
+                            not all(0 < value < float("inf") for value in ws_ohlc)
+                            or ws_high < max(ws_open, ws_close)
+                            or ws_low > min(ws_open, ws_close)
+                            or ws_low > ws_high
+                        ):
+                            logger.debug(
+                                "Skipping invalid WS 5M OHLC for %s at %s",
+                                symbol, ts.isoformat(),
+                            )
+                            continue
+                        ws_volume = candle.get("volume", 0.0)
+
+                        try:
+                            ws_volume_numeric = float(ws_volume or 0.0)
+                        except (TypeError, ValueError):
+                            ws_volume_numeric = 0.0
+
+                        if ws_volume_numeric > 0:
+                            merged_volume = ws_volume_numeric
+                        else:
+                            existing_volume = (
+                                existing[4] if existing is not None else 0.0
+                            )
+                            try:
+                                existing_volume_numeric = float(
+                                    existing_volume or 0.0
+                                )
+                            except (TypeError, ValueError):
+                                existing_volume_numeric = 0.0
+
+                            merged_volume = (
+                                existing_volume
+                                if existing_volume_numeric > 0
+                                else 0.0
+                            )
+
+                        # Keep the WS open aligned with its own H/L/C values.
+                        open_by_timestamp[ts] = ws_open
                         merged_by_ts[ts] = (
                             ts,
-                            candle.get("high"),
-                            candle.get("low"),
-                            candle.get("close"),
-                            candle.get("volume", 0.0),
+                            ws_high,
+                            ws_low,
+                            ws_close,
+                            merged_volume,
                         )
 
                     rows = sorted(
@@ -1415,12 +1699,50 @@ class MarketAnalyzer:
                     indicator_closes = data["closes"]
                     indicator_volumes = data.get("volumes")
 
+                # Keep historical candles for indicator warm-up, but
+                # calculate VWAP/volume ratio from the latest NSE session.
+                if label == "5min":
+                    indicator_session_data = data
+                else:
+                    session_fields = ("highs", "lows", "closes", "volumes")
+                    session_indices = []
+
+                    for index, raw_ts in enumerate(data.get("timestamps", [])):
+                        try:
+                            parsed_ts = datetime.fromisoformat(
+                                str(raw_ts).replace("Z", "+00:00")
+                            )
+                            if parsed_ts.tzinfo is None:
+                                parsed_ts = parsed_ts.replace(tzinfo=ist)
+                            else:
+                                parsed_ts = parsed_ts.astimezone(ist)
+                        except (TypeError, ValueError):
+                            continue
+
+                        if (
+                            parsed_ts.date() == latest_session_date
+                            and latest_session_start <= parsed_ts < latest_session_end
+                            and all(
+                                index < len(data.get(field) or [])
+                                for field in session_fields
+                            )
+                        ):
+                            session_indices.append(index)
+
+                    indicator_session_data = {
+                        field: [
+                            (data.get(field) or [])[index]
+                            for index in session_indices
+                        ]
+                        for field in session_fields
+                    }
+
                 ind = self.tech.compute_from_ohlc(
                     indicator_highs,
                     indicator_lows,
                     indicator_closes,
                     indicator_volumes,
-                    session_data=data if label == "5min" else None,
+                    session_data=indicator_session_data,
                 )
 
                 frame_closes = data["closes"]
@@ -1508,7 +1830,21 @@ class MarketAnalyzer:
                         elif nse_market_open:
                             # During live NSE hours, today's session is
                             # mandatory for a directional MTF signal.
-                            if parsed_ts.date() != now_ist.date():
+                            if (
+                                label == "1hr"
+                                and parsed_ts.date() != now_ist.date()
+                                and now_ist.hour * 60 + now_ist.minute < 10 * 60 + 30
+                                and (now_ist.date() - parsed_ts.date()).days <= 4
+                            ):
+                                # OPENING_HOUR_1HR_CARRYOVER_20261015
+                                # First 1hr candle of the day is not complete until ~10:15 IST.
+                                # Until 10:30 accept the previous session's last 1hr candle as
+                                # higher-timeframe context; 5m and 15m must still be fresh.
+                                fresh = True
+                                freshness_reason = (
+                                    "Opening hour: previous session 1hr candle used as context"
+                                )
+                            elif parsed_ts.date() != now_ist.date():
                                 fresh = False
                                 freshness_reason = (
                                     "Latest candle is from an older session"
@@ -1620,9 +1956,13 @@ class MarketAnalyzer:
             logger.warning(f"Futures premium fetch failed for {symbol}: {e}")
             return {"status": "unavailable", "premium": 0.0, "premium_pct": 0.0}
 
-    async def _safe_oi_change_tracked(self, symbol: str, expiry: str, opt_df) -> Dict:
+    async def _safe_oi_change_tracked(
+        self, symbol: str, expiry: str, opt_df, underlying: float = 0.0
+    ) -> Dict:
         try:
-            return await history_service.get_oi_change_since(symbol, expiry, opt_df, minutes_ago=15)
+            return await history_service.get_oi_change_since(
+                symbol, expiry, opt_df, minutes_ago=15, underlying=underlying
+            )
         except Exception as e:
             logger.warning(f"Tracked OI-change lookup failed for {symbol}: {e}")
             return {"available": False, "reason": str(e)}
@@ -1633,6 +1973,44 @@ class MarketAnalyzer:
         except Exception as e:
             logger.warning(f"Option chain unavailable for {symbol}; using spot/technical fallback: {e}")
             return {"symbol": symbol, "expiry": "", "all_expiries": [], "underlying_price": 0, "data": []}
+
+    async def _safe_volatility_info(self) -> Dict:
+        try:
+            getter = getattr(self.fetcher, "get_volatility_info", None)
+            if callable(getter):
+                info = await getter()
+                if isinstance(info, dict) and "value" in info:
+                    result = dict(info)
+                    value = safe_float(result.get("value", 0.0))
+                    result["value"] = value
+                    result["available"] = bool(result.get("available")) and value > 0
+                    result.setdefault("source", "unknown" if value > 0 else "unavailable")
+                    result.setdefault("fetched_at", None)
+                    result.setdefault("observed_at", None)
+                    if not result["available"]:
+                        result.setdefault("reason", "VIX unavailable")
+                    return result
+
+            # Backwards compatibility for simple legacy fetcher/test doubles.
+            value = safe_float(await self._safe_volatility())
+            return {
+                "value": value,
+                "available": value > 0,
+                "source": "legacy_unverified" if value > 0 else "unavailable",
+                "fetched_at": None,
+                "observed_at": None,
+                "reason": None if value > 0 else "No valid VIX value returned",
+            }
+        except Exception as exc:
+            logger.warning("VIX metadata fetch failed: %s", exc)
+            return {
+                "value": 0.0,
+                "available": False,
+                "source": "unavailable",
+                "fetched_at": None,
+                "observed_at": None,
+                "reason": "VIX fetch failed",
+            }
 
     async def _safe_volatility(self) -> float:
         try:

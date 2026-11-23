@@ -1,0 +1,323 @@
+{% extends "base.html" %}
+{% block title %}Call Tracker - AI NIFTY Option Analyzer Pro{% endblock %}
+{% block content %}
+<div class="options-page">
+  <div class="options-header">
+    <h2>📋 Call Tracker — Signal History &amp; Outcomes</h2>
+    <div style="display:flex;gap:.6rem;flex-wrap:wrap;align-items:center">
+      <select id="ct-symbol" aria-label="Symbol">
+        <option value="ALL">All 4 symbols</option>
+        <option value="NIFTY">NIFTY</option>
+        <option value="BANKNIFTY">BANKNIFTY</option>
+        <option value="FINNIFTY">FINNIFTY</option>
+        <option value="SENSEX">SENSEX</option>
+      </select>
+      <select id="ct-days" aria-label="Lookback">
+        <option value="1">1 day</option>
+        <option value="7">7 days</option>
+        <option value="15" selected>15 days</option>
+        <option value="30">30 days</option>
+        <option value="60">60 days</option>
+      </select>
+      <select id="ct-filter" aria-label="Record type">
+        <option value="ALL">All records</option>
+        <option value="FRESH">Fresh-entry allowed only</option>
+        <option value="OTHER">HOLD / denied / unknown</option>
+      </select>
+      <button id="ct-notification" type="button">Enable browser alerts</button>
+      <button id="ct-refresh" type="button">Refresh</button>
+    </div>
+  </div>
+
+  <div class="accuracy-intro">
+    <div class="intro-card">
+      <div class="intro-title">✅ புதிய entry அனுமதி</div>
+      <div class="intro-text">Frozen metadata-ல் <b>fresh_entry_allowed = true</b> மற்றும் version 1 உள்ள பதிவுகள் மட்டுமே புதிய call அனுமதி பெற்றதாக வகைப்படுத்தப்படும்.</div>
+    </div>
+    <div class="intro-card">
+      <div class="intro-title">🎯 Target / Stop replay</div>
+      <div class="intro-text">சேமிக்கப்பட்ட entry, contract, expiry மற்றும் அதே quote source பயன்படுத்தப்படுகிறது. Stop-க்கு முன் target தொட்டதா, stop முதலில் தொட்டதா என்பதை தனித்தனியாகக் காட்டும்.</div>
+    </div>
+    <div class="intro-card">
+      <div class="intro-title">⚠️ வரம்புகள்</div>
+      <div class="intro-text">இது வரலாற்று quote replay மட்டுமே; உண்மையான broker execution அல்லது realized P&amp;L அல்ல. Browser alerts இந்தப் பக்கம் திறந்திருக்கும் போது மட்டுமே இயங்கும்.</div>
+    </div>
+  </div>
+
+  <div id="ct-status" class="card glass" style="margin-bottom:1rem">Loading Call Tracker...</div>
+
+  <div class="dashboard-grid" style="margin-bottom:1rem">
+    <div class="card glass"><h3>மொத்தப் பதிவுகள்</h3><div class="price" id="ct-total">0</div><div class="sub">Selected lookback</div></div>
+    <div class="card glass"><h3>Fresh-entry allowed</h3><div class="price" id="ct-fresh">0</div><div class="sub">Versioned decision evidence</div></div>
+    <div class="card glass"><h3>T1 before Stop</h3><div class="price" id="ct-t1">0</div><div class="sub">Sampled quote replay</div></div>
+    <div class="card glass"><h3>Stop Loss first</h3><div class="price" id="ct-stop">0</div><div class="sub">Before T1 was observed</div></div>
+    <div class="card glass"><h3>HOLD</h3><div class="price" id="ct-hold">0</div><div class="sub">Not a new entry</div></div>
+    <div class="card glass"><h3>Quote data unavailable</h3><div class="price" id="ct-noquote">0</div><div class="sub">Source-matched quotes</div></div>
+  </div>
+
+  <div class="card glass">
+    <div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;align-items:center">
+      <h3>Call records &amp; observed outcome path</h3>
+      <span id="ct-updated" class="sub">Not yet refreshed</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table style="width:100%;min-width:1100px;border-collapse:collapse">
+        <thead>
+          <tr>
+            <th>Event time (IST)</th><th>Symbol / action</th><th>Contract</th>
+            <th>Entry / last observed premium</th><th>SL / T1 / T2 / T3</th>
+            <th>Replay status</th><th>Level touch times</th><th>Entry decision reason</th>
+          </tr>
+        </thead>
+        <tbody id="ct-rows">
+          <tr><td colspan="8">Loading...</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="sub" style="margin-top:1rem">
+      Quotes are matched to the entry snapshot's price source and restricted to that event's NSE session.
+      A target crossed only after a stop is shown separately and is not counted as a target reached before the stop.
+      No trade has been executed or recorded by this page.
+    </p>
+  </div>
+</div>
+
+<style>
+#ct-rows td,#ct-rows th{padding:.65rem .55rem;border-bottom:1px solid var(--border-color,rgba(128,128,128,.25));text-align:left;vertical-align:top}
+#ct-rows th{white-space:nowrap}
+#ct-rows td{font-size:.9rem}
+#ct-status.error{color:#d66}
+#ct-notification,#ct-refresh{cursor:pointer}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const $symbol = $('#ct-symbol');
+  const $days = $('#ct-days');
+  const $filter = $('#ct-filter');
+  let allCalls = [];
+  let requestGeneration = 0;
+  let notificationFilterKey = null;
+  let seen = new Set();
+
+  try {
+    const saved = JSON.parse(localStorage.getItem('niftyCallTrackerSeenV1') || '[]');
+    if (Array.isArray(saved)) seen = new Set(saved.map(String));
+  } catch (_) {}
+
+  function persistSeen(){
+    try {
+      localStorage.setItem(
+        'niftyCallTrackerSeenV1',
+        JSON.stringify(Array.from(seen).slice(-2500))
+      );
+    } catch (_) {}
+  }
+
+  function fmtMoney(value){
+    const n = Number(value);
+    return value === null || value === undefined || value === '' || !Number.isFinite(n)
+      ? 'N/A' : (n < 0 ? '-₹' : '₹') + Math.abs(n).toFixed(2);
+  }
+
+  function fmtTime(value){
+    if (!value) return '?';
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? String(value) :
+      d.toLocaleString('en-IN',{
+        timeZone:'Asia/Kolkata',
+        day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',
+        second:'2-digit',hour12:true
+      });
+  }
+
+  function statusText(code){
+    const map = {
+      FRESH_ENTRY_ALLOWED:'Fresh entry allowed',
+      HOLD_EXISTING_DIRECTION:'HOLD - existing direction, not a new entry',
+      ENTRY_DENIED:'Entry denied',
+      ENTRY_AUTHORITY_UNKNOWN:'Entry permission unknown',
+      ENTRY_AUTHORITY_INCONSISTENT:'Entry metadata inconsistent',
+      NOT_GRADED_NON_FRESH_ENTRY:'Not graded - not a fresh entry',
+      LEVELS_UNAVAILABLE:'Saved levels unavailable or invalid',
+      ENTRY_SOURCE_UNKNOWN:'Entry quote source unknown',
+      NO_MATCHING_SOURCE_QUOTES:'No matching source quote history',
+      STOP_LOSS_FIRST:'STOP LOSS first',
+      AMBIGUOUS_STOP_TARGET_SAME_TIMESTAMP:'Stop/target timestamp is ambiguous',
+      SESSION_END_NO_LEVEL_TOUCHED:'No level touched before session close',
+      MONITORING_NO_LEVEL_TOUCHED:'Monitoring - no level touched yet',
+      T1_REACHED:'T1 reached before stop',
+      T2_REACHED:'T2 reached before stop',
+      T3_REACHED:'T3 reached before stop',
+      T1_THEN_STOP:'T1 before later stop',
+      T2_THEN_STOP:'T2 before later stop',
+      T3_THEN_STOP:'T3 before later stop',
+      EVENT_AFTER_SESSION_CLOSE:'Event outside session',
+      INVALID_EVENT_TIMESTAMP:'Invalid event timestamp',
+      CONTRACT_DETAILS_UNAVAILABLE:'Contract details unavailable'
+    };
+    return map[code] || String(code || 'Unknown').replace(/_/g,' ');
+  }
+
+  function notifyFreshEntries(data, filterKey){
+    const rows = (data.calls || []).filter(
+      c => c.fresh_entry_status === 'FRESH_ENTRY_ALLOWED'
+    );
+
+    // Changing filters establishes a baseline; old history must not alert as new.
+    if (notificationFilterKey !== filterKey){
+      rows.forEach(c => seen.add(String(c.id)));
+      notificationFilterKey = filterKey;
+      persistSeen();
+      return;
+    }
+
+    rows.forEach(function(c){
+      const id = String(c.id);
+      if (seen.has(id)) return;
+      seen.add(id);
+
+      const eventTime = c.timestamp ? new Date(c.timestamp).getTime() : 0;
+      const age = Date.now() - eventTime;
+      if (window.Notification &&
+          Notification.permission === 'granted' &&
+          eventTime > 0 && age >= -60000 && age <= 15*60*1000) {
+        try {
+          new Notification('New saved call: ' + c.symbol, {
+            body: c.action + ' ' + c.option_type + ' ' +
+              c.strike + ' (' + c.expiry + ') | Entry ' +
+              fmtMoney(c.entry_price)
+          });
+        } catch (_) {}
+      }
+    });
+    persistSeen();
+  }
+
+  function renderRows(){
+    const mode = $filter.val();
+    const rows = allCalls.filter(function(c){
+      if (mode === 'FRESH') return c.fresh_entry_status === 'FRESH_ENTRY_ALLOWED';
+      if (mode === 'OTHER') return c.fresh_entry_status !== 'FRESH_ENTRY_ALLOWED';
+      return true;
+    });
+
+    const $body = $('#ct-rows').empty();
+    if (!rows.length){
+      $('<tr>').append(
+        $('<td colspan="8">').text('இந்தத் தேர்வுக்கு பதிவுகள் இல்லை.')
+      ).appendTo($body);
+      return;
+    }
+
+    rows.forEach(function(c){
+      const e = c.evaluation || {};
+      const levels = c.levels || e.levels || {};
+      const times = e.target_times || {};
+      const targetParts = [];
+
+      ['T1','T2','T3'].forEach(function(k){
+        if ((e.targets_touched_anytime || []).includes(k)){
+          targetParts.push(k + ': ' + fmtTime(times[k]));
+        }
+      });
+      if (e.stop_loss_at) targetParts.push('SL: ' + fmtTime(e.stop_loss_at));
+      if ((e.targets_after_stop || []).length){
+        targetParts.push('Targets observed after stop: ' + e.targets_after_stop.join(', '));
+      }
+      if (!(targetParts.length)) targetParts.push('No level-touch time available');
+
+      const $tr = $('<tr>');
+      const cells = [
+        fmtTime(c.timestamp),
+        c.symbol + ' | ' + c.action + '\n' + statusText(c.fresh_entry_status),
+        c.option_type + ' ' + c.strike + '\nExpiry: ' + (c.expiry || '?'),
+        'Entry: ' + fmtMoney(c.entry_price == null ? levels.entry : c.entry_price) +
+          '\nLast: ' + fmtMoney(e.last_quote_price) +
+          '\nQuote time: ' + fmtTime(e.last_quote_at),
+        'SL ' + fmtMoney(levels.SL) +
+          '\nT1 ' + fmtMoney(levels.T1) +
+          '\nT2 ' + fmtMoney(levels.T2) +
+          '\nT3 ' + fmtMoney(levels.T3),
+        statusText(e.status) +
+          '\nFirst: ' + (e.first_barrier ? statusText(e.first_barrier) : 'None yet') +
+          '\nBefore SL: ' + ((e.targets_before_stop || []).join(', ') || '?'),
+        targetParts.join('\n'),
+        c.decision_reason || '?'
+      ];
+      cells.forEach(function(value){
+        $('<td>').text(value == null ? '?' : String(value)).appendTo($tr);
+      });
+      $tr.appendTo($body);
+    });
+  }
+
+  function loadTracker(){
+    const generation = ++requestGeneration;
+    const symbol = $symbol.val();
+    const days = $days.val();
+    const filterKey = symbol + '|' + days;
+    $('#ct-status').removeClass('error').text('Refreshing saved call history...');
+
+    $.getJSON(
+      '/api/accuracy/call-tracker?symbol=' +
+      encodeURIComponent(symbol) + '&days=' + encodeURIComponent(days)
+    ).done(function(data){
+      if (generation !== requestGeneration) return;
+      allCalls = Array.isArray(data.calls) ? data.calls : [];
+      const s = data.summary || {};
+      $('#ct-total').text(s.records || 0);
+      $('#ct-fresh').text(s.fresh_entry_allowed || 0);
+      $('#ct-t1').text(s.t1_before_stop || 0);
+      $('#ct-stop').text(s.stop_loss_first || 0);
+      $('#ct-hold').text(s.holds || 0);
+      $('#ct-noquote').text(s.no_matching_quotes || 0);
+      $('#ct-updated').text('Last refresh: ' + new Date().toLocaleTimeString('en-IN'));
+      $('#ct-status').removeClass('error').text(
+        'Loaded ' + (data.count || 0) + ' ledger records. ' +
+        (data.truncated ? 'Result limit reached; narrow the date range. ' : '') +
+        (data.basis || '')
+      );
+      notifyFreshEntries(data, filterKey);
+      renderRows();
+    }).fail(function(xhr){
+      if (generation !== requestGeneration) return;
+      const detail = xhr.responseJSON && xhr.responseJSON.detail;
+      $('#ct-status').addClass('error').text(
+        'Call Tracker load failed: ' +
+        (detail || ('HTTP ' + xhr.status))
+      );
+    });
+  }
+
+  $('#ct-notification').on('click',function(){
+    if (!('Notification' in window)){
+      $('#ct-status').text('This browser does not support notifications.');
+      return;
+    }
+    if (!window.isSecureContext){
+      $('#ct-status').text('Browser notifications require a secure HTTPS context.');
+      return;
+    }
+    Notification.requestPermission().then(function(permission){
+      $('#ct-status').text(
+        permission === 'granted'
+          ? 'Browser alerts enabled. Fresh-entry alerts work while this page is open.'
+          : 'Notification permission was not granted.'
+      );
+    }).catch(function(){
+      $('#ct-status').text('Unable to request notification permission.');
+    });
+  });
+
+  $('#ct-refresh').on('click', loadTracker);
+  $symbol.add($days).on('change', loadTracker);
+  $filter.on('change', renderRows);
+
+  loadTracker();
+  window.setInterval(loadTracker, 60000);
+})();
+</script>
+{% endblock %}

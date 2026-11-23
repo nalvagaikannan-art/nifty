@@ -271,7 +271,12 @@ class TechnicalIndicators:
             volume_ratio = float(last_vol / avg_vol) if avg_vol > 0 else 1.0
             volume_spike = volume_ratio > 1.5
 
-        elif volumes and len(volumes) == n and sum(volumes) > 0:
+        elif (
+            not isinstance(session_data, dict)
+            and volumes
+            and len(volumes) == n
+            and sum(volumes) > 0
+        ):
             # Backward-compatible fallback when no explicit session scope exists.
             typical = (h + l + c) / 3.0
             v = np.array(volumes, dtype=float)
