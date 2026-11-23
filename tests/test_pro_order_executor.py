@@ -90,53 +90,58 @@ async def test_paper_execute_logs_and_counts_toward_daily_limit():
     assert await ox._orders_today() == 4
 
 
-async def test_live_needs_pin(monkeypatch):
-    monkeypatch.setattr(settings, "trading_mode", "live")
-    monkeypatch.setattr(settings, "live_trading_enabled", True)
-    with pytest.raises(ox.OrderRejected) as e:           # live but no ORDER_PIN configured
-        await ox.execute_signal(sig(), 1, pin="x")
-    assert e.value.code == "PIN_NOT_CONFIGURED"
-    monkeypatch.setattr(settings, "order_pin", "4321")
-    with pytest.raises(ox.OrderRejected) as e:
-        await ox.execute_signal(sig(), 1, pin="bad")
-    assert e.value.code == "BAD_PIN"
-    assert await ox.list_orders() == []                  # nothing logged, nothing sent
-
-
-async def test_live_flow_order_and_stop_on_failure(monkeypatch):
+async def test_live_configuration_is_rejected_before_any_broker_call(monkeypatch):
     monkeypatch.setattr(settings, "trading_mode", "live")
     monkeypatch.setattr(settings, "live_trading_enabled", True)
     monkeypatch.setattr(settings, "order_pin", "4321")
-    sent = []
+    called = {"cash": 0, "place": 0}
 
     async def cash():
+        called["cash"] += 1
         return 1_000_000.0
 
-    async def place(o, symbol, spot=0.0):
-        if len(sent) == 2:
-            raise RuntimeError("broker rejected (static IP)")
-        sent.append((o["side"], o["strike"], o["option_type"]))
-        return {"tradingsymbol": "X", "exchange": "NFO", "broker_order_id": f"B{len(sent)}"}
+    async def place(*args, **kwargs):
+        called["place"] += 1
+        raise AssertionError("broker must never be called")
+
     monkeypatch.setattr(ox, "_free_cash", cash)
     monkeypatch.setattr(ox, "_angel_place", place)
-    r = await ox.execute_signal(sig(), 1, pin="4321")
-    assert r["mode"] == "live" and r["complete"] is False and "கைமுறையாக" in r["warning"]
-    assert [s[0] for s in sent] == ["BUY", "BUY"]        # hedges went; SELL legs never sent
-    statuses = [x["status"] for x in await ox.list_orders()]
-    assert statuses.count("SENT") == 2 and statuses.count("ERROR") == 1
-
-
-async def test_live_low_cash_rejected(monkeypatch):
-    monkeypatch.setattr(settings, "trading_mode", "live")
-    monkeypatch.setattr(settings, "live_trading_enabled", True)
-    monkeypatch.setattr(settings, "order_pin", "4321")
-
-    async def cash():
-        return 1000.0
-    monkeypatch.setattr(ox, "_free_cash", cash)
     with pytest.raises(ox.OrderRejected) as e:
         await ox.execute_signal(sig(), 1, pin="4321")
-    assert e.value.code == "LOW_CASH" and await ox.list_orders() == []
+    assert e.value.code == "PAPER_ONLY"
+    assert called == {"cash": 0, "place": 0}
+    assert await ox.list_orders() == []
+    assert ox.status()["mode"] == "paper"
+    assert ox.status()["live_enabled"] is False
+
+
+async def test_live_configuration_without_pin_is_also_paper_only(monkeypatch):
+    monkeypatch.setattr(settings, "trading_mode", "live")
+    monkeypatch.setattr(settings, "live_trading_enabled", True)
+    monkeypatch.setattr(settings, "order_pin", None)
+    with pytest.raises(ox.OrderRejected) as e:
+        await ox.execute_signal(sig(), 1, pin=None)
+    assert e.value.code == "PAPER_ONLY"
+    assert await ox.list_orders() == []
+
+
+async def test_direct_angel_place_is_blocked(monkeypatch):
+    called = {"angel": 0}
+    import app.services.angel_one as ao
+
+    class Fake:
+        async def ensure_session(self):
+            called["angel"] += 1
+
+    monkeypatch.setattr(ao, "angel_session", Fake())
+    with pytest.raises(ox.OrderRejected) as e:
+        await ox._angel_place(
+            {"expiry": "17NOV2026", "strike": 22850.0, "option_type": "CE",
+             "side": "SELL", "price": 10, "quantity": 65},
+            "NIFTY",
+        )
+    assert e.value.code == "PAPER_ONLY"
+    assert called["angel"] == 0
 
 
 async def test_angel_place_rejects_wrong_expiry(monkeypatch):
