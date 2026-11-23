@@ -34,7 +34,7 @@ def test_capture_once_calls_shared_strategy_route_at_background_priority(monkeyp
 
     ok = asyncio.run(
         history_collector._run_strategy_recommendation_for_capture(
-            analyzer, ai, "NIFTY"
+            analyzer, "NIFTY"
         )
     )
 
@@ -45,7 +45,8 @@ def test_capture_once_calls_shared_strategy_route_at_background_priority(monkeyp
         "expiry": None,
         "cache_bust": "",
         "analyzer": analyzer,
-        "ai": ai,
+        "ai": None,
+        "_capture_only": True,
     }
     assert calls[0]["priority"] == angel_one.ANGEL_PRIORITY_BACKGROUND
     assert angel_one.get_angel_call_priority() == previous_priority
@@ -68,7 +69,7 @@ def test_capture_once_handles_route_error_and_restores_priority(monkeypatch):
 
     ok = asyncio.run(
         history_collector._run_strategy_recommendation_for_capture(
-            object(), object(), "SENSEX"
+            object(), "SENSEX"
         )
     )
 
@@ -81,7 +82,6 @@ def test_paper_capture_scheduler_rotates_symbols(monkeypatch):
         history_collector_symbols=["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"]
     )
     monkeypatch.setattr(history_collector, "settings", settings)
-    monkeypatch.setattr(history_collector, "AIEngine", lambda: object())
     monkeypatch.setattr(history_collector, "is_market_hours_ist", lambda: True)
     monkeypatch.setattr(history_collector, "PAPER_CAPTURE_START_DELAY_SEC", 0.0)
     monkeypatch.setattr(
@@ -90,7 +90,7 @@ def test_paper_capture_scheduler_rotates_symbols(monkeypatch):
 
     seen = []
 
-    async def fake_capture(analyzer, ai, symbol):
+    async def fake_capture(analyzer, symbol):
         seen.append(symbol)
         return True
 
@@ -123,7 +123,7 @@ def test_paper_capture_scheduler_does_not_evaluate_when_market_closed(monkeypatc
 
     calls = []
 
-    async def fake_capture(analyzer, ai, symbol):
+    async def fake_capture(analyzer, symbol):
         calls.append(symbol)
         return True
 

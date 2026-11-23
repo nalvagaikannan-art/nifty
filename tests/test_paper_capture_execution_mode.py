@@ -129,10 +129,8 @@ async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(
         strategy, "apply_persistent_signal_lifecycle", fake_lifecycle
     )
     monkeypatch.setattr(strategy, "save_signal_state", fake_save)
-    monkeypatch.setattr(
-        strategy,
-        "resolve_final_strategy_action",
-        lambda *args, **kwargs: {
+    async def fake_resolve_final_strategy_action(*args, **kwargs):
+        return {
             "best_strategy": "WAIT",
             "best_score": 45,
             "candidates": {
@@ -152,7 +150,12 @@ async def test_capture_only_wait_preserves_lifecycle_without_history_or_ai(
             },
             "iv_info": {},
             "whipsaw_result": {},
-        },
+        }
+
+    monkeypatch.setattr(
+        strategy,
+        "resolve_final_strategy_action",
+        fake_resolve_final_strategy_action,
     )
     monkeypatch.setattr(
         strategy, "_time_filter",

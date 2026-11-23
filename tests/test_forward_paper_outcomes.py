@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
@@ -154,6 +155,20 @@ def _quote(symbol, timestamp, ltp, option_type="CE", source="angel_one_websocket
         if source == "angel_one_websocket" else None,
         ws_exchange_timestamp_ms=None,
     )
+
+
+def test_existing_outcomes_are_grouped_once_by_ledger_id():
+    rows = [
+        SimpleNamespace(ledger_id=10, horizon_minutes=5),
+        SimpleNamespace(ledger_id=10, horizon_minutes=15),
+        SimpleNamespace(ledger_id=20, horizon_minutes=5),
+    ]
+
+    grouped = outcomes._group_existing_outcomes(rows)
+
+    assert grouped[10] == rows[:2]
+    assert grouped[20] == rows[2:]
+    assert grouped.get(30, ()) == ()
 
 
 @pytest.mark.asyncio

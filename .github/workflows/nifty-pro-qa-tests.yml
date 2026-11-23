@@ -1,9 +1,11 @@
+# Pull requests must test GitHub's PR merge commit, not the QA base branch.
 name: NIFTY-PRO QA Tests
 
 on:
   push:
     branches:
       - nifty-pro-qa
+      - nifty-pro-outcome-grouping
   pull_request:
     branches:
       - nifty-pro-qa
