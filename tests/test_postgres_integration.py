@@ -237,6 +237,90 @@ async def test_postgres_concurrent_duplicate_ledger_key_is_rejected():
 
 
 @pytest.mark.asyncio
+async def test_postgres_concurrent_forward_outcome_horizon_is_unique():
+    """Concurrent retries may create one row per ledger/horizon only."""
+    database_url = os.getenv("POSTGRES_TEST_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_TEST_URL is not configured")
+
+    ledger_key = f"qa-postgres-outcome-race-{uuid.uuid4().hex}"
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def insert_outcome(ledger_id, horizon):
+        async with sessions() as session:
+            session.add(
+                ForwardPaperOutcome(
+                    ledger_id=ledger_id,
+                    symbol="SENSEX",
+                    horizon_minutes=horizon,
+                    event_timestamp=datetime(2026, 11, 23, 10, 0),
+                    target_timestamp=datetime(
+                        2026, 11, 23, 10, horizon
+                    ),
+                    status="pending",
+                    details={"paper_only": True, "actual_trade": False},
+                )
+            )
+            try:
+                await session.commit()
+                return "inserted"
+            except IntegrityError:
+                await session.rollback()
+                return "duplicate_rejected"
+
+    try:
+        await initialize_database_schema(engine, Base.metadata)
+        async with sessions() as session:
+            ledger = DailySignalLedger(
+                symbol="SENSEX",
+                action="BUY PE",
+                option_type="PE",
+                strike=84000.0,
+                spot=84000.0,
+                signal_strength=59.0,
+                confidence=59.0,
+                lifecycle="CONFIRMED_PUT",
+                confirmations=3,
+                ledger_key=ledger_key,
+                entry_snapshot={"paper_only": True, "actual_trade": False},
+            )
+            session.add(ledger)
+            await session.commit()
+            ledger_id = ledger.id
+
+        same_horizon = await asyncio.gather(
+            insert_outcome(ledger_id, 15),
+            insert_outcome(ledger_id, 15),
+        )
+        assert same_horizon.count("inserted") == 1
+        assert same_horizon.count("duplicate_rejected") == 1
+
+        # A different horizon for the same source signal is valid.
+        assert await insert_outcome(ledger_id, 30) == "inserted"
+
+        async with sessions() as session:
+            rows = (
+                await session.scalars(
+                    select(ForwardPaperOutcome).where(
+                        ForwardPaperOutcome.ledger_id == ledger_id
+                    )
+                )
+            ).all()
+            assert sorted(row.horizon_minutes for row in rows) == [15, 30]
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                delete(DailySignalLedger).where(
+                    DailySignalLedger.ledger_key == ledger_key
+                )
+            )
+            await session.commit()
+        await engine.dispose()
+
+
+
+@pytest.mark.asyncio
 async def test_postgres_forward_outcome_foreign_key_cascade():
     """Forward paper outcomes must not outlive their source ledger row."""
     database_url = os.getenv("POSTGRES_TEST_URL")
