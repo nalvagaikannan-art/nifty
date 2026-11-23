@@ -1248,6 +1248,7 @@ async def strike_recommendation(
     cache_bust: str = "",
     analyzer: MarketAnalyzer = Depends(get_analyzer),
     ai: AIEngine = Depends(get_ai_engine),
+    _capture_only: bool = Depends(lambda: False),
 ):
     """
     Phase 1 Strategy Engine:
@@ -1613,6 +1614,23 @@ async def strike_recommendation(
 
     # ── WAIT state ────────────────────────────────────────────────────────
     if best == "WAIT":
+        if _capture_only is True:
+            persistent_state.update({
+                "symbol": symbol.upper(),
+                "strategy": "WAIT",
+                "strategy_score": candidates.get("WAIT", 0),
+            })
+            await save_signal_state(persistent_state)
+            return {
+                "symbol": symbol.upper(),
+                "best_strategy": "WAIT",
+                "signal_action": "WAIT",
+                "signal_lifecycle": lifecycle_state,
+                "signal_active_side": lifecycle_active,
+                "market_snapshot_timestamp": market_data.get("timestamp"),
+                "entry_gate": v3_gate,
+                "capture_only": True,
+            }
         wait_reasons = []
         # CLOSED_MARKET_WAIT_REASON_FIX_20260922
         # Do not interpret zero/sentinel technical values as real market
@@ -2046,6 +2064,30 @@ async def strike_recommendation(
                 "Daily signal ledger capture failed: %s",
                 _ledger_exc,
             )
+
+    if _capture_only is True:
+        persistent_state.update({
+            "symbol": symbol.upper(),
+            "strategy": best,
+            "strategy_score": best_score,
+        })
+        await save_signal_state(persistent_state)
+        return {
+            "symbol": symbol.upper(),
+            "best_strategy": best,
+            "signal_action": (
+                "WAIT" if action_blocked else
+                _signal_action_for_entry(
+                    best, lifecycle_state, lifecycle_active, fresh_entry_allowed
+                )
+            ),
+            "fresh_entry_allowed": bool(fresh_entry_allowed),
+            "signal_lifecycle": lifecycle_state,
+            "signal_active_side": lifecycle_active,
+            "market_snapshot_timestamp": market_data.get("timestamp"),
+            "entry_gate": v3_gate,
+            "capture_only": True,
+        }
 
     # Price levels + Strategy detail
     # FINAL_ACTION_DETAIL_SYNC_20261001:
