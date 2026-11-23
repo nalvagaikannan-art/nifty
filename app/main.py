@@ -26,6 +26,7 @@ from app.services.history_collector import (
 )
 from app.exceptions import MarketDataError, AIProviderError
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.middleware.auth import AppAuthMiddleware
 import logging
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,8 @@ if settings.cors_allowed_origins == ["*"]:
 else:
     logger.info(f"CORS allowed origins: {settings.cors_allowed_origins}")
 app.add_middleware(RateLimitMiddleware, requests_per_minute=settings.api_rate_limit_per_minute)
+# NIFTY-PRO: protect every page, API and static asset; only /healthz is public.
+app.add_middleware(AppAuthMiddleware)
 
 
 @app.exception_handler(MarketDataError)
