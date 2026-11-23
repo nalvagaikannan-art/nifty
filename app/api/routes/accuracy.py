@@ -52,11 +52,17 @@ VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 COMPUTE_TIMEOUT_SECONDS = 20
 
 
-def _check_symbol(symbol: str) -> str:
-    sym = symbol.upper()
-    if sym not in VALID_SYMBOLS:
-        raise HTTPException(400, detail=f"Unsupported symbol: {symbol}")
-    return sym
+async def _check_symbol(symbol: str) -> str:
+    sym = str(symbol or "").strip().upper()
+    if sym in VALID_SYMBOLS:
+        return sym
+    try:
+        from app.services.angel_one import angel_session
+        if angel_session.is_configured and await angel_session._resolve_cash_instrument(sym):
+            return sym
+    except Exception as exc:
+        logger.warning("Accuracy F&O symbol validation failed for %s: %s", sym, exc)
+    raise HTTPException(400, detail=f"Unsupported or unavailable NSE F&O symbol: {symbol}")
 
 
 async def _run_with_timeout(coro, *, endpoint: str, sym: str, timeout_detail: str, error_detail: str):
@@ -74,7 +80,7 @@ async def _run_with_timeout(coro, *, endpoint: str, sym: str, timeout_detail: st
 
 @router.get("/indicators/{symbol}", response_model=AccuracyIndicatorsResponse)
 async def indicator_accuracy(symbol: str, days: int = Query(15, ge=1, le=60)):
-    sym = _check_symbol(symbol)
+    sym = await _check_symbol(symbol)
     return await _run_with_timeout(
         compute_indicator_accuracy(sym, days=days),
         endpoint="indicators", sym=sym,
