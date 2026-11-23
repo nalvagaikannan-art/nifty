@@ -26,10 +26,15 @@ services:
     branch: nifty-pro-qa
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
       - key: ENV
         value: production
+      # Set both values manually in the Render dashboard before first deploy.
+      - key: APP_AUTH_USERNAME
+        sync: false
+      - key: APP_AUTH_PASSWORD
+        sync: false
       # NIFTY-PRO is paper-only; the executor also enforces this in code.
       - key: TRADING_MODE
         value: paper
