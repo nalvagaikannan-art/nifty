@@ -3,6 +3,7 @@
 GitHub Actions supplies an ephemeral PostgreSQL service. Local runs skip this
 integration test unless POSTGRES_TEST_URL is explicitly configured.
 """
+import asyncio
 import os
 import shutil
 import subprocess
@@ -13,7 +14,8 @@ from pathlib import Path
 import asyncpg
 import pytest
 from sqlalchemy.engine import make_url
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from app.database import Base
@@ -166,4 +168,67 @@ async def test_postgres_schema_and_paper_ledger_survive_engine_restart():
             )
             await session.commit()
     finally:
+        await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_postgres_concurrent_duplicate_ledger_key_is_rejected():
+    """A concurrent retry race must leave exactly one ledger row."""
+    database_url = os.getenv("POSTGRES_TEST_URL")
+    if not database_url:
+        pytest.skip("POSTGRES_TEST_URL is not configured")
+
+    ledger_key = f"qa-postgres-concurrent-{uuid.uuid4().hex}"
+    engine = create_async_engine(database_url, pool_pre_ping=True)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def insert_same_key():
+        async with sessions() as session:
+            session.add(
+                DailySignalLedger(
+                    symbol="BANKNIFTY",
+                    action="BUY PE",
+                    option_type="PE",
+                    strike=54000.0,
+                    spot=54000.0,
+                    signal_strength=61.0,
+                    confidence=61.0,
+                    lifecycle="CONFIRMED_PUT",
+                    confirmations=3,
+                    ledger_key=ledger_key,
+                    entry_snapshot={"paper_only": True, "actual_trade": False},
+                )
+            )
+            try:
+                await session.commit()
+                return "inserted"
+            except IntegrityError:
+                await session.rollback()
+                return "duplicate_rejected"
+
+    try:
+        await initialize_database_schema(engine, Base.metadata)
+
+        # Start both transactions together so PostgreSQL's unique index, not
+        # application-side prechecks, arbitrates the duplicate-key race.
+        outcomes = await asyncio.gather(insert_same_key(), insert_same_key())
+        assert outcomes.count("inserted") == 1
+        assert outcomes.count("duplicate_rejected") == 1
+
+        async with sessions() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(DailySignalLedger)
+                .where(DailySignalLedger.ledger_key == ledger_key)
+            )
+            assert count == 1
+    finally:
+        async with sessions() as session:
+            await session.execute(
+                delete(DailySignalLedger).where(
+                    DailySignalLedger.ledger_key == ledger_key
+                )
+            )
+            await session.commit()
         await engine.dispose()
