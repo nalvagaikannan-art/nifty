@@ -2,13 +2,26 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query, HTTPException
 from app.services.data_fetcher import DataFetcher
 from app.exceptions import MarketDataError
-from app.api.deps import get_fetcher
+from app.api.deps import get_fetcher, get_angel_session
+from app.services.angel_one import AngelOneSession
 from app.schemas import (MarketOptionChainResponse, MarketSpotResponse, MarketCandlesResponse, MarketVixResponse, MarketBreadthResponse)
 
 router = APIRouter()
 
 VALID_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
 VALID_INTERVALS = {"ONE_MINUTE", "THREE_MINUTE", "FIVE_MINUTE", "FIFTEEN_MINUTE", "THIRTY_MINUTE", "ONE_HOUR"}
+
+@router.get("/fno-stock-scan")
+async def fno_stock_scan(angel: AngelOneSession = Depends(get_angel_session)):
+    """Cached Angel One batch quote scan for the verified NSE F&O stock universe.
+
+    This is a market-move shortlist, not an options trade recommendation.
+    """
+    try:
+        return await angel.get_fno_stock_market_scan()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"F&O stock scan unavailable: {e}")
+
 
 @router.get("/symbols")
 async def get_market_symbols(fetcher: DataFetcher = Depends(get_fetcher)):
