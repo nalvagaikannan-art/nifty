@@ -1,3 +1,4 @@
+# Pull requests must test GitHub's PR merge commit, not the QA base branch.
 name: NIFTY-PRO QA Tests
 
 on:
