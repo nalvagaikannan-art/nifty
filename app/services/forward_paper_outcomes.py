@@ -84,6 +84,8 @@ def _eligible(row):
     capture_authority = capture.get("entry_risk_authority")
     decision_authority = decision.get("entry_risk_authority")
     action = str(getattr(row, "action", "") or "").strip().upper()
+    if action not in {"BUY CE", "BUY PE"}:
+        return False
 
     return bool(
         type(capture.get("schema_version")) is int

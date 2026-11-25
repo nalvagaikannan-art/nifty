@@ -176,8 +176,12 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     event = datetime(2026, 10, 27, 4, 0)  # 09:30 IST, UTC-naive DB timestamp
     symbol_cases = [
         ("NIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
+        ("NIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
         ("BANKNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
+        ("BANKNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("FINNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
         ("FINNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("SENSEX", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
         ("SENSEX", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
     ]
 
@@ -205,9 +209,9 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     result = await outcomes.process_forward_paper_outcomes(
         now=event + timedelta(minutes=70)
     )
-    assert result["eligible_entries"] == 4
-    assert result["outcome_rows_created"] == 20
-    assert result["matured_rows"] == 20
+    assert result["eligible_entries"] == 8
+    assert result["outcome_rows_created"] == 40
+    assert result["matured_rows"] == 40
 
     async with outcome_session() as session:
         rows = (
@@ -219,15 +223,22 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
             )
         ).scalars().all()
 
-    assert len(rows) == 20
+    assert len(rows) == 40
     assert {row.symbol for row in rows} == {
         "NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"
     }
-    for symbol, *_ in symbol_cases:
+    for symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
         selected = [row for row in rows if row.symbol == symbol]
-        assert [row.horizon_minutes for row in selected] == [5, 10, 15, 30, 60]
+        assert [row.horizon_minutes for row in selected] == [5, 5, 10, 10, 15, 15, 30, 30, 60, 60]
         assert all(row.status == "matured" for row in selected)
-        assert all(row.spot_directional_return_pct > 0 for row in selected)
+        # CE and PE entries share the same underlying spot path. Their
+        # directional returns must therefore have opposite signs, not both
+        # be positive; premium returns are checked independently below.
+        for horizon in outcomes.OUTCOME_HORIZONS_MINUTES:
+            horizon_rows = [row for row in selected if row.horizon_minutes == horizon]
+            assert len(horizon_rows) == 2
+            assert all(row.spot_directional_return_pct is not None for row in horizon_rows)
+            assert sorted(row.spot_directional_return_pct > 0 for row in horizon_rows) == [False, True]
         assert all(row.premium_action_adjusted_return_pct > 0 for row in selected)
         assert all(row.execution_aware_return_pct is not None for row in selected)
         assert all(row.mfe_pct is not None for row in selected)
@@ -240,7 +251,7 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     )
     assert repeated["outcome_rows_created"] == 0
     assert repeated["outcome_rows_updated"] == 0
-    assert repeated["terminal_rows_skipped"] == 20
+    assert repeated["terminal_rows_skipped"] == 40
 
 
 @pytest.mark.asyncio
@@ -369,9 +380,15 @@ async def test_legacy_v1_entry_does_not_create_new_outcome_rows(outcome_session)
 
 
 @pytest.mark.asyncio
-async def test_existing_legacy_v1_pending_outcome_continues_grading(outcome_session):
+@pytest.mark.parametrize(
+    ("action", "lifecycle"),
+    [("BUY CE", "CONFIRMED_CALL"), ("SELL CE", "CONFIRMED_PUT")],
+)
+async def test_existing_legacy_v1_pending_outcome_continues_grading(
+    outcome_session, action, lifecycle
+):
     event = datetime(2026, 10, 27, 4, 0)
-    entry = _entry_row("NIFTY", "BUY CE", "CONFIRMED_CALL", event)
+    entry = _entry_row("NIFTY", action, lifecycle, event)
     capture = entry.entry_snapshot["forward_paper_capture"]
     decision = entry.entry_snapshot["strategy_decision"]
     capture["schema_version"] = 1
@@ -477,3 +494,29 @@ async def test_outcome_scheduler_runs_even_if_market_closed(monkeypatch):
         abs=0.01,
     )
 
+
+
+@pytest.mark.asyncio
+async def test_sell_actions_never_create_new_shadow_outcomes(outcome_session):
+    event = datetime(2026, 10, 27, 4, 0)
+    sell_cases = [
+        (symbol, action, lifecycle)
+        for symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX")
+        for action, lifecycle in (("SELL CE", "CONFIRMED_PUT"), ("SELL PE", "CONFIRMED_CALL"))
+    ]
+    async with outcome_session() as session:
+        for symbol, action, lifecycle in sell_cases:
+            session.add(_entry_row(symbol, action, lifecycle, event))
+        await session.commit()
+
+    result = await outcomes.process_forward_paper_outcomes(
+        now=event + timedelta(minutes=70)
+    )
+    assert result["eligible_entries"] == 0
+    assert result["outcome_rows_created"] == 0
+
+    async with outcome_session() as session:
+        count = await session.scalar(
+            select(__import__("sqlalchemy").func.count()).select_from(ForwardPaperOutcome)
+        )
+    assert count == 0
