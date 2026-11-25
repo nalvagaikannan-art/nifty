@@ -1841,7 +1841,7 @@ async def strike_recommendation(
     # Permanent evidence capture for actionable signals only.
     # `strikes[0]` is the authoritative selected contract after the final
     # liquidity annotations have been applied. No outcome is calculated here.
-    if best in ("BUY CE", "BUY PE", "SELL CE", "SELL PE") and strikes:
+    if best in ("BUY CE", "BUY PE") and strikes:
         _ledger_selected = strikes[0]
         _ledger_mtf = market_data.get("multi_timeframe", {}) or {}
         _ledger_signal_action = (
