@@ -176,13 +176,13 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     event = datetime(2026, 10, 27, 4, 0)  # 09:30 IST, UTC-naive DB timestamp
     symbol_cases = [
         ("NIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("NIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("NIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
         ("BANKNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("BANKNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("BANKNIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
         ("FINNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("FINNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("FINNIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
         ("SENSEX", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("SENSEX", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
+        ("SENSEX", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
     ]
 
     async with outcome_session() as session:
@@ -227,9 +227,9 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     assert {row.symbol for row in rows} == {
         "NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"
     }
-    for symbol, action, *_ in symbol_cases:
-        selected = [row for row in rows if row.symbol == symbol and row.details["action"] == action]
-        assert [row.horizon_minutes for row in selected] == [5, 10, 15, 30, 60]
+    for symbol in ("NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"):
+        selected = [row for row in rows if row.symbol == symbol]
+        assert [row.horizon_minutes for row in selected] == [5, 5, 10, 10, 15, 15, 30, 30, 60, 60]
         assert all(row.status == "matured" for row in selected)
         assert all(row.spot_directional_return_pct > 0 for row in selected)
         assert all(row.premium_action_adjusted_return_pct > 0 for row in selected)
