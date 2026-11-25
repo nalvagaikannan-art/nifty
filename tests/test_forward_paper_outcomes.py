@@ -373,9 +373,15 @@ async def test_legacy_v1_entry_does_not_create_new_outcome_rows(outcome_session)
 
 
 @pytest.mark.asyncio
-async def test_existing_legacy_v1_pending_outcome_continues_grading(outcome_session):
+@pytest.mark.parametrize(
+    ("action", "lifecycle"),
+    [("BUY CE", "CONFIRMED_CALL"), ("SELL CE", "CONFIRMED_PUT")],
+)
+async def test_existing_legacy_v1_pending_outcome_continues_grading(
+    outcome_session, action, lifecycle
+):
     event = datetime(2026, 10, 27, 4, 0)
-    entry = _entry_row("NIFTY", "BUY CE", "CONFIRMED_CALL", event)
+    entry = _entry_row("NIFTY", action, lifecycle, event)
     capture = entry.entry_snapshot["forward_paper_capture"]
     decision = entry.entry_snapshot["strategy_decision"]
     capture["schema_version"] = 1
