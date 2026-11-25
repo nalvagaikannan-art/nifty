@@ -178,13 +178,9 @@ class AngelOneSession:
         # see _last_call_ts and think they're clear.
         self._rate_limit_cooldown_until: float = 0.0
 
-        # HISTORICAL_API_SERIALIZATION_20260924
-        # getCandleData has its own broker-side rate limit. The global
-        # _throttle() spaces call START times but deliberately releases its
-        # gate before the blocking SDK request finishes. Therefore two
-        # historical requests can still be in-flight simultaneously.
-        # Serialize only historical SDK calls; keep other SmartAPI paths
-        # independent.
+        # Keep the historical endpoint's dedicated lock as an additional
+        # guard for its broker-specific serialization requirement. The
+        # broker-wide I/O lock above also serializes it against other SDK paths.
         self._historical_api_lock = asyncio.Lock()
 
     async def _throttle(
