@@ -279,15 +279,17 @@ class AngelOneSession:
                     len(self._priority_waiters),
                 )
 
-    async def _run_sdk_call(self, method, *args, **kwargs):
+    async def _run_sdk_call(self, method_name, *args, **kwargs):
         """Run one blocking SmartAPI request without overlapping another SDK call.
 
         Callers reserve their priority/rate slot with _throttle() first. Holding
         this lock for the full blocking request closes the gap left by start-only
         throttling, which otherwise allows slow calls from different endpoints
-        to overlap and trigger broker-wide rate limits.
+        to overlap and trigger broker-wide rate limits. Resolve the bound method
+        only after acquiring the lock so a concurrent session recovery is honored.
         """
         async with self._broker_io_lock:
+            method = getattr(self._obj, method_name)
             return await asyncio.to_thread(method, *args, **kwargs)
 
     @property
@@ -589,7 +591,7 @@ class AngelOneSession:
             failed_obj = self._obj
             try:
                 body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                     mode="FULL",
                     exchangeTokens={"NSE": [item["token"] for item in batch]},
                 )
@@ -601,7 +603,7 @@ class AngelOneSession:
                     await self._throttle(call_name=call_name + ":retry")
                     try:
                         body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                             mode="FULL",
                             exchangeTokens={"NSE": [item["token"] for item in batch]},
                         )
@@ -711,7 +713,7 @@ class AngelOneSession:
         async def _call_ltp():
             await self._throttle(call_name=f"get_ltp:{symbol_upper}")
             return await self._run_sdk_call(
-                    self._obj.ltpData,
+                    "ltpData",
                 info["exchange"],
                 ltp_symbol,
                 info["token"],
@@ -905,7 +907,7 @@ class AngelOneSession:
         async def _call_vix():
             await self._throttle(call_name="get_india_vix")
             return await self._run_sdk_call(
-                    self._obj.ltpData,
+                    "ltpData",
                 "NSE",
                 "India VIX",
                 self.INDIA_VIX_TOKEN,
@@ -1803,7 +1805,7 @@ class AngelOneSession:
                         # whether another coroutine already recovered the session.
                         failed_obj = self._obj
                         body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                             mode="FULL", exchangeTokens={derivative_exchange: batch}
                         )
                     except Exception as e:
@@ -1839,7 +1841,7 @@ class AngelOneSession:
                                 call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
                             )
                             body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
@@ -1920,7 +1922,7 @@ class AngelOneSession:
                                 call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
                             )
                             body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
@@ -2268,7 +2270,7 @@ class AngelOneSession:
                 await self._throttle(call_name=f"futures_ltp:{sym}")
 
                 body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                     mode="LTP",
                     exchangeTokens={derivative_exchange: [token]},
                 )
@@ -2294,7 +2296,7 @@ class AngelOneSession:
                                 call_name=f"futures_ltp:{sym}:retry"
                             )
                             body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                                 mode="LTP",
                                 exchangeTokens={derivative_exchange: [token]},
                             )
@@ -2383,7 +2385,7 @@ class AngelOneSession:
                             )
 
                             retry_body = await self._run_sdk_call(
-                    self._obj.getMarketData,
+                    "getMarketData",
                                 mode="LTP",
                                 exchangeTokens={derivative_exchange: [token]},
                             )
@@ -2453,7 +2455,7 @@ class AngelOneSession:
             )
 
             data = await self._run_sdk_call(
-                    self._obj.ltpData,
+                    "ltpData",
                 info["exchange"],
                 info["tradingsymbol"],
                 token,
@@ -2479,7 +2481,7 @@ class AngelOneSession:
                         )
 
                         data = await self._run_sdk_call(
-                    self._obj.ltpData,
+                    "ltpData",
                             info["exchange"],
                             info["tradingsymbol"],
                             token,
@@ -2538,7 +2540,7 @@ class AngelOneSession:
                         )
 
                         retry_data = await self._run_sdk_call(
-                    self._obj.ltpData,
+                    "ltpData",
                             info["exchange"],
                             info["tradingsymbol"],
                             token,
@@ -2644,7 +2646,7 @@ class AngelOneSession:
                 # FIX (event-loop block): getCandleData() is a blocking
                 # `requests` call — offload it to a thread.
                 return await self._run_sdk_call(
-                    self._obj.getCandleData,
+                    "getCandleData",
                     params,
                 )
 
