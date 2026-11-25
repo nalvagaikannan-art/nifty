@@ -91,7 +91,7 @@ def _forward_paper_capture_eligible(
         fresh_entry_allowed is True
         and not action_blocked
         and lifecycle_state in {"CONFIRMED_CALL", "CONFIRMED_PUT"}
-        and action in {"BUY CE", "BUY PE", "SELL CE", "SELL PE"}
+        and action in {"BUY CE", "BUY PE"}
         and signal_action == action
     )
 
