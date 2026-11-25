@@ -176,13 +176,13 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
     event = datetime(2026, 10, 27, 4, 0)  # 09:30 IST, UTC-naive DB timestamp
     symbol_cases = [
         ("NIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("NIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
+        ("NIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
         ("BANKNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("BANKNIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
+        ("BANKNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
         ("FINNIFTY", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("FINNIFTY", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
+        ("FINNIFTY", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
         ("SENSEX", "BUY CE", "CONFIRMED_CALL", 1.0, 1.0),
-        ("SENSEX", "BUY PE", "CONFIRMED_PUT", 1.0, 1.0),
+        ("SENSEX", "BUY PE", "CONFIRMED_PUT", -1.0, 1.0),
     ]
 
     async with outcome_session() as session:
