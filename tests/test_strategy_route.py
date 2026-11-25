@@ -1054,13 +1054,14 @@ def test_forward_paper_capture_eligibility_requires_confirmed_consistent_entry()
     )
 
     for action, lifecycle in confirmed:
+        expected = action in {"BUY CE", "BUY PE"}
         assert _forward_paper_capture_eligible(
             action=action,
             lifecycle_state=lifecycle,
             fresh_entry_allowed=True,
             action_blocked=False,
             signal_action=action,
-        )
+        ) is expected
 
         assert not _forward_paper_capture_eligible(
             action=action,
