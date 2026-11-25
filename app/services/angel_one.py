@@ -2900,7 +2900,7 @@ class AngelOneSession:
 
         try:
             # FIX (event-loop block): offload blocking SDK call.
-            resp = await asyncio.to_thread(self._obj.position)
+            resp = await self._run_sdk_call("position")
         except Exception as e:
             if self._is_rate_limit_error(e):
                 self._record_rate_limit("positions")
