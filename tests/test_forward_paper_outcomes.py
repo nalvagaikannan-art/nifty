@@ -231,7 +231,14 @@ async def test_all_four_symbols_persist_independent_horizons_idempotently(outcom
         selected = [row for row in rows if row.symbol == symbol]
         assert [row.horizon_minutes for row in selected] == [5, 5, 10, 10, 15, 15, 30, 30, 60, 60]
         assert all(row.status == "matured" for row in selected)
-        assert all(row.spot_directional_return_pct > 0 for row in selected)
+        # CE and PE entries share the same underlying spot path. Their
+        # directional returns must therefore have opposite signs, not both
+        # be positive; premium returns are checked independently below.
+        for horizon in outcomes.OUTCOME_HORIZONS_MINUTES:
+            horizon_rows = [row for row in selected if row.horizon_minutes == horizon]
+            assert len(horizon_rows) == 2
+            assert all(row.spot_directional_return_pct is not None for row in horizon_rows)
+            assert sorted(row.spot_directional_return_pct > 0 for row in horizon_rows) == [False, True]
         assert all(row.premium_action_adjusted_return_pct > 0 for row in selected)
         assert all(row.execution_aware_return_pct is not None for row in selected)
         assert all(row.mfe_pct is not None for row in selected)
