@@ -155,6 +155,10 @@ class AngelOneSession:
         # Rate limiter shared by every SmartAPI call this session makes —
         # see _MIN_CALL_INTERVAL comment above for why this exists.
         self._rate_lock = asyncio.Lock()
+        # Serialize complete SmartAPI SDK transactions, not just request starts.
+        # _throttle() spaces reservations; this lock prevents slow SDK calls
+        # from overlapping across LTP, futures, option-chain, candles and positions.
+        self._broker_io_lock = asyncio.Lock()
         self._last_call_ts: float = 0.0
 
         # Waiting broker calls are ordered by priority, then FIFO.
@@ -274,6 +278,17 @@ class AngelOneSession:
                     waited,
                     len(self._priority_waiters),
                 )
+
+    async def _run_sdk_call(self, method, *args, **kwargs):
+        """Run one blocking SmartAPI request without overlapping another SDK call.
+
+        Callers reserve their priority/rate slot with _throttle() first. Holding
+        this lock for the full blocking request closes the gap left by start-only
+        throttling, which otherwise allows slow calls from different endpoints
+        to overlap and trigger broker-wide rate limits.
+        """
+        async with self._broker_io_lock:
+            return await asyncio.to_thread(method, *args, **kwargs)
 
     @property
     def is_configured(self) -> bool:
@@ -573,7 +588,7 @@ class AngelOneSession:
             await self._throttle(call_name=call_name)
             failed_obj = self._obj
             try:
-                body = await asyncio.to_thread(
+                body = await self._run_sdk_call(
                     self._obj.getMarketData,
                     mode="FULL",
                     exchangeTokens={"NSE": [item["token"] for item in batch]},
@@ -585,8 +600,8 @@ class AngelOneSession:
                 if self._is_invalid_token(exc) and await self._recover_invalid_token(failed_obj=failed_obj):
                     await self._throttle(call_name=call_name + ":retry")
                     try:
-                        body = await asyncio.to_thread(
-                            self._obj.getMarketData,
+                        body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                             mode="FULL",
                             exchangeTokens={"NSE": [item["token"] for item in batch]},
                         )
@@ -695,8 +710,8 @@ class AngelOneSession:
 
         async def _call_ltp():
             await self._throttle(call_name=f"get_ltp:{symbol_upper}")
-            return await asyncio.to_thread(
-                self._obj.ltpData,
+            return await self._run_sdk_call(
+                    self._obj.ltpData,
                 info["exchange"],
                 ltp_symbol,
                 info["token"],
@@ -889,8 +904,8 @@ class AngelOneSession:
 
         async def _call_vix():
             await self._throttle(call_name="get_india_vix")
-            return await asyncio.to_thread(
-                self._obj.ltpData,
+            return await self._run_sdk_call(
+                    self._obj.ltpData,
                 "NSE",
                 "India VIX",
                 self.INDIA_VIX_TOKEN,
@@ -1787,8 +1802,8 @@ class AngelOneSession:
                         # Keep the original SmartConnect object so recovery can detect
                         # whether another coroutine already recovered the session.
                         failed_obj = self._obj
-                        body = await asyncio.to_thread(
-                            self._obj.getMarketData,
+                        body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                             mode="FULL", exchangeTokens={derivative_exchange: batch}
                         )
                     except Exception as e:
@@ -1823,8 +1838,8 @@ class AngelOneSession:
                             await self._throttle(
                                 call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
                             )
-                            body = await asyncio.to_thread(
-                                self._obj.getMarketData,
+                            body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
@@ -1904,8 +1919,8 @@ class AngelOneSession:
                             await self._throttle(
                                 call_name=f"option_chain_quotes:{sym}:batch{i // 50 + 1}"
                             )
-                            body = await asyncio.to_thread(
-                                self._obj.getMarketData,
+                            body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                                 mode="FULL", exchangeTokens={derivative_exchange: batch}
                             )
                         except Exception as retry_error:
@@ -2252,7 +2267,7 @@ class AngelOneSession:
             try:
                 await self._throttle(call_name=f"futures_ltp:{sym}")
 
-                body = await asyncio.to_thread(
+                body = await self._run_sdk_call(
                     self._obj.getMarketData,
                     mode="LTP",
                     exchangeTokens={derivative_exchange: [token]},
@@ -2278,8 +2293,8 @@ class AngelOneSession:
                             await self._throttle(
                                 call_name=f"futures_ltp:{sym}:retry"
                             )
-                            body = await asyncio.to_thread(
-                                self._obj.getMarketData,
+                            body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                                 mode="LTP",
                                 exchangeTokens={derivative_exchange: [token]},
                             )
@@ -2367,8 +2382,8 @@ class AngelOneSession:
                                 call_name=f"futures_ltp:{sym}:retry"
                             )
 
-                            retry_body = await asyncio.to_thread(
-                                self._obj.getMarketData,
+                            retry_body = await self._run_sdk_call(
+                    self._obj.getMarketData,
                                 mode="LTP",
                                 exchangeTokens={derivative_exchange: [token]},
                             )
@@ -2437,8 +2452,8 @@ class AngelOneSession:
                 call_name=f"futures_ltp_fallback:{sym}"
             )
 
-            data = await asyncio.to_thread(
-                self._obj.ltpData,
+            data = await self._run_sdk_call(
+                    self._obj.ltpData,
                 info["exchange"],
                 info["tradingsymbol"],
                 token,
@@ -2463,8 +2478,8 @@ class AngelOneSession:
                             call_name=f"futures_ltp_fallback:{sym}:retry"
                         )
 
-                        data = await asyncio.to_thread(
-                            self._obj.ltpData,
+                        data = await self._run_sdk_call(
+                    self._obj.ltpData,
                             info["exchange"],
                             info["tradingsymbol"],
                             token,
@@ -2522,8 +2537,8 @@ class AngelOneSession:
                             call_name=f"futures_ltp_fallback:{sym}:retry"
                         )
 
-                        retry_data = await asyncio.to_thread(
-                            self._obj.ltpData,
+                        retry_data = await self._run_sdk_call(
+                    self._obj.ltpData,
                             info["exchange"],
                             info["tradingsymbol"],
                             token,
@@ -2628,7 +2643,7 @@ class AngelOneSession:
                 await self._throttle(call_name=f"candle:{label}:{interval}")
                 # FIX (event-loop block): getCandleData() is a blocking
                 # `requests` call — offload it to a thread.
-                return await asyncio.to_thread(
+                return await self._run_sdk_call(
                     self._obj.getCandleData,
                     params,
                 )
