@@ -87,8 +87,8 @@ async def get_mcx_contracts(
 ):
     """Verified Angel One MCX FUTCOM contracts; isolated from NSE/BSE indices."""
     key = commodity.strip().upper()
-    if key != "GOLDPETAL":
-        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
+        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
     try:
         contracts = await angel.get_mcx_futures_contracts(key)
         return {"exchange": "MCX", "commodity": key, "available": bool(contracts), "contracts": contracts}
@@ -103,8 +103,8 @@ async def get_mcx_quote(
 ):
     """Angel One MCX FUTCOM LTP. No NSE, Yahoo or Zerodha substitution."""
     key = commodity.strip().upper()
-    if key != "GOLDPETAL":
-        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
+        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
     try:
         quote = await angel.get_mcx_futures_ltp(key)
         if not quote:
@@ -123,8 +123,8 @@ async def get_mcx_candles(
 ):
     """Historical candles from the resolved MCX FUTCOM contract only."""
     key = commodity.strip().upper()
-    if key != "GOLDPETAL":
-        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
+        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
     iv = interval.upper()
     if iv not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail=f"Unsupported interval: {interval}")
@@ -142,8 +142,8 @@ async def get_mcx_analysis(
 ):
     """Conservative MCX futures-only technical analysis; never NSE options logic."""
     key = commodity.strip().upper()
-    if key != "GOLDPETAL":
-        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
+        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
     try:
         from app.services.mcx_analysis import analyze_mcx_futures
         contract_rows = await angel.get_mcx_futures_contracts(key)
