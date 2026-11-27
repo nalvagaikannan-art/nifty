@@ -135,6 +135,29 @@ async def get_mcx_candles(
         raise HTTPException(status_code=502, detail=f"MCX candles unavailable: {exc}")
 
 
+@router.get("/mcx/analysis/{commodity}")
+async def get_mcx_analysis(
+    commodity: str,
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Conservative MCX futures-only technical analysis; never NSE options logic."""
+    key = commodity.strip().upper()
+    if key != "GOLDPETAL":
+        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    try:
+        from app.services.mcx_analysis import analyze_mcx_futures
+        contract_rows = await angel.get_mcx_futures_contracts(key)
+        contract = contract_rows[0] if contract_rows else None
+        if not contract:
+            return {"action": "WAIT", "eligible": False, "exchange": "MCX",
+                    "instrument": key, "reason": "No active MCX FUTCOM contract"}
+        candles = await angel.get_mcx_futures_candle_data(key, "FIVE_MINUTE")
+        result = analyze_mcx_futures(candles[-120:], contract)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCX analysis unavailable: {exc}")
+
+
 @router.get("/vix", response_model=MarketVixResponse)
 async def get_vix(fetcher: DataFetcher = Depends(get_fetcher)):
     return {"vix": await fetcher.get_volatility()}
