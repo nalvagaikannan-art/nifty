@@ -95,6 +95,9 @@ def _verified_nse_fno_stock_symbols(instruments: List[Dict]) -> List[str]:
         and row.get("exch_seg") == "NFO"
         and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
         and str(row.get("name") or "").strip().upper() not in index_names
+        # Exclude synthetic broker/test fixtures even if a matching cash row
+        # is accidentally present in the instrument master.
+        and not str(row.get("name") or "").strip().upper().endswith("NSETEST")
     }
     cash_names = {
         str(row.get("symbol") or "").strip().upper()[:-3]
