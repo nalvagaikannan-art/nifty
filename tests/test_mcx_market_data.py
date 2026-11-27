@@ -160,3 +160,45 @@ async def test_mcx_contract_list_is_pinned_to_approved_pilot_expiry(monkeypatch)
     assert len(contracts) == 1
     assert contracts[0]["token"] == "578631"
     assert contracts[0]["tradingsymbol"] == "GOLDPETAL31DEC26FUT"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commodity", [
+    "CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM",
+])
+async def test_standard_mcx_commodities_resolve_exact_verified_futures(monkeypatch, commodity):
+    session = AngelOneSession()
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(session, "ensure_session", noop)
+    monkeypatch.setattr(session, "_ensure_instruments", noop)
+    session._instruments = [
+        _row(commodity, f"{commodity}31DEC26FUT", f"token-{commodity}", "MCX", "FUTCOM", "31DEC2026", tick="100", lot="25"),
+    ]
+
+    contract = await session._resolve_mcx_futures_token(commodity)
+
+    assert contract["exchange"] == "MCX"
+    assert contract["name"] == commodity
+    assert contract["tradingsymbol"] == f"{commodity}31DEC26FUT"
+    assert contract["tick_size"] == 1.0
+    assert contract["lot_size"] == 25
+
+
+@pytest.mark.asyncio
+async def test_gold_does_not_resolve_goldm_or_goldpetal_as_standard_gold(monkeypatch):
+    session = AngelOneSession()
+
+    async def noop():
+        return None
+
+    monkeypatch.setattr(session, "ensure_session", noop)
+    monkeypatch.setattr(session, "_ensure_instruments", noop)
+    session._instruments = [
+        _row("GOLDM", "GOLDM31DEC26FUT", "goldm", "MCX", "FUTCOM", "31DEC2026"),
+        _row("GOLDPETAL", "GOLDPETAL31DEC26FUT", "goldpetal", "MCX", "FUTCOM", "31DEC2026"),
+    ]
+
+    assert await session._resolve_mcx_futures_token("GOLD") is None
