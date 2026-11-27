@@ -6,13 +6,14 @@ NIFTY-PRO routes  (/api/pro/*)
  GET  /commodities                MCX (Kite) / global fallback, RSI, impact meter, ideas
  GET  /news/{topic}               headline sentiment (needs NEWSAPI_KEY)
  POST /orders/preview             validate a signal (no order, no log)
- POST /orders/execute             PAPER by default; LIVE only when every gate is open
+ POST /orders/execute             PAPER-ONLY simulated ledger; broker routing is disabled
  POST /kill-switch                {"on": true|false}
- GET  /orders                     order ledger
+ GET  /orders                     paper order ledger
 
 SECURITY: execute/preview NEVER trust prices/legs from the client. The client sends
 only signal_id + lots; the server rebuilds the signals from the live chain and
-executes the matching one (409 if the market moved and the id no longer exists).
+records simulated paper fills only. Live broker execution is blocked in
+app.services.order_executor regardless of environment flags or PIN configuration.
 """
 import logging
 from typing import Optional
