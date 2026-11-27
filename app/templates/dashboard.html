@@ -1022,7 +1022,12 @@
     <div style="text-align:right;"><div id="mcx-gp-ltp" style="font-size:1.45rem;font-weight:800;">--</div><button type="button" id="mcx-gp-refresh" class="btn btn-sm" style="margin-top:5px;">↻ Refresh</button></div>
   </div>
   <div id="mcx-gp-status" style="font-size:.76rem;color:var(--text2);margin-top:8px;">Quote status: checking</div>
-  <div style="font-size:.7rem;color:var(--text2);margin-top:5px;">MCX futures data only. No NSE option-chain metrics or BUY/SELL signal is generated in this pilot.</div>
+  <div style="font-size:.7rem;color:var(--text2);margin-top:5px;">MCX futures data only. Separate futures analysis; no NSE option-chain metrics are used.</div>
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;">
+    <button type="button" id="mcx-gp-analyze" class="btn btn-primary btn-sm">Run MCX Futures Analysis</button>
+    <span id="mcx-gp-analysis-action" style="font-weight:800;">Analysis not run</span>
+  </div>
+  <div id="mcx-gp-analysis-detail" style="font-size:.76rem;color:var(--text2);margin-top:7px;">Manual analysis only; no broker orders.</div>
 </section>
 <script>
 (function(){
@@ -1051,6 +1056,24 @@
       .catch(function(e){status.textContent='MCX data unavailable: '+e.message;})
       .finally(function(){busy=false;});
   }
+  document.getElementById('mcx-gp-analyze').addEventListener('click',function(){
+    var button=this, action=document.getElementById('mcx-gp-analysis-action');
+    var detail=document.getElementById('mcx-gp-analysis-detail');
+    button.disabled=true; action.textContent='Checking candles…'; detail.textContent='Angel One MCX five-minute candle analysis';
+    fetch('/api/market/mcx/analysis/GOLDPETAL',{cache:'no-store'})
+      .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;});})
+      .then(function(d){
+        action.textContent=d.action||'WAIT';
+        var parts=[d.reason||'No reason supplied'];
+        if(d.last_candle_at) parts.push('Candle '+d.last_candle_at);
+        if(d.rsi14!==undefined) parts.push('RSI '+d.rsi14+' · EMA9 '+d.ema9+' · EMA21 '+d.ema21);
+        if(d.eligible){parts.push('Entry ref ₹'+d.entry_reference+' · Stop ₹'+d.stop_reference+' · Target ₹'+d.target_reference);}
+        parts.push('Paper analysis only · execution disabled');
+        detail.textContent=parts.join(' | ');
+      })
+      .catch(function(e){action.textContent='WAIT';detail.textContent='MCX analysis unavailable: '+e.message;})
+      .finally(function(){button.disabled=false;});
+  });
   document.getElementById('mcx-gp-refresh').addEventListener('click',refresh);
   refresh();
   window.setInterval(refresh,15000);
