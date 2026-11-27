@@ -173,3 +173,16 @@ def test_dashboard_system_health_strip_uses_backend_status_and_labels_check_time
     assert "s.market_open" in template
     assert "Status check failed" in template
     assert "Backend status check time, not quote freshness" in template
+
+def test_dashboard_signal_history_panel_uses_selected_symbol_persisted_api():
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert 'id="lt-signal-history"' in template
+    assert 'id="lt-history-symbol"' in template
+    assert "function ltLoadSignalHistory()" in template
+    assert "fetch('/api/strategy/history/' + encodeURIComponent(sym)" in template
+    assert "payload.history" in template
+    assert "item.strategy" in template
+    assert "item.reversal" in template
+    assert "ltLoadSignalHistory();" in template
+    assert "This is history, not a live entry instruction." in template
