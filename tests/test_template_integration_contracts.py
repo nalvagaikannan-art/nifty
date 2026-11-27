@@ -57,3 +57,57 @@ def test_primary_page_api_contracts_are_registered():
         "A primary HTML template calls API routes that are not registered: "
         + ", ".join(missing)
     )
+
+def test_mcx_backend_payload_fields_match_workspace_template():
+    """Exercise the backend payload keys consumed by the MCX workspace JS."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services.angel_one import AngelOneSession
+
+    async def run():
+        session = AngelOneSession.__new__(AngelOneSession)
+        session._instruments = [
+            {
+                "name": "GOLD", "expiry": "26FEB2027",
+                "symbol": "GOLD26FEB27FUT", "instrumenttype": "FUTCOM",
+                "exch_seg": "MCX", "tick_size": "50", "lotsize": "1",
+                "token": "201",
+            },
+            {
+                "name": "GOLD", "expiry": "26FEB2027",
+                "strike": "100000", "symbol": "GOLD26FEB27100000CE",
+                "instrumenttype": "OPTFUT", "exch_seg": "MCX",
+                "tick_size": "50", "lotsize": "1", "token": "202",
+            },
+            {
+                "name": "GOLD", "expiry": "26FEB2027",
+                "strike": "100000", "symbol": "GOLD26FEB27100000PE",
+                "instrumenttype": "OPTFUT", "exch_seg": "MCX",
+                "tick_size": "50", "lotsize": "1", "token": "203",
+            },
+        ]
+        session.ensure_session = AsyncMock()
+        session._ensure_instruments = AsyncMock()
+
+        catalog = await session.get_mcx_commodity_catalog()
+        assert catalog["available"] is True
+        gold = next(row for row in catalog["commodities"] if row["commodity"] == "GOLD")
+        assert {
+            "commodity", "futures_contracts", "options_contracts",
+            "option_types", "options_available",
+        } <= gold.keys()
+        assert gold["futures_contracts"] == 1
+        assert gold["options_contracts"] == 2
+        assert gold["option_types"] == ["CE", "PE"]
+        assert gold["options_available"] is True
+
+        contracts = await session.get_mcx_futures_contracts("GOLD")
+        assert len(contracts) == 1
+        contract = contracts[0]
+        assert {
+            "tradingsymbol", "expiry", "lot_size", "tick_size",
+            "token", "instrumenttype", "exchange",
+        } <= contract.keys()
+
+    asyncio.run(run())
