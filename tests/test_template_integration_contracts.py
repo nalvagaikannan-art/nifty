@@ -268,7 +268,7 @@ def test_dashboard_shows_market_data_unavailable_as_wait_with_backend_detail():
     assert "err.detail = payload && (payload.detail || payload.error);" in template
     assert "var marketUnavailable = r.status === 502 || r.status === 503;" in template
     assert "WAIT · UNAVAILABLE" in template
-    assert "Market data unavailable — WAIT." in template
+    assert "Market data unavailable — WAIT" in template
     assert "ltEsc(unavailableMessage)" in template
 
 
