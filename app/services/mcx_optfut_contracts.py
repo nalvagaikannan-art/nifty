@@ -7,6 +7,9 @@ same /100 master convention already used by the MCX FUTCOM resolver.
 """
 import re
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def _expiry_date(value):
@@ -31,7 +34,7 @@ def _positive_number(value):
 
 def normalize_mcx_optfut_row(row, commodity, today=None, option_type=None):
     """Return one verified MCX option contract, or None for any mismatch."""
-    today = today or date.today()
+    today = today or datetime.now(IST).date()
     key = str(commodity or "").strip().upper()
     allowed = {
         "COPPER", "CRUDEOIL", "CRUDEOILM", "GOLD", "GOLDM",
