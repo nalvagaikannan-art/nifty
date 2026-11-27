@@ -700,9 +700,10 @@ class AngelOneSession:
                 "tradingsymbol": target, "name": sym}
 
     async def _resolve_mcx_futures_token(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
-        """Resolve the nearest unexpired MCX FUTCOM contract from the compact master."""
+        """Resolve the explicitly approved GOLDPETAL 31-Dec-2026 pilot contract."""
         key = str(commodity or "").strip().upper()
-        if not re.fullmatch(r"[A-Z0-9_-]{2,30}", key):
+        pilot_symbol = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}.get(key)
+        if not pilot_symbol:
             return None
         await self.ensure_session()
         await self._ensure_instruments()
@@ -715,7 +716,7 @@ class AngelOneSession:
                 continue
             name = str(row.get("name") or "").strip().upper()
             symbol = str(row.get("symbol") or "").strip().upper()
-            if key not in (name, symbol):
+            if symbol != pilot_symbol:
                 continue
             expiry = None
             for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
@@ -744,9 +745,10 @@ class AngelOneSession:
         }
 
     async def get_mcx_futures_contracts(self, commodity: str = "GOLDPETAL") -> List[Dict]:
-        """Return verified, unexpired MCX FUTCOM contracts for one commodity family."""
+        """Return only the explicitly approved GOLDPETAL 31-Dec-2026 pilot contract."""
         key = str(commodity or "").strip().upper()
-        if not re.fullmatch(r"[A-Z0-9_-]{2,30}", key):
+        pilot_symbol = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}.get(key)
+        if not pilot_symbol:
             return []
         await self.ensure_session()
         await self._ensure_instruments()
@@ -755,7 +757,7 @@ class AngelOneSession:
         for row in (self._instruments or []):
             if not isinstance(row, dict) or row.get("exch_seg") != "MCX" or row.get("instrumenttype") != "FUTCOM":
                 continue
-            if key not in (str(row.get("name") or "").strip().upper(), str(row.get("symbol") or "").strip().upper()):
+            if str(row.get("symbol") or "").strip().upper() != pilot_symbol:
                 continue
             expiry = None
             for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
