@@ -878,6 +878,97 @@ class AngelOneSession:
             self._mcx_quote_cache[cache_key] = (time.time(), result)
             return dict(result)
 
+    async def probe_mcx_optfut_quotes(self, commodity: str = "GOLD") -> Dict:
+        """Temporary QA-only read probe: at most one CE/PE pair in one FULL quote call."""
+        from app.services.mcx_optfut_contracts import resolve_mcx_optfut_contracts
+
+        key = str(commodity or "").strip().upper()
+        await self.ensure_session()
+        await self._ensure_instruments()
+        contracts = resolve_mcx_optfut_contracts(
+            self._instruments or [], key, today=now_ist().date()
+        )
+        if not contracts:
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "reason": "No verified active MCX OPTFUT contracts"}
+
+        expiry = contracts[0]["expiry"]
+        same_expiry = [item for item in contracts if item["expiry"] == expiry]
+        by_strike = {}
+        for item in same_expiry:
+            by_strike.setdefault(item["strike"], {})[item["option_type"]] = item
+        pairs = [(strike, pair) for strike, pair in by_strike.items()
+                 if "CE" in pair and "PE" in pair]
+        if not pairs:
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "reason": "No same-expiry CE/PE pair in verified master"}
+        pairs.sort(key=lambda entry: entry[0])
+        strike, pair = pairs[len(pairs) // 2]
+        selected = [pair["CE"], pair["PE"]]
+        tokens = [str(item["token"]) for item in selected]
+
+        await self._throttle(call_name=f"mcx_optfut_probe:{key}")
+        if not hasattr(self._obj, "getMarketData"):
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "reason": "Angel One SDK getMarketData is unavailable"}
+        body = await self._run_sdk_call(
+            "getMarketData", mode="FULL", exchangeTokens={"MCX": tokens}
+        )
+        if not isinstance(body, dict):
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "reason": "Unexpected broker response type"}
+        if body.get("status") is False:
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "broker_status": False,
+                    "broker_error_code": str(body.get("errorcode") or "")[:40],
+                    "broker_message": str(body.get("message") or "")[:120]}
+        data = body.get("data")
+        fetched = data.get("fetched", []) if isinstance(data, dict) else data
+        if not isinstance(fetched, list):
+            return {"available": False, "exchange": "MCX", "commodity": key,
+                    "reason": "Unexpected FULL quote data shape",
+                    "data_type": type(data).__name__}
+        quotes = {}
+        for item in fetched:
+            if isinstance(item, dict):
+                token = str(item.get("symbolToken") or item.get("symboltoken") or "")
+                if token in tokens:
+                    quotes[token] = item
+        safe_fields = (
+            "ltp", "open", "high", "low", "close", "avgPrice",
+            "exchTradeTime", "exchFeedTime", "tradeTime",
+            "opnInterest", "totBuyQuan", "totSellQuan",
+        )
+        rows = []
+        for contract in selected:
+            raw = quotes.get(str(contract["token"]))
+            quote = {name: raw.get(name) for name in safe_fields if name in raw} if raw else {}
+            rows.append({
+                "tradingsymbol": contract["tradingsymbol"],
+                "token": contract["token"],
+                "expiry": contract["expiry"],
+                "strike": contract["strike"],
+                "option_type": contract["option_type"],
+                "lot_size": contract["lot_size"],
+                "master_tick_size": contract["tick_size"],
+                "quote_received": bool(raw),
+                "quote_fields": sorted(raw.keys()) if raw else [],
+                "quote": quote,
+            })
+        return {
+            "available": any(row["quote_received"] for row in rows),
+            "exchange": "MCX", "commodity": key,
+            "source": "angel_one_getMarketData_FULL",
+            "mode": "READ_ONLY_QUOTE_PROBE",
+            "request_count": 1, "requested_token_count": len(tokens),
+            "expiry": expiry, "paired_strike": strike,
+            "observed_at": now_ist().isoformat(),
+            "quotes": rows,
+            "unfetched_count": len(data.get("unfetched", []))
+                if isinstance(data, dict) and isinstance(data.get("unfetched"), list) else None,
+            "order_api_called": False,
+        }
+
     async def get_mcx_futures_candle_data(
         self, commodity: str = "GOLDPETAL", interval: str = "FIVE_MINUTE",
         from_date: str = "", to_date: str = "",
