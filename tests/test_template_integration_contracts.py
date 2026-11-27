@@ -111,3 +111,29 @@ def test_mcx_backend_payload_fields_match_workspace_template():
         } <= contract.keys()
 
     asyncio.run(run())
+
+def test_mcx_analysis_template_fields_fail_closed_without_candles():
+    """The MCX UI must receive explicit WAIT fields when candles are absent."""
+    from app.services.mcx_analysis import analyze_mcx_futures
+
+    result = analyze_mcx_futures(
+        [],
+        {
+            "name": "GOLD",
+            "tradingsymbol": "GOLD26FEB27FUT",
+            "tick_size": 0.5,
+            "lot_size": 1,
+        },
+    )
+
+    # These are the fields read by analysis.html's MCX analyze() handler.
+    assert result["action"] == "WAIT"
+    assert result["eligible"] is False
+    assert isinstance(result["reason"], str) and result["reason"]
+    assert result["exchange"] == "MCX"
+    assert result["instrument"] == "GOLD"
+    assert result["source"] == "angel_one_mcx_candles"
+    assert "entry_reference" not in result or result["entry_reference"] is None
+    assert "stop_reference" not in result or result["stop_reference"] is None
+    assert "target_reference" not in result or result["target_reference"] is None
+    assert result.get("execution_enabled") is not True
