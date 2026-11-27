@@ -189,7 +189,7 @@
     <div><span style="color:var(--text2);font-size:.72rem;">STATE</span><div id="signal-lifecycle-state" style="font-weight:800;font-size:1.05rem;">WAIT</div></div>
     <div><span style="color:var(--text2);font-size:.72rem;">CONFIRMATION</span><div id="signal-confirmation-count">0 / 3</div></div>
     <div><span style="color:var(--text2);font-size:.72rem;">ACTIVE SIDE</span><div id="signal-active-side">NONE</div></div>
-    <div style="flex:1;min-width:220px;"><span id="live-position-label" style="color:var(--text2);font-size:.72rem;">LIVE POSITION</span><div id="live-position-status">Checking...</div></div>
+    <div style="flex:1;min-width:220px;"><span id="live-position-label" style="color:var(--text2);font-size:.72rem;">ANGEL ONE BROKER POSITIONS · READ ONLY</span><div id="live-position-status">Checking Angel One broker positions…</div><div style="font-size:.72rem;color:var(--text2);margin-top:.25rem;">Source: authenticated Angel One positions API. These are broker-held positions, not paper-trade records. This app does not place or square off orders.</div></div>
   </div>
 </div>
 
@@ -788,10 +788,18 @@ function loadAll(sym, force, expiry){
       renderStrikes(d);
       populateExpirySelect(d.all_expiries, d.expiry);
     })
-    .fail(function(){
+    .fail(function(x){
       if(loadSeq !== analysisLoadSeq || loadSym !== curSym) return;
-      $('#strikes-loading').text('Strategy data unavailable.');
-      $('#signal-history-body').html('<span style="color:var(--text2);font-size:.85rem;">Signal history unavailable: strategy request failed.</span>');
+      var detail = '';
+      try{
+        var payload = JSON.parse(x.responseText || '{}');
+        detail = payload.detail || payload.error || '';
+      }catch(e){}
+      var failure = 'Strategy data unavailable' +
+        (x.status ? ' (HTTP ' + x.status + ')' : '') +
+        (detail ? ': ' + detail : '.');
+      $('#strikes-loading').text(failure);
+      $('#signal-history-body').text('Signal history unavailable — ' + failure);
     })
     .always(function(){ done.strat=true; chk(); });
 }
@@ -1729,7 +1737,7 @@ function renderSignalLifecycle(d){
 function renderLivePositions(data, d){
   var positions = (data && data.positions) || [];
   if(!positions.length){
-    $('#live-position-status').html('<span style="color:var(--text2);">No open Angel One position detected.</span>');
+    $('#live-position-status').html('<span style="color:var(--text2);">No open Angel One broker positions detected.</span>');
     return;
   }
   var active = (d && d.signal_active_side || 'NONE').toUpperCase();
