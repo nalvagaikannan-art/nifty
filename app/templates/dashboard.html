@@ -400,6 +400,16 @@
   font-weight: 600;
 }
 
+
+.lt-history-panel{margin:12px 0;padding:13px 14px;background:var(--lt-card);border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow)}
+.lt-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.lt-history-list{display:grid;gap:7px}
+.lt-history-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px 10px;background:var(--lt-gray-bg);border:1px solid var(--lt-gray-bd);border-radius:8px}
+.lt-history-main{font-size:12px;font-weight:800;color:var(--lt-text)}
+.lt-history-meta{font-size:10px;color:var(--lt-text3);margin-top:3px}
+.lt-history-empty{font-size:11px;color:var(--lt-text3);padding:10px;background:var(--lt-gray-bg);border-radius:8px}
+.lt-history-score{font-size:11px;font-weight:800;color:var(--lt-text2);text-align:right}
+
 /* ── ALL INDEX SIGNAL BOARD ── */
 .lt-all-signals {
   margin-bottom: 12px;
@@ -1202,6 +1212,16 @@
       </div>
     </div>
 
+
+    <section class="lt-history-panel" aria-label="Selected symbol signal history">
+      <div class="lt-history-head">
+        <div class="lt-all-signals-title" style="margin:0;">SIGNAL HISTORY · <span id="lt-history-symbol">NIFTY</span></div>
+        <button type="button" class="lt-ref-btn" onclick="ltLoadSignalHistory()">↻ History</button>
+      </div>
+      <div class="lt-all-signals-note">Backend-persisted strategy events for the selected symbol. This is history, not a live entry instruction.</div>
+      <div id="lt-signal-history" class="lt-history-list" aria-live="polite"><div class="lt-history-empty">Loading signal history…</div></div>
+    </section>
+
     <!-- ── F&O STOCK MARKET MOVERS ── -->
     <div class="lt-all-signals" style="margin-top:12px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
@@ -1799,6 +1819,7 @@ function ltSetSym(btn, sym){
   if(stockSelect && stockSelect.value !== sym) stockSelect.value = '';
   ltSym = sym;
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
+  ltLoadSignalHistory();
   // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
   // response must not remain visible after the selected symbol changes.
   ltRefresh();
@@ -1832,6 +1853,36 @@ function ltUpdateStatus(){
       });
       var checked = document.getElementById('lt-status-checked');
       if(checked) checked.textContent = 'Status check failed';
+    });
+}
+
+
+function ltLoadSignalHistory(){
+  var sym = String(ltSym || 'NIFTY').toUpperCase();
+  var title = document.getElementById('lt-history-symbol');
+  var root = document.getElementById('lt-signal-history');
+  if(!root) return;
+  if(title) title.textContent = sym;
+  root.innerHTML = '<div class="lt-history-empty">Loading ' + ltEsc(sym) + ' history…</div>';
+  fetch('/api/strategy/history/' + encodeURIComponent(sym), {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(payload){
+      if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
+      var rows = Array.isArray(payload.history) ? payload.history.slice(0,5) : [];
+      if(!rows.length){
+        root.innerHTML = '<div class="lt-history-empty">No persisted signal events for ' + ltEsc(sym) + ' yet.</div>';
+        return;
+      }
+      root.innerHTML = rows.map(function(item){
+        var action = String(item.strategy || 'WAIT').toUpperCase();
+        var stamp = [item.date || '', item.timestamp || ''].filter(Boolean).join(' · ');
+        var meta = [stamp, item.market_state || 'Market state unavailable', item.spot ? ('Spot ' + Number(item.spot).toLocaleString('en-IN')) : 'Spot unavailable'].join(' · ');
+        return '<div class="lt-history-row"><div><div class="lt-history-main">' + ltEsc(action) + (item.reversal ? ' · REVERSAL' : '') + '</div><div class="lt-history-meta">' + ltEsc(meta) + '</div></div><div class="lt-history-score">Score ' + ltEsc(item.score == null ? '--' : item.score) + '<br>Conf. ' + ltEsc(item.confidence == null ? '--' : item.confidence) + '</div></div>';
+      }).join('');
+    })
+    .catch(function(){
+      if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
+      root.innerHTML = '<div class="lt-history-empty">Signal history unavailable. Retry when backend storage is ready.</div>';
     });
 }
 
@@ -3299,6 +3350,7 @@ ltFastSpotRefresh();
 ltFastSpotInterval = setInterval(ltFastSpotRefresh, 1000);
 
 // Initial load
+ltLoadSignalHistory();
 ltRefresh();
 </script>
 
