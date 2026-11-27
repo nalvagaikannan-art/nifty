@@ -268,7 +268,7 @@ def test_dashboard_shows_market_data_unavailable_as_wait_with_backend_detail():
     assert "err.detail = payload && (payload.detail || payload.error);" in template
     assert "var marketUnavailable = r.status === 502 || r.status === 503;" in template
     assert "WAIT · UNAVAILABLE" in template
-    assert "Market data unavailable — WAIT." in template
+    assert "Market data unavailable — WAIT" in template
     assert "ltEsc(unavailableMessage)" in template
 
 
@@ -311,3 +311,34 @@ def test_strategy_and_analysis_market_data_exceptions_are_not_bad_gateway():
 
     assert 'raise HTTPException(503, detail=f"Market data unavailable: {e}")' in strategy
     assert 'raise HTTPException(503, detail=f"Market data unavailable: {e}")' in analysis
+
+
+
+def test_dashboard_preserves_strategy_error_status_and_backend_detail():
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert "status:item.status || null" in template
+    assert "detail:item.detail || ''" in template
+    assert "Market data unavailable — WAIT" in template
+    assert "r.detail || r.message || 'Unknown request error'" in template
+    assert "err.detail = payload && (payload.detail || payload.error)" in template
+
+
+def test_analysis_displays_strategy_failure_status_and_backend_detail():
+    template = (TEMPLATE_DIR / "analysis.html").read_text(encoding="utf-8")
+
+    assert "Strategy data unavailable" in template
+    assert "HTTP ' + x.status" in template
+    assert "payload.detail || payload.error" in template
+    assert "Signal history unavailable — ' + failure" in template
+
+
+def test_analysis_labels_positions_as_read_only_angel_one_broker_positions():
+    template = (TEMPLATE_DIR / "analysis.html").read_text(encoding="utf-8")
+    positions_route = (ROOT / "app" / "api" / "routes" / "positions.py").read_text(encoding="utf-8")
+
+    assert "ANGEL ONE BROKER POSITIONS · READ ONLY" in template
+    assert "not paper-trade records" in template
+    assert "authenticated Angel One positions API" in template
+    assert "raw_positions = await angel.get_positions()" in positions_route
+    assert "Square off is disabled in this app" in positions_route
