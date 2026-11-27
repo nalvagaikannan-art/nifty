@@ -174,3 +174,52 @@ async def get_vix(fetcher: DataFetcher = Depends(get_fetcher)):
 @router.get("/breadth", response_model=MarketBreadthResponse)
 async def get_breadth(fetcher: DataFetcher = Depends(get_fetcher)):
     return await fetcher.get_market_breadth()
+
+
+@router.get("/universe")
+async def get_unified_market_universe(
+    fetcher: DataFetcher = Depends(get_fetcher),
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Read-only market registry. NSE and MCX universes stay source-isolated."""
+    result = {
+        "nse": {"available": False, "indices": [], "stocks": [], "source": "nse_broker_verified"},
+        "mcx": {
+            "available": False,
+            "source": "angel_one_instrument_master",
+            "futures": [],
+            "options_catalog": [],
+            "options_live_supported": False,
+        },
+    }
+    try:
+        nse = await fetcher.get_market_symbol_universe()
+        result["nse"] = {
+            "available": bool(nse.get("indices") or nse.get("stocks")),
+            "indices": list(nse.get("indices") or []),
+            "stocks": list(nse.get("stocks") or []),
+            "source": "nse_broker_verified",
+        }
+    except Exception as exc:
+        result["nse"]["reason"] = f"NSE universe unavailable: {str(exc)[:240]}"
+
+    try:
+        mcx = await angel.get_mcx_commodity_catalog()
+        commodities = list(mcx.get("commodities") or [])
+        result["mcx"] = {
+            "available": bool(mcx.get("available")),
+            "source": mcx.get("source") or "angel_one_instrument_master",
+            "futures": [
+                item for item in commodities
+                if int(item.get("futures_contracts") or 0) > 0
+            ],
+            "options_catalog": [
+                item for item in commodities
+                if int(item.get("options_contracts") or 0) > 0
+            ],
+            "options_live_supported": False,
+        }
+    except Exception as exc:
+        result["mcx"]["reason"] = f"MCX catalogue unavailable: {str(exc)[:240]}"
+
+    return result
