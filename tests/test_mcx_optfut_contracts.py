@@ -28,7 +28,7 @@ def _row(name="GOLD", expiry="26FEB2027", strike="10050000",
     ("NATGASMINI", "NATGASMINI19FEB27100CE", "10000", "250", "5"),
     ("NATURALGAS", "NATURALGAS19FEB27100PE", "10000", "1250", "5"),
     ("SILVER", "SILVER26FEB27100500CE", "10050000", "30", "50"),
-    ("SILVERM", "SILVER26FEB27100500PE", "10050000", "5", "50"),
+    ("SILVERM", "SILVERM26FEB27100500PE", "10050000", "5", "50"),
     ("ZINC", "ZINC19FEB27280CE", "28000", "5", "1"),
 ])
 def test_normalizes_all_ten_observed_mcx_option_commodities(name, symbol, strike, lot, tick):
@@ -52,7 +52,6 @@ def test_normalizes_all_ten_observed_mcx_option_commodities(name, symbol, strike
     {"lotsize": "0"},
     {"tick_size": "0"},
     {"expiry": "26FEB2026"},
-    {"symbol": "GOLD26FEB27100500PE"},
     {"strike": "10000000"},
     {"symbol": "GOLD_BAD_SYMBOL"},
 ])
@@ -63,9 +62,11 @@ def test_rejects_invalid_or_mismatched_master_rows(mutations):
 
 
 def test_option_type_filter_is_strict():
-    row = _row()
-    assert normalize_mcx_optfut_row(row, "GOLD", date(2026, 11, 27), "PE") is None
-    assert normalize_mcx_optfut_row(row, "GOLD", date(2026, 11, 27), "CE") is not None
+    call_row = _row()
+    put_row = _row(symbol="GOLD26FEB27100500PE")
+    assert normalize_mcx_optfut_row(call_row, "GOLD", date(2026, 11, 27), "PE") is None
+    assert normalize_mcx_optfut_row(put_row, "GOLD", date(2026, 11, 27), "CE") is None
+    assert normalize_mcx_optfut_row(call_row, "GOLD", date(2026, 11, 27), "CE") is not None
 
 
 def test_resolver_sorts_deduplicates_and_filters_expiry():
