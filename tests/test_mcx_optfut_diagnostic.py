@@ -35,7 +35,7 @@ def test_mcx_optfut_diagnostic_is_allowlisted_and_counts_ce_pe():
     assert result["commodities"][0]["ce"] == 1
     assert result["commodities"][0]["pe"] == 1
     assert result["secrets_or_tokens_included"] is False
-    assert "token" not in str(result)
+    assert all("token" not in sample for item in result["commodities"] for sample in item["samples"])
     assert "MUST_NOT_LEAK" not in str(result)
 
 
