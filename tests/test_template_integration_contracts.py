@@ -137,3 +137,24 @@ def test_mcx_analysis_template_fields_fail_closed_without_candles():
     assert "stop_reference" not in result or result["stop_reference"] is None
     assert "target_reference" not in result or result["target_reference"] is None
     assert result.get("execution_enabled") is not True
+
+def test_mcx_terminal_ui_labels_separate_futures_signals_from_options_catalogue():
+    """Prevent UI copy from implying OPTFUT catalogue rows are live option signals."""
+    template = (TEMPLATE_DIR / "analysis.html").read_text(encoding="utf-8")
+
+    required_copy = (
+        "MCX Trading Terminal",
+        "ANALYSIS / PAPER",
+        "EXECUTION",
+        "MCX FUTURES ONLY",
+        "Futures Analysis · FUTCOM",
+        "Options Catalogue · OPTFUT",
+        "no live option-chain analysis",
+        "Greeks",
+        "broker order placement இல்லை",
+    )
+    for phrase in required_copy:
+        assert phrase in template, f"Missing MCX terminal safety/UI label: {phrase}"
+
+    assert 'id="mx-action" data-action="wait"' in template
+    assert "dataset.action=" in template
