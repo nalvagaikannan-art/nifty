@@ -22,67 +22,107 @@
 <!-- ── STATUS BANNERS (Market Closed / Expiry Day) ────── -->
 <div id="status-banners" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem;"></div>
 
-<section id="mcx-goldpetal-widget" class="card" style="margin:10px 12px;padding:14px;border:1px solid var(--border);">
-  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
-    <div><div style="font-weight:800;">MCX · GOLD PETAL FUTURES</div><div id="mcx-gp-meta" style="font-size:.75rem;color:var(--text2);">Angel One MCX data check…</div></div>
-    <div style="text-align:right;"><div id="mcx-gp-ltp" style="font-size:1.45rem;font-weight:800;">--</div><button type="button" id="mcx-gp-refresh" class="btn btn-sm" style="margin-top:5px;">↻ Refresh</button></div>
+<section id="mcx-workspace" class="card" aria-label="MCX advanced workspace">
+  <style>
+    #mcx-workspace{--mx-bg:var(--card-bg,#fff);--mx-line:var(--border,#e2e8f0);--mx-muted:var(--text2,#64748b);padding:clamp(14px,2vw,22px);margin:10px 0 18px;border-radius:16px}
+    #mcx-workspace .mx-head{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap}
+    #mcx-workspace .mx-kicker{font-size:.68rem;letter-spacing:.12em;font-weight:800;color:var(--mx-muted);text-transform:uppercase}
+    #mcx-workspace .mx-title{font-size:1.18rem;font-weight:850;margin:.2rem 0}
+    #mcx-workspace .mx-sub{font-size:.78rem;color:var(--mx-muted);line-height:1.5}
+    #mcx-workspace .mx-status{display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border:1px solid var(--mx-line);border-radius:999px;font-size:.72rem;font-weight:750}
+    #mcx-workspace .mx-dot{width:7px;height:7px;border-radius:50%;background:#94a3b8}
+    #mcx-workspace .mx-dot.ok{background:#16a34a} #mcx-workspace .mx-dot.warn{background:#d97706}
+    #mcx-workspace .mx-toolbar{display:grid;grid-template-columns:minmax(180px,1.4fr) minmax(130px,.8fr) auto;gap:9px;margin:16px 0}
+    #mcx-workspace select,#mcx-workspace button{font:inherit}
+    #mcx-workspace .mx-select{width:100%;min-height:40px;padding:8px 11px;border:1px solid var(--mx-line);border-radius:10px;background:var(--mx-bg);color:inherit}
+    #mcx-workspace .mx-tabs{display:flex;gap:6px;padding:4px;background:rgba(148,163,184,.12);border-radius:11px;width:max-content;max-width:100%}
+    #mcx-workspace .mx-tab{border:0;background:transparent;color:var(--mx-muted);padding:8px 15px;border-radius:8px;font-size:.8rem;font-weight:800;cursor:pointer}
+    #mcx-workspace .mx-tab[aria-selected=true]{background:var(--mx-bg);color:var(--primary,#2563eb);box-shadow:0 1px 4px #00000012}
+    #mcx-workspace .mx-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin:12px 0}
+    #mcx-workspace .mx-stat{padding:12px;border:1px solid var(--mx-line);border-radius:12px;min-width:0}
+    #mcx-workspace .mx-label{font-size:.65rem;color:var(--mx-muted);font-weight:800;letter-spacing:.07em;text-transform:uppercase}
+    #mcx-workspace .mx-value{font-size:1.05rem;font-weight:850;margin-top:4px;overflow-wrap:anywhere}
+    #mcx-workspace .mx-panel{border:1px solid var(--mx-line);border-radius:12px;padding:13px;margin-top:10px}
+    #mcx-workspace .mx-panel-head{display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:9px}
+    #mcx-workspace .mx-action{border:1px solid var(--mx-line);border-radius:9px;background:var(--mx-bg);padding:8px 12px;font-size:.76rem;font-weight:800;cursor:pointer}
+    #mcx-workspace .mx-action.primary{background:var(--primary,#2563eb);color:white;border-color:transparent}
+    #mcx-workspace .mx-action:disabled{opacity:.5;cursor:wait}
+    #mcx-workspace .mx-note{font-size:.75rem;color:var(--mx-muted);line-height:1.55}
+    #mcx-workspace .mx-table-wrap{overflow:auto}
+    #mcx-workspace table{width:100%;border-collapse:collapse;font-size:.76rem;min-width:520px}
+    #mcx-workspace th,#mcx-workspace td{padding:9px 8px;border-bottom:1px solid var(--mx-line);text-align:left;white-space:nowrap}
+    #mcx-workspace th{font-size:.64rem;color:var(--mx-muted);letter-spacing:.06em;text-transform:uppercase}
+    #mcx-workspace .mx-hidden{display:none!important}
+    #mcx-workspace .mx-empty{padding:18px;text-align:center;border:1px dashed var(--mx-line);border-radius:11px;color:var(--mx-muted);font-size:.78rem}
+    @media(max-width:700px){#mcx-workspace .mx-toolbar{grid-template-columns:1fr 1fr}#mcx-workspace .mx-toolbar .mx-tabs{grid-column:1/-1;grid-row:2}#mcx-workspace .mx-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#mcx-workspace .mx-value{font-size:.95rem}}
+  </style>
+  <div class="mx-head">
+    <div><div class="mx-kicker">Multi-commodity · Angel One MCX</div><div class="mx-title">MCX Trading Workspace</div><div class="mx-sub">Futures மற்றும் Options-ஐ தனித்தனியாகப் பாருங்கள். எல்லா contract விவரங்களும் broker instrument master-இலிருந்து.</div></div>
+    <div class="mx-status" id="mx-data-status" role="status"><span class="mx-dot" id="mx-status-dot"></span><span id="mx-status-text">Market data சரிபார்க்கப்படுகிறது</span></div>
   </div>
-  <div id="mcx-gp-status" style="font-size:.76rem;color:var(--text2);margin-top:8px;">Quote status: checking</div>
-  <div style="font-size:.7rem;color:var(--text2);margin-top:5px;">MCX futures data only. Separate futures analysis; no NSE option-chain metrics are used.</div>
-  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;">
-    <button type="button" id="mcx-gp-analyze" class="btn btn-primary btn-sm">Run MCX Futures Analysis</button>
-    <span id="mcx-gp-analysis-action" style="font-weight:800;">Analysis not run</span>
+  <div class="mx-toolbar">
+    <label><span class="mx-label">Commodity</span><select class="mx-select" id="mx-commodity"><option value="">Loading catalogue…</option></select></label>
+    <label><span class="mx-label">Contract / Expiry</span><select class="mx-select" id="mx-contract"><option value="">Select commodity</option></select></label>
+    <div class="mx-tabs" role="tablist" aria-label="MCX instrument type">
+      <button class="mx-tab" type="button" role="tab" aria-selected="true" data-mx-tab="futures">Futures</button>
+      <button class="mx-tab" type="button" role="tab" aria-selected="false" data-mx-tab="options">Options</button>
+    </div>
   </div>
-  <div id="mcx-gp-analysis-detail" style="font-size:.76rem;color:var(--text2);margin-top:7px;">Analysis runs only when requested and never places orders.</div>
+  <div class="mx-grid">
+    <div class="mx-stat"><div class="mx-label">Live Premium / LTP</div><div class="mx-value" id="mx-ltp">--</div><div class="mx-note" id="mx-ltp-time">Quote not loaded</div></div>
+    <div class="mx-stat"><div class="mx-label">Available Futures</div><div class="mx-value" id="mx-fut-count">--</div><div class="mx-note">Active master contracts</div></div>
+    <div class="mx-stat"><div class="mx-label">Options Contracts</div><div class="mx-value" id="mx-opt-count">--</div><div class="mx-note" id="mx-opt-types">CE / PE coverage</div></div>
+    <div class="mx-stat"><div class="mx-label">Data Source</div><div class="mx-value" style="font-size:.88rem">Angel One</div><div class="mx-note">MCX only · no fallback</div></div>
+  </div>
+  <div class="mx-panel" id="mx-futures-panel">
+    <div class="mx-panel-head"><div><strong>Futures analysis</strong><div class="mx-note">5-minute candles · trend confirmation · risk levels</div></div><button type="button" class="mx-action primary" id="mx-analyze">Analyse contract</button></div>
+    <div class="mx-grid">
+      <div class="mx-stat"><div class="mx-label">Decision</div><div class="mx-value" id="mx-action">WAIT</div></div>
+      <div class="mx-stat"><div class="mx-label">Entry Reference</div><div class="mx-value" id="mx-entry">--</div></div>
+      <div class="mx-stat"><div class="mx-label">Stop Loss</div><div class="mx-value" id="mx-stop">--</div></div>
+      <div class="mx-stat"><div class="mx-label">Target</div><div class="mx-value" id="mx-target">--</div></div>
+    </div>
+    <div class="mx-note" id="mx-analysis-detail" aria-live="polite">முதலில் commodity மற்றும் contract தேர்வு செய்து Analyse அழுத்தவும். தகுதி உறுதியாகாத வரை WAIT.</div>
+    <div class="mx-panel-head" style="margin-top:12px"><strong>Available futures contracts</strong><span class="mx-note" id="mx-contract-count">--</span></div>
+    <div class="mx-table-wrap"><table><thead><tr><th>Contract</th><th>Expiry</th><th>Lot</th><th>Tick size</th></tr></thead><tbody id="mx-contract-rows"><tr><td colspan="4">Loading…</td></tr></tbody></table></div>
+  </div>
+  <div class="mx-panel mx-hidden" id="mx-options-panel">
+    <div class="mx-panel-head"><div><strong>Options chain coverage</strong><div class="mx-note">Actual MCX OPTFUT contracts only; no NSE option-chain substitution</div></div></div>
+    <div class="mx-empty" id="mx-options-state">Options coverage loading…</div>
+    <div class="mx-note" style="margin-top:9px">Option premium recommendation, spread/liquidity checks, and paper-position entry require verified MCX option quote/candle support. Until those checks are implemented and validated, this panel will not generate CE/PE calls.</div>
+  </div>
+  <div class="mx-panel">
+    <div class="mx-panel-head"><strong>Paper trading safety</strong><span class="mx-note">No broker orders</span></div>
+    <div class="mx-note">இந்த workspace market analysis மற்றும் paper tracking-க்கானது. Live execution இல்லை. Fresh/stale data, missing contract அல்லது risk confirmation இல்லாதபோது decision WAIT ஆகவே இருக்கும்.</div>
+  </div>
+  <div class="mx-head" style="margin-top:12px"><span class="mx-note" id="mx-last-refresh">Not refreshed yet</span><button type="button" class="mx-action" id="mx-refresh">↻ Refresh data</button></div>
 </section>
 <script>
 (function(){
-  var root=document.getElementById('mcx-goldpetal-widget');
-  if(!root || root.dataset.ready==='1') return;
-  root.dataset.ready='1';
-  var busy=false;
-  function refresh(){
-    if(busy) return;
-    busy=true;
-    var status=document.getElementById('mcx-gp-status');
-    status.textContent='Angel One MCX quote loading…';
-    fetch('/api/market/mcx/quote/GOLDPETAL',{cache:'no-store'})
-      .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;});})
-      .then(function(d){
-        if(!d.available){
-          document.getElementById('mcx-gp-ltp').textContent='--';
-          document.getElementById('mcx-gp-meta').textContent='Contract / quote not currently available';
-          status.textContent=d.reason||'Angel One MCX quote unavailable';
-          return;
-        }
-        document.getElementById('mcx-gp-ltp').textContent='₹'+Number(d.ltp).toLocaleString('en-IN',{maximumFractionDigits:2});
-        document.getElementById('mcx-gp-meta').textContent=d.tradingsymbol+' · Expiry '+d.expiry+' · Tick ₹'+d.tick_size+' · Lot '+d.lot_size;
-        status.textContent='Source: '+d.source+' · Observed '+d.observed_at+' · Exchange timestamp not supplied by this LTP endpoint';
-      })
-      .catch(function(e){status.textContent='MCX data unavailable: '+e.message;})
-      .finally(function(){busy=false;});
+  const root=document.getElementById('mcx-workspace'); if(!root||root.dataset.ready==='1')return; root.dataset.ready='1';
+  const $=id=>document.getElementById(id); let catalog=[],contracts=[],selected=''; let busy=false;
+  const money=v=>Number.isFinite(Number(v))&&v!==null?'₹'+Number(v).toLocaleString('en-IN',{maximumFractionDigits:2}):'--';
+  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  async function api(url){const r=await fetch(url,{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;}
+  function status(message,kind){$('mx-status-text').textContent=message;$('mx-status-dot').className='mx-dot '+(kind||'');}
+  function active(){return catalog.find(x=>x.commodity===selected)||{};}
+  function renderOptions(){const c=active();$('mx-opt-count').textContent=c.options_contracts??0;$('mx-opt-types').textContent=(c.option_types||[]).join(' / ')||'No verified CE/PE';$('mx-options-state').textContent=c.options_available?'Instrument master-ல் CE மற்றும் PE contracts கண்டறியப்பட்டுள்ளன. Live option chain/quotes இன்னும் இந்த workspace-ல் இயக்கப்படவில்லை; verified quote support வரும் வரை recommendation WAIT.':'இந்த commodity-க்கு தற்போதைய master-ல் முழுமையான CE + PE coverage இல்லை. Options unavailable — WAIT.';}
+  async function loadContracts(){
+    if(!selected)return; $('mx-contract').innerHTML='<option value="">Loading…</option>'; $('mx-contract-rows').innerHTML='<tr><td colspan="4">Loading contracts…</td></tr>';
+    try{const d=await api('/api/market/mcx/contracts?commodity='+encodeURIComponent(selected));contracts=d.contracts||[]; $('mx-contract').innerHTML=contracts.length?contracts.map((c,i)=>'<option value="'+i+'">'+esc(c.tradingsymbol||c.symbol||'Contract')+' · '+esc(c.expiry||'Expiry N/A')+'</option>').join(''):'<option value="">No active futures contract</option>';
+      $('mx-contract-rows').innerHTML=contracts.length?contracts.map(c=>'<tr><td>'+esc(c.tradingsymbol||c.symbol||'--')+'</td><td>'+esc(c.expiry||'--')+'</td><td>'+esc(c.lot_size??'--')+'</td><td>'+money(c.tick_size)+'</td></tr>').join(''):'<tr><td colspan="4">No verified active futures contracts</td></tr>';
+      $('mx-contract-count').textContent=contracts.length+' active'; if(contracts.length)await refreshQuote();
+    }catch(e){contracts=[];$('mx-contract').innerHTML='<option value="">Unavailable</option>';$('mx-contract-rows').innerHTML='<tr><td colspan="4">Contract master unavailable: '+esc(e.message)+'</td></tr>';status('Contract data unavailable','warn');}
   }
-  document.getElementById('mcx-gp-analyze').addEventListener('click',function(){
-    var button=this, action=document.getElementById('mcx-gp-analysis-action');
-    var detail=document.getElementById('mcx-gp-analysis-detail');
-    button.disabled=true; action.textContent='Checking candles…'; detail.textContent='Angel One MCX five-minute candle analysis';
-    fetch('/api/market/mcx/analysis/GOLDPETAL',{cache:'no-store'})
-      .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;});})
-      .then(function(d){
-        action.textContent=d.action||'WAIT';
-        var parts=[d.reason||'No reason supplied'];
-        if(d.last_candle_at) parts.push('Candle '+d.last_candle_at);
-        if(d.rsi14!==undefined) parts.push('RSI '+d.rsi14+' · EMA9 '+d.ema9+' · EMA21 '+d.ema21);
-        if(d.eligible){parts.push('Entry ref ₹'+d.entry_reference+' · Stop ₹'+d.stop_reference+' · Target ₹'+d.target_reference);}
-        parts.push('Paper analysis only · execution disabled');
-        detail.textContent=parts.join(' | ');
-      })
-      .catch(function(e){action.textContent='WAIT';detail.textContent='MCX analysis unavailable: '+e.message;})
-      .finally(function(){button.disabled=false;});
-  });
-  document.getElementById('mcx-gp-refresh').addEventListener('click',refresh);
-  refresh();
-  window.setInterval(refresh,15000);
+  async function refreshQuote(){if(!selected)return;try{const d=await api('/api/market/mcx/quote/'+encodeURIComponent(selected));if(!d.available){$('mx-ltp').textContent='--';$('mx-ltp-time').textContent=d.reason||'Quote unavailable';status('Quote unavailable','warn');return;}$('mx-ltp').textContent=money(d.ltp);$('mx-ltp-time').textContent=(d.tradingsymbol||'')+' · '+(d.observed_at||'Observed time unavailable');status('Angel One MCX data received','ok');}catch(e){$('mx-ltp').textContent='--';$('mx-ltp-time').textContent=e.message;status('Quote unavailable','warn');}}
+  async function analyze(){if(!selected||busy)return;busy=true;$('mx-analyze').disabled=true;$('mx-action').textContent='CHECKING';$('mx-analysis-detail').textContent='Fresh candles மற்றும் risk checks சரிபார்க்கப்படுகிறது…';try{const d=await api('/api/market/mcx/analysis/'+encodeURIComponent(selected));$('mx-action').textContent=d.action||'WAIT';$('mx-entry').textContent=d.eligible?money(d.entry_reference):'--';$('mx-stop').textContent=d.eligible?money(d.stop_reference):'--';$('mx-target').textContent=d.eligible?money(d.target_reference):'--';const bits=[d.reason||'No validated setup'];if(d.last_candle_at)bits.push('Candle '+d.last_candle_at);if(d.rsi14!=null)bits.push('RSI '+d.rsi14);if(d.ema9!=null&&d.ema21!=null)bits.push('EMA9 '+d.ema9+' / EMA21 '+d.ema21);bits.push('Paper only');$('mx-analysis-detail').textContent=bits.join(' · ');}catch(e){$('mx-action').textContent='WAIT';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';$('mx-analysis-detail').textContent='Analysis unavailable: '+e.message;}finally{busy=false;$('mx-analyze').disabled=false;}}
+  async function init(){try{const d=await api('/api/market/mcx/catalog');catalog=d.commodities||[];$('mx-commodity').innerHTML=catalog.length?catalog.map(c=>'<option value="'+esc(c.commodity)+'">'+esc(c.commodity.replace(/([A-Z]+)(M|MIC|MINI|PETAL|GUINEA|TEN|100)$/,'$1 $2'))+'</option>').join(''):'<option value="">No MCX contracts found</option>';if(!catalog.length){status('MCX catalogue unavailable','warn');$('mx-options-state').textContent='No verified MCX contracts found in Angel One master.';return;}selected=catalog[0].commodity;$('mx-commodity').value=selected;syncCounts();await loadContracts();renderOptions();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');}catch(e){status('Catalogue unavailable','warn');$('mx-commodity').innerHTML='<option value="">Catalogue unavailable</option>';$('mx-options-state').textContent=e.message;}}
+  function syncCounts(){const c=active();$('mx-fut-count').textContent=c.futures_contracts??0;renderOptions();}
+  $('mx-commodity').addEventListener('change',async e=>{selected=e.target.value;syncCounts();$('mx-action').textContent='WAIT';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';await loadContracts();});
+  $('mx-contract').addEventListener('change',refreshQuote);$('mx-analyze').addEventListener('click',analyze);
+  $('mx-refresh').addEventListener('click',async()=>{await loadContracts();await refreshQuote();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');});
+  root.querySelectorAll('[data-mx-tab]').forEach(b=>b.addEventListener('click',()=>{root.querySelectorAll('[data-mx-tab]').forEach(x=>x.setAttribute('aria-selected',String(x===b)));const opt=b.dataset.mxTab==='options';$('mx-futures-panel').classList.toggle('mx-hidden',opt);$('mx-options-panel').classList.toggle('mx-hidden',!opt);}));
+  init();
 })();
 </script>
 
