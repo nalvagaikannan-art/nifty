@@ -1647,10 +1647,14 @@ function ltRenderAllSignalBoard(results){
 
   root.innerHTML = rows.map(function(r){
     if(r.error){
+      var marketUnavailable = r.status === 502 || r.status === 503;
+      var unavailableMessage = marketUnavailable
+        ? 'Market data unavailable — WAIT. ' + (r.detail || 'Retry when valid market data is available.')
+        : 'Strategy request failed: ' + r.error;
       return '<div class="lt-all-signal-card unavailable">' +
         '<div class="lt-all-signal-symbol">' + ltEsc(r.symbol) + '</div>' +
-        '<div class="lt-all-signal-action">UNAVAILABLE</div>' +
-        '<div class="lt-all-signal-error">Live strategy data unavailable</div>' +
+        '<div class="lt-all-signal-action">WAIT · UNAVAILABLE</div>' +
+        '<div class="lt-all-signal-error">' + ltEsc(unavailableMessage) + '</div>' +
         '</div>';
     }
 
@@ -1734,14 +1738,21 @@ function ltRefreshAllSignals(forceRefresh, refreshToken){
 
     return fetch(url, {cache:'no-store'})
       .then(function(r){
-        if(!r.ok) throw new Error('HTTP '+r.status);
+        if(!r.ok){
+          var err = new Error('HTTP '+r.status);
+          err.status = r.status;
+          return r.json().catch(function(){return {};}).then(function(payload){
+            err.detail = payload && (payload.detail || payload.error);
+            throw err;
+          });
+        }
         return r.json();
       })
       .then(function(data){
         return {symbol:sym, data:data};
       })
       .catch(function(err){
-        return {symbol:sym, error:String(err.message || err)};
+        return {symbol:sym, error:String(err.message || err), status:err.status || null, detail:err.detail || ''};
       });
   });
 

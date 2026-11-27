@@ -259,3 +259,55 @@ def test_market_symbol_universe_fails_back_to_indices_when_broker_unavailable(mo
         "stocks": [],
         "stocks_available": False,
     }
+
+
+def test_dashboard_shows_market_data_unavailable_as_wait_with_backend_detail():
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert "err.status = r.status;" in template
+    assert "err.detail = payload && (payload.detail || payload.error);" in template
+    assert "var marketUnavailable = r.status === 502 || r.status === 503;" in template
+    assert "WAIT · UNAVAILABLE" in template
+    assert "Market data unavailable — WAIT." in template
+    assert "ltEsc(unavailableMessage)" in template
+
+
+def test_market_data_unavailable_uses_service_unavailable_status():
+    import asyncio
+    import json
+    from starlette.requests import Request
+
+    from app.exceptions import MarketDataError
+    from app.main import market_data_error_handler
+
+    request = Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/strategy/recommend/NIFTY",
+        "raw_path": b"/api/strategy/recommend/NIFTY",
+        "query_string": b"",
+        "headers": [],
+        "server": ("testserver", 80),
+        "client": ("testclient", 12345),
+    })
+    response = asyncio.run(
+        market_data_error_handler(
+            request,
+            MarketDataError("No persisted trading-session spot available"),
+        )
+    )
+
+    assert response.status_code == 503
+    payload = json.loads(response.body)
+    assert payload["error"] == "market_data_unavailable"
+    assert "No persisted trading-session spot" in payload["detail"]
+
+
+def test_strategy_and_analysis_market_data_exceptions_are_not_bad_gateway():
+    strategy = (ROOT / "app" / "api" / "routes" / "strategy.py").read_text(encoding="utf-8")
+    analysis = (ROOT / "app" / "api" / "routes" / "analysis.py").read_text(encoding="utf-8")
+
+    assert 'raise HTTPException(503, detail=f"Market data unavailable: {e}")' in strategy
+    assert 'raise HTTPException(503, detail=f"Market data unavailable: {e}")' in analysis

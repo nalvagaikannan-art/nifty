@@ -272,7 +272,7 @@ app.add_middleware(AppAuthMiddleware)
 @app.exception_handler(MarketDataError)
 async def market_data_error_handler(request: Request, exc: MarketDataError):
     logger.error(f"Unhandled MarketDataError on {request.url.path}: {exc}")
-    return JSONResponse(status_code=502, content={"error": "market_data_unavailable", "detail": str(exc)})
+    return JSONResponse(status_code=503, content={"error": "market_data_unavailable", "detail": str(exc)})
 
 
 @app.exception_handler(AIProviderError)

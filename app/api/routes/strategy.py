@@ -1271,7 +1271,7 @@ async def strike_recommendation(
             cache_bust=cache_bust,
         )
     except MarketDataError as e:
-        raise HTTPException(502, detail=f"Market data unavailable: {e}")
+        raise HTTPException(503, detail=f"Market data unavailable: {e}")
 
     dec        = market_data.get("decision", {})
     # Preserve overview-level derived values before lifecycle mutation.
