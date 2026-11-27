@@ -22,6 +22,47 @@
 <!-- ── STATUS BANNERS (Market Closed / Expiry Day) ────── -->
 <div id="status-banners" style="display:flex;flex-direction:column;gap:.5rem;margin-bottom:1rem;"></div>
 
+<section id="mcx-goldpetal-widget" class="card" style="margin:10px 12px;padding:14px;border:1px solid var(--border);">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+    <div><div style="font-weight:800;">MCX · GOLD PETAL FUTURES</div><div id="mcx-gp-meta" style="font-size:.75rem;color:var(--text2);">Angel One MCX data check…</div></div>
+    <div style="text-align:right;"><div id="mcx-gp-ltp" style="font-size:1.45rem;font-weight:800;">--</div><button type="button" id="mcx-gp-refresh" class="btn btn-sm" style="margin-top:5px;">↻ Refresh</button></div>
+  </div>
+  <div id="mcx-gp-status" style="font-size:.76rem;color:var(--text2);margin-top:8px;">Quote status: checking</div>
+  <div style="font-size:.7rem;color:var(--text2);margin-top:5px;">MCX futures data only. No NSE option-chain metrics or BUY/SELL signal is generated in this pilot.</div>
+</section>
+<script>
+(function(){
+  var root=document.getElementById('mcx-goldpetal-widget');
+  if(!root || root.dataset.ready==='1') return;
+  root.dataset.ready='1';
+  var busy=false;
+  function refresh(){
+    if(busy) return;
+    busy=true;
+    var status=document.getElementById('mcx-gp-status');
+    status.textContent='Angel One MCX quote loading…';
+    fetch('/api/market/mcx/quote/GOLDPETAL',{cache:'no-store'})
+      .then(function(r){return r.json().then(function(d){if(!r.ok)throw new Error(d.detail||('HTTP '+r.status));return d;});})
+      .then(function(d){
+        if(!d.available){
+          document.getElementById('mcx-gp-ltp').textContent='--';
+          document.getElementById('mcx-gp-meta').textContent='Contract / quote not currently available';
+          status.textContent=d.reason||'Angel One MCX quote unavailable';
+          return;
+        }
+        document.getElementById('mcx-gp-ltp').textContent='₹'+Number(d.ltp).toLocaleString('en-IN',{maximumFractionDigits:2});
+        document.getElementById('mcx-gp-meta').textContent=d.tradingsymbol+' · Expiry '+d.expiry+' · Tick ₹'+d.tick_size+' · Lot '+d.lot_size;
+        status.textContent='Source: '+d.source+' · Observed '+d.observed_at+' · Exchange timestamp not supplied by this LTP endpoint';
+      })
+      .catch(function(e){status.textContent='MCX data unavailable: '+e.message;})
+      .finally(function(){busy=false;});
+  }
+  document.getElementById('mcx-gp-refresh').addEventListener('click',refresh);
+  refresh();
+  window.setInterval(refresh,15000);
+})();
+</script>
+
 
 <!-- ── FINAL SIGNAL BOX ─────────────────────────────── -->
 <div class="card" id="final-signal-card" style="margin-bottom:1rem;border:2px solid var(--border);">
