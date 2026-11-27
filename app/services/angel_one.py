@@ -80,6 +80,33 @@ def _valid_option_expiries(expiries: List[str]) -> List[str]:
     return valid
 
 
+def _verified_nse_fno_stock_symbols(instruments: List[Dict]) -> List[str]:
+    """Return F&O underlyings that also have one broker-master NSE cash EQ token.
+
+    Derivative-only/test rows are not selectable cash-market underlyings.
+    Requiring the matching cash EQ instrument also mirrors the stock scanner's
+    existing token-resolution requirement without hard-coding test symbol names.
+    """
+    index_names = {"NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"}
+    derivative_names = {
+        str(row.get("name") or "").strip().upper()
+        for row in instruments
+        if isinstance(row, dict)
+        and row.get("exch_seg") == "NFO"
+        and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
+        and str(row.get("name") or "").strip().upper() not in index_names
+    }
+    cash_names = {
+        str(row.get("symbol") or "").strip().upper()[:-3]
+        for row in instruments
+        if isinstance(row, dict)
+        and row.get("exch_seg") == "NSE"
+        and str(row.get("symbol") or "").strip().upper().endswith("-EQ")
+        and str(row.get("token") or "").strip()
+    }
+    return sorted(derivative_names & cash_names)
+
+
 class AngelOneError(Exception):
     pass
 
@@ -518,18 +545,10 @@ class AngelOneSession:
         )
 
     async def get_fno_stock_symbols(self) -> List[str]:
-        """Return the current NSE F&O stock universe from the cached master."""
+        """Return NSE F&O stocks with a matching broker-master cash EQ token."""
         await self.ensure_session()
         await self._ensure_instruments()
-        index_names = set(self.NFO_SYMBOL_MAP.values())
-        return sorted({
-            str(row.get("name") or "").strip().upper()
-            for row in (self._instruments or [])
-            if isinstance(row, dict)
-            and row.get("exch_seg") == "NFO"
-            and row.get("instrumenttype") in ("OPTSTK", "FUTSTK")
-            and str(row.get("name") or "").strip().upper() not in index_names
-        })
+        return _verified_nse_fno_stock_symbols(self._instruments or [])
 
     async def get_fno_stock_market_scan(self, cache_ttl: float = 45.0) -> Dict:
         """Batch-scan NSE F&O cash EQ quotes; no per-symbol LTP fan-out.
