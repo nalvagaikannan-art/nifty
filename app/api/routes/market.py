@@ -80,6 +80,15 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fet
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+@router.get("/mcx/catalog")
+async def get_mcx_catalog(angel: AngelOneSession = Depends(get_angel_session)):
+    """Dynamically discovered MCX commodities and their actual derivative coverage."""
+    try:
+        return await angel.get_mcx_commodity_catalog()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCX catalogue unavailable: {exc}")
+
+
 @router.get("/mcx/contracts")
 async def get_mcx_contracts(
     commodity: str = Query("GOLDPETAL", min_length=2, max_length=30),
@@ -87,8 +96,8 @@ async def get_mcx_contracts(
 ):
     """Verified Angel One MCX FUTCOM contracts; isolated from NSE/BSE indices."""
     key = commodity.strip().upper()
-    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
-        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
+    if not key.isalnum() or not 2 <= len(key) <= 24:
+        raise HTTPException(status_code=400, detail="Invalid MCX commodity name")
     try:
         contracts = await angel.get_mcx_futures_contracts(key)
         return {"exchange": "MCX", "commodity": key, "available": bool(contracts), "contracts": contracts}
@@ -103,8 +112,8 @@ async def get_mcx_quote(
 ):
     """Angel One MCX FUTCOM LTP. No NSE, Yahoo or Zerodha substitution."""
     key = commodity.strip().upper()
-    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
-        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
+    if not key.isalnum() or not 2 <= len(key) <= 24:
+        raise HTTPException(status_code=400, detail="Invalid MCX commodity name")
     try:
         quote = await angel.get_mcx_futures_ltp(key)
         if not quote:
@@ -123,8 +132,8 @@ async def get_mcx_candles(
 ):
     """Historical candles from the resolved MCX FUTCOM contract only."""
     key = commodity.strip().upper()
-    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
-        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
+    if not key.isalnum() or not 2 <= len(key) <= 24:
+        raise HTTPException(status_code=400, detail="Invalid MCX commodity name")
     iv = interval.upper()
     if iv not in VALID_INTERVALS:
         raise HTTPException(status_code=400, detail=f"Unsupported interval: {interval}")
@@ -142,8 +151,8 @@ async def get_mcx_analysis(
 ):
     """Conservative MCX futures-only technical analysis; never NSE options logic."""
     key = commodity.strip().upper()
-    if key not in {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM", "GOLDPETAL"}:
-        raise HTTPException(status_code=400, detail="Unsupported MCX commodity")
+    if not key.isalnum() or not 2 <= len(key) <= 24:
+        raise HTTPException(status_code=400, detail="Invalid MCX commodity name")
     try:
         from app.services.mcx_analysis import analyze_mcx_futures
         contract_rows = await angel.get_mcx_futures_contracts(key)
