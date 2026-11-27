@@ -158,3 +158,18 @@ def test_mcx_terminal_ui_labels_separate_futures_signals_from_options_catalogue(
 
     assert 'id="mx-action" data-action="wait"' in template
     assert "dataset.action=" in template
+
+def test_dashboard_system_health_strip_uses_backend_status_and_labels_check_time():
+    """Status badges are backend-derived; client time is only the check timestamp."""
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert 'id="lt-status-ai"' in template
+    assert 'id="lt-status-angel"' in template
+    assert 'id="lt-status-market"' in template
+    assert 'id="lt-status-checked"' in template
+    assert "fetch('/api/dashboard/status')" in template
+    assert "s.ai_provider_configured" in template
+    assert "s.angel_one_connected" in template
+    assert "s.market_open" in template
+    assert "Status check failed" in template
+    assert "Backend status check time, not quote freshness" in template
