@@ -189,3 +189,17 @@ def test_dashboard_signal_history_panel_uses_selected_symbol_persisted_api():
     assert "slice(0,2)" in template
     assert "ltLoadSignalHistory();" in template
     assert "This is history, not a live entry instruction." in template
+
+
+def test_dashboard_watchlist_uses_only_backend_verified_symbols_and_existing_symbol_flow():
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert 'id="lt-watchlist-items"' in template
+    assert "fetch('/api/market/symbols')" in template
+    assert "Array.isArray(u.indices)" in template
+    assert "Array.isArray(u.stocks)" in template
+    assert "u.stocks_available" in template
+    assert "chip.addEventListener('click',function(){ltSetSym(null,sym);});" in template
+    assert "ltUpdateWatchlistSelection();" in template
+    assert "does not imply a live quote" in template
+    assert "Verified symbols unavailable" in template
