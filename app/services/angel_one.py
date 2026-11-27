@@ -786,6 +786,46 @@ class AngelOneSession:
                      if item["tradingsymbol"] == self.MCX_PILOT_SYMBOLS[key]}
         return sorted(found.values(), key=lambda item: (item["expiry"], item["tradingsymbol"]))
 
+    async def get_mcx_commodity_catalog(self) -> Dict:
+        """Discover exact MCX commodity names and available FUTCOM/OPTFUT rows."""
+        await self.ensure_session()
+        await self._ensure_instruments()
+        today = now_ist().date()
+        catalog = {}
+        for row in (self._instruments or []):
+            if not isinstance(row, dict) or row.get("exch_seg") != "MCX":
+                continue
+            kind = str(row.get("instrumenttype") or "").upper()
+            if kind not in ("FUTCOM", "OPTFUT"):
+                continue
+            name = str(row.get("name") or "").strip().upper()
+            expiry = self._mcx_expiry(row)
+            token = str(row.get("token") or "").strip()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not name or not expiry or expiry < today or not token or not symbol:
+                continue
+            item = catalog.setdefault(name, {
+                "commodity": name, "exchange": "MCX",
+                "futures_contracts": 0, "options_contracts": 0,
+                "option_types": set(), "expiries": set(),
+            })
+            if kind == "FUTCOM" and symbol.endswith("FUT"):
+                item["futures_contracts"] += 1
+            elif kind == "OPTFUT" and (symbol.endswith("CE") or symbol.endswith("PE")):
+                item["options_contracts"] += 1
+                item["option_types"].add("CE" if symbol.endswith("CE") else "PE")
+            item["expiries"].add(expiry.isoformat())
+        result = []
+        for name, item in sorted(catalog.items()):
+            if not item["futures_contracts"] and not item["options_contracts"]:
+                continue
+            item["option_types"] = sorted(item["option_types"])
+            item["expiries"] = sorted(item["expiries"])
+            item["options_available"] = item["options_contracts"] > 0 and len(item["option_types"]) == 2
+            result.append(item)
+        return {"exchange": "MCX", "source": "angel_one_instrument_master",
+                "available": bool(result), "commodities": result}
+
     async def get_mcx_futures_ltp(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
         """Fetch Angel One MCX LTP with a short per-contract cache."""
         info = await self._resolve_mcx_futures_token(commodity)
