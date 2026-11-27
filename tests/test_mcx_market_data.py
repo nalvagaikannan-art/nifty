@@ -18,7 +18,7 @@ def _row(name, symbol, token, exchange, instrument_type, expiry, tick="100.00000
     }
 
 
-def test_instrument_filter_keeps_only_mcx_futcom_rows():
+def test_instrument_filter_keeps_mcx_futures_and_options_rows():
     rows = [
         _row("GOLDPETAL", "GOLDPETAL31DEC26FUT", "578631", "MCX", "FUTCOM", "31DEC2026"),
         _row("GOLD", "GOLD31DEC26FUT", "111", "MCX", "FUTCOM", "31DEC2026"),
@@ -31,7 +31,7 @@ def test_instrument_filter_keeps_only_mcx_futcom_rows():
     assert "578631" in {row["token"] for row in filtered}
     assert "111" in {row["token"] for row in filtered}
     assert "222" in {row["token"] for row in filtered}
-    assert "333" not in {row["token"] for row in filtered}
+    assert "333" in {row["token"] for row in filtered}
 
 
 @pytest.mark.asyncio
@@ -220,8 +220,8 @@ async def test_mcx_catalog_discovers_mini_micro_and_option_coverage(monkeypatch)
         _row("GOLDM", "GOLDM31DEC26FUT", "gm1", "MCX", "FUTCOM", future_expiry),
         _row("SILVERMIC", "SILVERMIC31DEC26FUT", "sm1", "MCX", "FUTCOM", future_expiry),
         _row("COPPER", "COPPER31DEC26FUT", "c1", "MCX", "FUTCOM", future_expiry),
-        _row("COPPER", "COPPER31DECCALL", "cce", "MCX", "OPTFUT", future_expiry),
-        _row("COPPER", "COPPER31DECPUT", "cpe", "MCX", "OPTFUT", future_expiry),
+        _row("COPPER", "COPPER31DEC26CE", "cce", "MCX", "OPTFUT", future_expiry),
+        _row("COPPER", "COPPER31DEC26PE", "cpe", "MCX", "OPTFUT", future_expiry),
         _row("NIFTY", "NIFTY31DEC26FUT", "n1", "NFO", "FUTIDX", future_expiry),
     ]
 
