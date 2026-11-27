@@ -10,6 +10,7 @@ from app.database import engine, Base
 from app.db_lifecycle import initialize_database_schema
 from app.api.routes import dashboard, market, options, analysis, angel, positions, strategy, market_intel, accuracy
 from app.api.routes import pro as pro_routes  # NIFTY-PRO
+from app.api.routes import mcx_diagnostic as mcx_diagnostic_routes  # TEMP QA ONLY
 import app.services.iv_history  # noqa: F401 — registers pro_iv_history table
 import app.services.order_executor  # noqa: F401 — registers pro_orders table
 from app.api.routes import settings as settings_routes
@@ -303,6 +304,7 @@ app.include_router(market_intel.router,    prefix="/api/market-intel", tags=["Ma
 app.include_router(paper_trade_routes.router, prefix="/api/paper-trade", tags=["Paper Trading"])
 app.include_router(accuracy.router,        prefix="/api/accuracy",   tags=["Accuracy"])
 app.include_router(pro_routes.router,      prefix="/api/pro",        tags=["Pro (sell signals / orders)"])
+app.include_router(mcx_diagnostic_routes.router, prefix="/api/diagnostic", tags=["Temporary QA diagnostics"])
 
 # Public Render health probe; no application data is exposed.
 @app.get("/healthz")
