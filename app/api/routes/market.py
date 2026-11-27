@@ -80,6 +80,61 @@ async def get_option_chain(symbol: str, expiry: Optional[str] = Query(None), fet
     except MarketDataError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
+@router.get("/mcx/contracts")
+async def get_mcx_contracts(
+    commodity: str = Query("GOLDPETAL", min_length=2, max_length=30),
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Verified Angel One MCX FUTCOM contracts; isolated from NSE/BSE indices."""
+    key = commodity.strip().upper()
+    if key != "GOLDPETAL":
+        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    try:
+        contracts = await angel.get_mcx_futures_contracts(key)
+        return {"exchange": "MCX", "commodity": key, "available": bool(contracts), "contracts": contracts}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCX contract master unavailable: {exc}")
+
+
+@router.get("/mcx/quote/{commodity}")
+async def get_mcx_quote(
+    commodity: str,
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Angel One MCX FUTCOM LTP. No NSE, Yahoo or Zerodha substitution."""
+    key = commodity.strip().upper()
+    if key != "GOLDPETAL":
+        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    try:
+        quote = await angel.get_mcx_futures_ltp(key)
+        if not quote:
+            return {"available": False, "exchange": "MCX", "commodity": key, "reason": "Angel One MCX quote unavailable"}
+        return {"available": True, **quote}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCX quote unavailable: {exc}")
+
+
+@router.get("/mcx/candles/{commodity}")
+async def get_mcx_candles(
+    commodity: str,
+    interval: str = Query("FIVE_MINUTE"),
+    bars: int = Query(100, ge=10, le=300),
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Historical candles from the resolved MCX FUTCOM contract only."""
+    key = commodity.strip().upper()
+    if key != "GOLDPETAL":
+        raise HTTPException(status_code=400, detail="Only the GOLDPETAL MCX pilot is enabled")
+    iv = interval.upper()
+    if iv not in VALID_INTERVALS:
+        raise HTTPException(status_code=400, detail=f"Unsupported interval: {interval}")
+    try:
+        candles = await angel.get_mcx_futures_candle_data(key, iv)
+        return {"available": bool(candles), "exchange": "MCX", "commodity": key, "interval": iv, "candles": candles[-bars:]}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"MCX candles unavailable: {exc}")
+
+
 @router.get("/vix", response_model=MarketVixResponse)
 async def get_vix(fetcher: DataFetcher = Depends(get_fetcher)):
     return {"vix": await fetcher.get_volatility()}
