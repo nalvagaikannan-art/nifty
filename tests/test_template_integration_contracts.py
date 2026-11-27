@@ -34,14 +34,17 @@ def test_primary_page_api_contracts_are_registered():
         if isinstance(getattr(route, "path", None), str)
     }
 
-    # Dashboard + Analysis + MCX workspace integrations.
+    # Active Dashboard + Analysis + MCX workspace calls (not comment-only URLs).
     required_paths = {
         "/api/dashboard/status",
         "/api/market/symbols",
+        "/api/market/universe",
+        "/api/market/fno-stock-scan",
         "/api/market/mcx/catalog",
         "/api/market/mcx/contracts",
         "/api/market/mcx/quote/{commodity}",
         "/api/market/mcx/analysis/{commodity}",
+        "/api/market/mcx/candles/{commodity}",
         "/api/angel/live-feed",
         "/api/portfolio/positions",
         "/api/paper-trade/open",
