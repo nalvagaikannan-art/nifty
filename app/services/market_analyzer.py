@@ -25,6 +25,7 @@ from app.utils.helpers import safe_float, expiry_filter
 from app.utils.cache import async_cache
 from app.utils.cache import _singleflight_scope
 from app.config import settings
+from app.exceptions import MarketDataError
 from app.utils.helpers import now_ist as current_ist
 from app.utils.helpers import now_utc_naive, is_market_hours_ist
 
@@ -481,7 +482,7 @@ class MarketAnalyzer:
             )
 
             if not spot:
-                raise RuntimeError(
+                raise MarketDataError(
                     f"No valid persisted trading-session spot available "
                     f"for closed-market fallback: {symbol}"
                 )
