@@ -180,7 +180,10 @@
   display: inline-block;
   animation: ltpulse 1.8s infinite;
 }
-.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; flex-wrap:wrap; padding:6px 9px; border:1px solid var(--lt-border2); border-radius:10px; background:var(--lt-card); }
+.lt-status-checked { display:inline-flex; align-items:center; gap:5px; color:var(--lt-text3); font-size:10px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.lt-status-checked::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--lt-text3); }
+@media(max-width:640px){ .lt-header-right{gap:6px;flex-wrap:wrap;justify-content:flex-end}.lt-status-group{gap:7px;padding:5px 7px}.lt-live-dot{font-size:10px}.lt-status-checked{font-size:9px} }
 .lt-live-dot.unavail { color: var(--lt-red); }
 .lt-live-dot.unavail::before { background: var(--lt-red); animation: none; opacity: .6; }
 @keyframes ltpulse {
@@ -998,6 +1001,7 @@
         <span class="lt-live-dot unavail" id="lt-status-angel">● Angel One</span>
         <span class="lt-live-dot unavail" id="lt-status-market">● Market</span>
       </span>
+      <span class="lt-status-checked" id="lt-status-checked" title="Backend status check time, not quote freshness">Status check --:--:--</span>
       <span class="lt-time" id="lt-clock">--:-- --</span>
       <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh(true)">↻ Refresh</button>
     </div>
@@ -1818,12 +1822,16 @@ function ltUpdateStatus(){
       var mkt = document.getElementById('lt-status-market');
       mkt.className = 'lt-live-dot ' + (s.market_open ? 'live' : 'unavail');
       mkt.textContent = s.market_open ? '● Market Open' : '● Market Closed';
+      var checked = document.getElementById('lt-status-checked');
+      if(checked) checked.textContent = 'Status check ' + new Date().toLocaleTimeString('en-IN',{hour12:false});
     })
     .catch(function(){
       ['lt-status-ai','lt-status-angel','lt-status-market'].forEach(function(id){
         var el = document.getElementById(id);
         el.className = 'lt-live-dot unavail';
       });
+      var checked = document.getElementById('lt-status-checked');
+      if(checked) checked.textContent = 'Status check failed';
     });
 }
 
