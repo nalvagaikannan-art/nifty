@@ -62,7 +62,6 @@
   </div>
   <div class="mx-toolbar">
     <label><span class="mx-label">Commodity</span><select class="mx-select" id="mx-commodity"><option value="">Loading catalogue…</option></select></label>
-    <label><span class="mx-label">Contract / Expiry</span><select class="mx-select" id="mx-contract"><option value="">Select commodity</option></select></label>
     <div class="mx-tabs" role="tablist" aria-label="MCX instrument type">
       <button class="mx-tab" type="button" role="tab" aria-selected="true" data-mx-tab="futures">Futures</button>
       <button class="mx-tab" type="button" role="tab" aria-selected="false" data-mx-tab="options">Options</button>
@@ -108,8 +107,8 @@
   function active(){return catalog.find(x=>x.commodity===selected)||{};}
   function renderOptions(){const c=active();$('mx-opt-count').textContent=c.options_contracts??0;$('mx-opt-types').textContent=(c.option_types||[]).join(' / ')||'No verified CE/PE';$('mx-options-state').textContent=c.options_available?'Instrument master-ல் CE மற்றும் PE contracts கண்டறியப்பட்டுள்ளன. Live option chain/quotes இன்னும் இந்த workspace-ல் இயக்கப்படவில்லை; verified quote support வரும் வரை recommendation WAIT.':'இந்த commodity-க்கு தற்போதைய master-ல் முழுமையான CE + PE coverage இல்லை. Options unavailable — WAIT.';}
   async function loadContracts(){
-    if(!selected)return; $('mx-contract').innerHTML='<option value="">Loading…</option>'; $('mx-contract-rows').innerHTML='<tr><td colspan="4">Loading contracts…</td></tr>';
-    try{const d=await api('/api/market/mcx/contracts?commodity='+encodeURIComponent(selected));contracts=d.contracts||[]; $('mx-contract').innerHTML=contracts.length?contracts.map((c,i)=>'<option value="'+i+'">'+esc(c.tradingsymbol||c.symbol||'Contract')+' · '+esc(c.expiry||'Expiry N/A')+'</option>').join(''):'<option value="">No active futures contract</option>';
+    if(!selected)return; $('mx-contract-rows').innerHTML='<tr><td colspan="4">Loading contracts…</td></tr>';
+    try{const d=await api('/api/market/mcx/contracts?commodity='+encodeURIComponent(selected));contracts=d.contracts||[];
       $('mx-contract-rows').innerHTML=contracts.length?contracts.map(c=>'<tr><td>'+esc(c.tradingsymbol||c.symbol||'--')+'</td><td>'+esc(c.expiry||'--')+'</td><td>'+esc(c.lot_size??'--')+'</td><td>'+money(c.tick_size)+'</td></tr>').join(''):'<tr><td colspan="4">No verified active futures contracts</td></tr>';
       $('mx-contract-count').textContent=contracts.length+' active'; if(contracts.length)await refreshQuote();
     }catch(e){contracts=[];$('mx-contract').innerHTML='<option value="">Unavailable</option>';$('mx-contract-rows').innerHTML='<tr><td colspan="4">Contract master unavailable: '+esc(e.message)+'</td></tr>';status('Contract data unavailable','warn');}
@@ -119,7 +118,7 @@
   async function init(){try{const d=await api('/api/market/mcx/catalog');catalog=d.commodities||[];$('mx-commodity').innerHTML=catalog.length?catalog.map(c=>'<option value="'+esc(c.commodity)+'">'+esc(c.commodity.replace(/([A-Z]+)(M|MIC|MINI|PETAL|GUINEA|TEN|100)$/,'$1 $2'))+'</option>').join(''):'<option value="">No MCX contracts found</option>';if(!catalog.length){status('MCX catalogue unavailable','warn');$('mx-options-state').textContent='No verified MCX contracts found in Angel One master.';return;}selected=catalog[0].commodity;$('mx-commodity').value=selected;syncCounts();await loadContracts();renderOptions();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');}catch(e){status('Catalogue unavailable','warn');$('mx-commodity').innerHTML='<option value="">Catalogue unavailable</option>';$('mx-options-state').textContent=e.message;}}
   function syncCounts(){const c=active();$('mx-fut-count').textContent=c.futures_contracts??0;renderOptions();}
   $('mx-commodity').addEventListener('change',async e=>{selected=e.target.value;syncCounts();$('mx-action').textContent='WAIT';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';await loadContracts();});
-  $('mx-contract').addEventListener('change',refreshQuote);$('mx-analyze').addEventListener('click',analyze);
+  $('mx-analyze').addEventListener('click',analyze);
   $('mx-refresh').addEventListener('click',async()=>{await loadContracts();await refreshQuote();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');});
   root.querySelectorAll('[data-mx-tab]').forEach(b=>b.addEventListener('click',()=>{root.querySelectorAll('[data-mx-tab]').forEach(x=>x.setAttribute('aria-selected',String(x===b)));const opt=b.dataset.mxTab==='options';$('mx-futures-panel').classList.toggle('mx-hidden',opt);$('mx-options-panel').classList.toggle('mx-hidden',!opt);}));
   init();
