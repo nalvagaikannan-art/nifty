@@ -46,3 +46,23 @@ def test_mcx_engine_emits_only_futures_actions_and_never_executes():
     assert result["execution_enabled"] is False
     assert result["exchange"] == "MCX"
     assert "option_chain" not in result
+
+def test_mcx_engine_can_emit_a_confirmed_directional_futures_candidate():
+    now = datetime.now(IST)
+    rows = []
+    price = 1000.0
+    for i in range(40):
+        previous = price
+        price += (1.5, 0.5, -1.0)[i % 3]
+        rows.append({
+            "timestamp": (now - timedelta(minutes=5 * (39 - i))).isoformat(),
+            "open": previous, "high": max(previous, price) + 0.5,
+            "low": min(previous, price) - 0.5, "close": price, "volume": 100,
+        })
+    result = analyze_mcx_futures(rows, CONTRACT, now=now)
+    assert result["action"] == "LONG_FUTURES"
+    assert result["eligible"] is True
+    assert result["entry_reference"] > 0
+    assert result["stop_reference"] < result["entry_reference"]
+    assert result["target_reference"] > result["entry_reference"]
+    assert result["execution_enabled"] is False
