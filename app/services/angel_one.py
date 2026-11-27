@@ -699,7 +699,16 @@ class AngelOneSession:
         return {"exchange": "NSE", "token": str(row["token"]).strip(),
                 "tradingsymbol": target, "name": sym}
 
-    MCX_STANDARD_COMMODITIES = {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM"}
+    # Exact underlying names are discovered from the daily Angel One MCX
+    # instrument master. These aliases are conveniences only; Mini/Micro
+    # contracts remain distinct names (GOLDM != GOLD, SILVERM != SILVER).
+    MCX_STANDARD_COMMODITIES = {
+        "CRUDEOIL", "CRUDEOILM", "NATURALGAS", "NATURALGASMINI",
+        "GOLD", "GOLDM", "GOLDPETAL", "GOLDGUINEA", "GOLDTEN",
+        "SILVER", "SILVERM", "SILVERMIC", "SILVER100",
+        "COPPER", "NICKEL", "ALUMINIUM", "ALUMINI", "ZINC",
+        "LEAD", "LEADMINI",
+    }
     MCX_PILOT_SYMBOLS = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}
 
     @staticmethod
@@ -721,7 +730,7 @@ class AngelOneSession:
         if key == "GOLDPETAL":
             if symbol != cls.MCX_PILOT_SYMBOLS[key]:
                 return None
-        elif key not in cls.MCX_STANDARD_COMMODITIES or name != key:
+        elif name != key or not re.fullmatch(r"[A-Z0-9]+", key):
             return None
         expiry = cls._mcx_expiry(row)
         token = str(row.get("token") or "").strip()
@@ -741,7 +750,7 @@ class AngelOneSession:
     async def _resolve_mcx_futures_token(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
         """Resolve an exact-name MCX FUTCOM contract; GOLDPETAL remains expiry-pinned."""
         key = str(commodity or "").strip().upper()
-        if key not in self.MCX_STANDARD_COMMODITIES and key not in self.MCX_PILOT_SYMBOLS:
+        if not re.fullmatch(r"[A-Z0-9]{2,24}", key):
             return None
         await self.ensure_session()
         await self._ensure_instruments()
@@ -761,7 +770,7 @@ class AngelOneSession:
     async def get_mcx_futures_contracts(self, commodity: str = "GOLDPETAL") -> List[Dict]:
         """Return verified active MCX FUTCOM contracts for an exact commodity."""
         key = str(commodity or "").strip().upper()
-        if key not in self.MCX_STANDARD_COMMODITIES and key not in self.MCX_PILOT_SYMBOLS:
+        if not re.fullmatch(r"[A-Z0-9]{2,24}", key):
             return []
         await self.ensure_session()
         await self._ensure_instruments()
@@ -1179,7 +1188,7 @@ class AngelOneSession:
     # Persistent cache contains only index derivatives plus the current
     # NSE F&O stock universe (OPTSTK/FUTSTK) and their NSE cash EQ rows.
     # The schema version invalidates older index-only caches automatically.
-    _INSTRUMENT_CACHE_SCHEMA_VERSION = 3
+    _INSTRUMENT_CACHE_SCHEMA_VERSION = 4
     _INSTRUMENT_CACHE_FILE = (
         Path(__file__).resolve().parents[2]
         / "data"
@@ -1230,19 +1239,20 @@ class AngelOneSession:
             and str(row.get("name") or "").strip().upper() in stock_names
             and row.get("token")
         ]
-        # Retain only MCX FUTCOM rows in the compact cache; never cache the
-        # full MCX master or unrelated commodity contracts.
-        mcx_futures_rows = [
+        # Retain only MCX commodity futures and options in the compact cache.
+        # Angel One identifies commodity options as OPTFUT; keep the exact
+        # master rows so Mini/Micro variants can be discovered by name.
+        mcx_derivative_rows = [
             row for row in rows
             if isinstance(row, dict)
             and row.get("exch_seg") == "MCX"
-            and row.get("instrumenttype") == "FUTCOM"
+            and row.get("instrumenttype") in ("FUTCOM", "OPTFUT")
             and row.get("name")
             and row.get("expiry")
             and row.get("token")
             and row.get("symbol")
         ]
-        return index_rows + stock_derivative_rows + stock_cash_rows + mcx_futures_rows
+        return index_rows + stock_derivative_rows + stock_cash_rows + mcx_derivative_rows
 
     async def _ensure_instruments(self) -> None:
         """
@@ -1346,7 +1356,7 @@ class AngelOneSession:
             if not loaded:
                 raise AngelOneError(
                     "Instrument master download returned no supported "
-                    "index or NSE F&O stock rows after filtering"
+                    "index, NSE F&O stock, or MCX derivative rows after filtering"
                 )
 
             self._instruments = loaded
@@ -1417,7 +1427,7 @@ class AngelOneSession:
                     )
                     or (
                         row.get("exch_seg") == "MCX"
-                        and row.get("instrumenttype") == "FUTCOM"
+                        and row.get("instrumenttype") in ("FUTCOM", "OPTFUT")
                         and row.get("expiry")
                         and row.get("symbol")
                     )
