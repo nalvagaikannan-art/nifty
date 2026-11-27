@@ -456,7 +456,7 @@ async def build_ai_analysis(
                 cache_bust=cache_bust,
             )
         except MarketDataError as e:
-            raise HTTPException(502, detail=f"Market data unavailable: {e}")
+            raise HTTPException(503, detail=f"Market data unavailable: {e}")
 
     try:
         if ai_unavailable:
