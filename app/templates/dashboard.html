@@ -1562,7 +1562,13 @@ function ltRenderAllSignalBoard(results){
   var rows = [];
   results.forEach(function(item){
     if(item.error){
-      rows.push({symbol:item.symbol, error:true, message:item.error});
+      rows.push({
+        symbol:item.symbol,
+        error:true,
+        message:item.message || String(item.error),
+        status:item.status || null,
+        detail:item.detail || ''
+      });
       return;
     }
 
@@ -1649,8 +1655,11 @@ function ltRenderAllSignalBoard(results){
     if(r.error){
       var marketUnavailable = r.status === 502 || r.status === 503;
       var unavailableMessage = marketUnavailable
-        ? 'Market data unavailable — WAIT. ' + (r.detail || 'Retry when valid market data is available.')
-        : 'Strategy request failed: ' + r.error;
+        ? 'Market data unavailable — WAIT' +
+          (r.detail ? ': ' + r.detail : '. Retry when valid market data is available.')
+        : 'Strategy request failed' +
+          (r.status ? ' (HTTP ' + r.status + ')' : '') +
+          ': ' + (r.detail || r.message || 'Unknown request error');
       return '<div class="lt-all-signal-card unavailable">' +
         '<div class="lt-all-signal-symbol">' + ltEsc(r.symbol) + '</div>' +
         '<div class="lt-all-signal-action">WAIT · UNAVAILABLE</div>' +
@@ -1940,7 +1949,17 @@ function ltLoadSignalHistory(){
   if(title) title.textContent = sym;
   root.innerHTML = '<div class="lt-history-empty">Loading ' + ltEsc(sym) + ' history…</div>';
   fetch('/api/strategy/history/' + encodeURIComponent(sym), {cache:'no-store'})
-    .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(r){
+      if(!r.ok){
+        var err = new Error('HTTP ' + r.status);
+        err.status = r.status;
+        return r.json().catch(function(){return {};}).then(function(payload){
+          err.detail = payload && (payload.detail || payload.error);
+          throw err;
+        });
+      }
+      return r.json();
+    })
     .then(function(payload){
       if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
       var rows = Array.isArray(payload.history) ? payload.history.slice(0,5) : [];
@@ -1958,9 +1977,12 @@ function ltLoadSignalHistory(){
         return '<div class="lt-history-row"><div><div class="lt-history-main">' + ltEsc(action + reversal) + '</div><div class="lt-history-meta">' + ltEsc(detail) + '</div></div><div class="lt-history-score">Score ' + ltEsc(item.score == null ? '--' : item.score) + '<br>Conf. ' + ltEsc(item.confidence == null ? '--' : item.confidence) + '</div></div>';
       }).join('');
     })
-    .catch(function(){
+    .catch(function(err){
       if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
-      root.innerHTML = '<div class="lt-history-empty">Signal history unavailable. Retry when backend storage is ready.</div>';
+      var reason = (err.status ? 'HTTP ' + err.status : 'Request failed') +
+        (err.detail ? ': ' + err.detail : '');
+      root.innerHTML = '<div class="lt-history-empty">Signal history unavailable — ' +
+        ltEsc(reason) + '. Retry when backend storage is ready.</div>';
     });
 }
 
