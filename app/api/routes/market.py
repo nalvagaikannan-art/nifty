@@ -123,6 +123,25 @@ async def get_mcx_quote(
         raise HTTPException(status_code=502, detail=f"MCX quote unavailable: {exc}")
 
 
+@router.get("/mcx/option-quote-probe/{commodity}")
+async def probe_mcx_option_quote(
+    commodity: str,
+    angel: AngelOneSession = Depends(get_angel_session),
+):
+    """Temporary authenticated QA-only MCX OPTFUT quote probe; one CE/PE pair max."""
+    key = commodity.strip().upper()
+    if not key.isalnum() or key not in {
+        "COPPER", "CRUDEOIL", "CRUDEOILM", "GOLD", "GOLDM",
+        "NATGASMINI", "NATURALGAS", "SILVER", "SILVERM", "ZINC",
+    }:
+        raise HTTPException(status_code=400, detail="Unsupported MCX option commodity")
+    try:
+        return await angel.probe_mcx_optfut_quotes(key)
+    except Exception as exc:
+        # Do not expose broker internals, credentials, or response bodies.
+        raise HTTPException(status_code=502, detail="MCX OPTFUT quote probe failed") from exc
+
+
 @router.get("/mcx/candles/{commodity}")
 async def get_mcx_candles(
     commodity: str,
