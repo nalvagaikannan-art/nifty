@@ -662,3 +662,34 @@ async def test_missing_spot_market_open_fails_closed_in_overview(monkeypatch):
     assert result["decision"]["market_open"] is False
     assert result["decision"]["hard_gated"] is True
     assert result["decision"]["preferred_side"] == "NONE"
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"])
+async def test_closed_market_missing_spot_raises_market_data_error_without_live_fetch(symbol):
+    """Missing closed-session history is a typed unavailable condition, not
+    an unhandled RuntimeError and never a reason to synthesize a spot/decision."""
+    from app.exceptions import MarketDataError
+
+    fetcher = _mock_fetcher(market_open=False)
+    analyzer = MarketAnalyzer(fetcher=fetcher)
+    missing_spot = AsyncMock(return_value=None)
+
+    with (
+        patch("app.services.market_analyzer.is_market_hours_ist", return_value=False),
+        patch(
+            "app.services.market_analyzer.history_service.get_latest_market_snapshot_before",
+            new=missing_spot,
+        ),
+    ):
+        with pytest.raises(MarketDataError, match=f"closed-market fallback: {symbol}"):
+            await analyzer.get_full_market_overview(
+                symbol,
+                cache_bust=f"closed-missing-spot-{symbol.lower()}-regression",
+            )
+
+    missing_spot.assert_awaited_once()
+    assert missing_spot.await_args.args[0] == symbol
+    fetcher.get_spot.assert_not_awaited()
+    fetcher.get_option_chain.assert_not_awaited()
