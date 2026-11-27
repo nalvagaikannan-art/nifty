@@ -241,6 +241,13 @@
   color: var(--lt-green);
 }
 
+/* Backend-verified symbol watchlist; selection reuses the dashboard's normal data flow. */
+.lt-watchlist{margin:-3px 0 12px;padding:10px 12px;background:var(--lt-card);border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow)}
+.lt-watchlist-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;font-weight:800}
+.lt-watchlist-items{display:flex;gap:6px;overflow-x:auto;padding:2px 1px 5px;scrollbar-width:thin}
+.lt-watch-chip{flex:0 0 auto;border:1px solid var(--lt-border2);border-radius:999px;background:var(--lt-gray-bg);color:var(--lt-text2);padding:6px 10px;font-size:11px;font-weight:800;cursor:pointer}
+.lt-watch-chip.active{border-color:var(--lt-green);background:var(--lt-green-bg);color:var(--lt-green)}
+.lt-watch-note{font-size:10px;color:var(--lt-text3);margin-top:4px}
 /* ── Card base ── */
 .lt-card {
   background: var(--lt-card);
@@ -1030,6 +1037,14 @@
       </select>
     </div>
 
+    <section id="lt-watchlist" class="lt-watchlist" aria-label="Broker verified NSE watchlist">
+      <div class="lt-watchlist-head"><span>Watchlist · NSE F&amp;O</span><span id="lt-watch-count">Loading symbols…</span></div>
+      <div id="lt-watchlist-items" class="lt-watchlist-items" role="group" aria-label="Select dashboard symbol">
+        <span class="lt-watch-note">Broker-verified symbol list loading…</span>
+      </div>
+      <div class="lt-watch-note" id="lt-watch-note">Selection loads the existing dashboard analysis; this list does not imply a live quote.</div>
+    </section>
+
     <section id="lt-market-universe" aria-label="Unified market coverage" style="margin:0 0 12px;padding:12px 14px;background:#fff;border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow);">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
         <strong style="color:var(--lt-text);">சந்தை விரிவு · NSE + MCX</strong>
@@ -1806,10 +1821,50 @@ ltClock();
 fetch('/api/market/symbols').then(function(r){return r.json();}).then(function(u){
   var sel=document.getElementById('lt-stock-select');
   if(!sel || !u || !u.stocks_available || !Array.isArray(u.stocks)) return;
-  u.stocks.forEach(function(sym){
-    var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
+  var indices=Array.isArray(u.indices)?u.indices:[];
+  var stocks=Array.isArray(u.stocks)?u.stocks:[];
+  if(sel && u.stocks_available){
+    stocks.forEach(function(sym){
+      var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
+    });
+  }
+  var list=document.getElementById('lt-watchlist-items');
+  var count=document.getElementById('lt-watch-count');
+  if(list){
+    list.textContent='';
+    if(!indices.length && !stocks.length){
+      list.textContent='Verified symbols unavailable';
+      if(count) count.textContent='Unavailable';
+    }else{
+      indices.concat(stocks).forEach(function(raw){
+        var sym=String(raw||'').trim().toUpperCase();
+        if(!sym) return;
+        var chip=document.createElement('button');
+        chip.type='button'; chip.className='lt-watch-chip';
+        chip.dataset.watchSym=sym; chip.textContent=sym;
+        chip.setAttribute('aria-pressed',sym===ltSym?'true':'false');
+        chip.addEventListener('click',function(){ltSetSym(null,sym);});
+        list.appendChild(chip);
+      });
+      if(count) count.textContent=(indices.length+stocks.length)+' verified symbols';
+      ltUpdateWatchlistSelection();
+    }
+  }
+}).catch(function(){
+  var list=document.getElementById('lt-watchlist-items');
+  var count=document.getElementById('lt-watch-count');
+  if(list) list.textContent='Broker-verified symbols unavailable';
+  if(count) count.textContent='Unavailable';
+  /* Existing index tabs remain usable when the stock master is unavailable. */
+});
+
+function ltUpdateWatchlistSelection(){
+  document.querySelectorAll('[data-watch-sym]').forEach(function(chip){
+    var active=chip.dataset.watchSym===String(ltSym||'').toUpperCase();
+    chip.classList.toggle('active',active);
+    chip.setAttribute('aria-pressed',active?'true':'false');
   });
-}).catch(function(){ /* index selector remains usable if the stock master is unavailable */ });
+}
 
 // ── Symbol selector ──
 function ltSetSym(btn, sym){
@@ -1818,6 +1873,7 @@ function ltSetSym(btn, sym){
   var stockSelect = document.getElementById('lt-stock-select');
   if(stockSelect && stockSelect.value !== sym) stockSelect.value = '';
   ltSym = sym;
+  ltUpdateWatchlistSelection();
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
   ltLoadSignalHistory();
   // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
