@@ -203,3 +203,16 @@ def test_dashboard_watchlist_uses_only_backend_verified_symbols_and_existing_sym
     assert "ltUpdateWatchlistSelection();" in template
     assert "does not imply a live quote" in template
     assert "Verified symbols unavailable" in template
+
+
+def test_dashboard_watchlist_keeps_indices_when_stock_master_is_unavailable_and_supports_search():
+    template = (TEMPLATE_DIR / "dashboard.html").read_text(encoding="utf-8")
+
+    assert 'id="lt-watch-search"' in template
+    assert "var ltWatchSymbols=[];" in template
+    assert "if(!u || !Array.isArray(u.indices)) throw new Error('Invalid symbol universe payload');" in template
+    assert "ltWatchSymbols=Array.from(new Set(indices.concat(stocks)));" in template
+    assert "u.stocks_available===true" in template
+    assert "indices only" in template
+    assert "ltWatchSymbols.filter(function(sym){return !q || sym.indexOf(q)!==-1;})" in template
+    assert "No matching symbols" in template
