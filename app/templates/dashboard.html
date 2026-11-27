@@ -1016,6 +1016,33 @@
       </select>
     </div>
 
+    <section id="lt-market-universe" aria-label="Unified market coverage" style="margin:0 0 12px;padding:12px 14px;background:#fff;border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow);">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+        <strong style="color:var(--lt-text);">சந்தை விரிவு · NSE + MCX</strong>
+        <a href="/analysis" style="font-size:12px;font-weight:700;color:var(--lt-blue);text-decoration:none;">முழு Market Workspace →</a>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px;">
+        <div style="padding:9px;background:var(--lt-gray-bg);border:1px solid var(--lt-gray-bd);border-radius:8px;"><small>NSE Indices + F&amp;O Stocks</small><br><strong id="lt-universe-nse">--</strong></div>
+        <div style="padding:9px;background:var(--lt-gray-bg);border:1px solid var(--lt-gray-bd);border-radius:8px;"><small>MCX Futures</small><br><strong id="lt-universe-mcx-fut">--</strong></div>
+        <div style="padding:9px;background:var(--lt-gray-bg);border:1px solid var(--lt-gray-bd);border-radius:8px;"><small>MCX Options Catalogue</small><br><strong id="lt-universe-mcx-opt">--</strong></div>
+      </div>
+      <div id="lt-universe-note" role="status" aria-live="polite" style="font-size:11px;color:var(--lt-text3);margin-top:8px;">Market registry loading…</div>
+    </section>
+    <script>
+    (function(){
+      var root=document.getElementById('lt-market-universe');
+      if(!root || root.dataset.ready==='1') return;
+      root.dataset.ready='1';
+      fetch('/api/market/universe',{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(d){
+        var n=d.nse||{},m=d.mcx||{};
+        document.getElementById('lt-universe-nse').textContent=n.available?((n.indices||[]).length+(n.stocks||[]).length):'Unavailable';
+        document.getElementById('lt-universe-mcx-fut').textContent=m.available?(m.futures||[]).length:'Unavailable';
+        document.getElementById('lt-universe-mcx-opt').textContent=m.available?(m.options_catalog||[]).length:'Unavailable';
+        document.getElementById('lt-universe-note').textContent='MCX Options catalogue only; live quotes/analysis not enabled. Missing data remains WAIT.';
+      }).catch(function(){document.getElementById('lt-universe-note').textContent='Market registry unavailable; existing index dashboard remains available.';});
+    })();
+    </script>
+
     <section id="mcx-goldpetal-widget" class="card" style="margin:10px 12px;padding:14px;border:1px solid var(--border);">
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
     <div><div style="font-weight:800;">MCX · GOLD PETAL FUTURES</div><div id="mcx-gp-meta" style="font-size:.75rem;color:var(--text2);">Angel One MCX data check…</div></div>
