@@ -202,7 +202,8 @@ def test_dashboard_watchlist_uses_only_backend_verified_symbols_and_existing_sym
     assert "chip.addEventListener('click',function(){ltSetSym(null,sym);});" in template
     assert "ltUpdateWatchlistSelection();" in template
     assert "does not imply a live quote" in template
-    assert "Verified symbols unavailable" in template
+    assert "Broker-verified symbols unavailable" in template
+    assert "Verified index symbols unavailable" in template
 
 
 def test_dashboard_watchlist_keeps_indices_when_stock_master_is_unavailable_and_supports_search():
