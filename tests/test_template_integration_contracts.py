@@ -217,3 +217,45 @@ def test_dashboard_watchlist_keeps_indices_when_stock_master_is_unavailable_and_
     assert "indices only" in template
     assert "ltWatchSymbols.filter(function(sym){return !q || sym.indexOf(q)!==-1;})" in template
     assert "No matching symbols" in template
+
+
+def test_market_symbol_universe_returns_indices_and_broker_verified_stocks(monkeypatch):
+    """The Dashboard watchlist payload must expose the documented universe shape."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.services import angel_one
+    from app.services.data_fetcher import DataFetcher
+
+    class BrokerSession:
+        is_configured = True
+        get_fno_stock_symbols = AsyncMock(return_value=["RELIANCE", "TCS"])
+
+    monkeypatch.setattr(angel_one, "angel_session", BrokerSession())
+    payload = asyncio.run(DataFetcher.__new__(DataFetcher).get_market_symbol_universe())
+
+    assert payload == {
+        "indices": ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"],
+        "stocks": ["RELIANCE", "TCS"],
+        "stocks_available": True,
+    }
+
+
+def test_market_symbol_universe_fails_back_to_indices_when_broker_unavailable(monkeypatch):
+    """A missing broker session must not remove the supported index watchlist."""
+    import asyncio
+
+    from app.services import angel_one
+    from app.services.data_fetcher import DataFetcher
+
+    class BrokerSession:
+        is_configured = False
+
+    monkeypatch.setattr(angel_one, "angel_session", BrokerSession())
+    payload = asyncio.run(DataFetcher.__new__(DataFetcher).get_market_symbol_universe())
+
+    assert payload == {
+        "indices": ["NIFTY", "BANKNIFTY", "FINNIFTY", "SENSEX"],
+        "stocks": [],
+        "stocks_available": False,
+    }
