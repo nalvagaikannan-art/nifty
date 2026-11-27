@@ -78,3 +78,60 @@ async def test_mcx_resolver_rejects_unknown_or_non_mcx_contracts(monkeypatch):
 
     assert await session._resolve_mcx_futures_token("GOLDPETAL") is None
     assert await session._resolve_mcx_futures_token("../GOLDPETAL") is None
+
+
+@pytest.mark.asyncio
+async def test_mcx_quote_is_cached_for_repeated_widget_polls(monkeypatch):
+    session = AngelOneSession()
+    session._instruments = [
+        _row("GOLDPETAL", "GOLDPETAL31DEC26FUT", "578631", "MCX", "FUTCOM", "31DEC2026"),
+    ]
+
+    async def noop():
+        return None
+
+    calls = []
+    async def sdk_call(*args):
+        calls.append(args)
+        return {"data": {"ltp": 12345.0}}
+
+    monkeypatch.setattr(session, "ensure_session", noop)
+    monkeypatch.setattr(session, "_ensure_instruments", noop)
+    monkeypatch.setattr(session, "_throttle", noop)
+    monkeypatch.setattr(session, "_run_sdk_call", sdk_call)
+
+    first = await session.get_mcx_futures_ltp("GOLDPETAL")
+    second = await session.get_mcx_futures_ltp("GOLDPETAL")
+
+    assert first["ltp"] == second["ltp"] == 12345.0
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcx_candles_use_bounded_history_and_cache(monkeypatch):
+    session = AngelOneSession()
+    session._instruments = [
+        _row("GOLDPETAL", "GOLDPETAL31DEC26FUT", "578631", "MCX", "FUTCOM", "31DEC2026"),
+    ]
+
+    async def noop():
+        return None
+
+    calls = []
+    async def fetch(exchange, token, interval, from_date, to_date, **kwargs):
+        calls.append((exchange, token, interval, from_date, to_date, kwargs))
+        return [{"timestamp": "2026-11-27T12:00:00+05:30", "open": 1, "high": 2,
+                 "low": 1, "close": 2, "volume": 1}]
+
+    monkeypatch.setattr(session, "ensure_session", noop)
+    monkeypatch.setattr(session, "_ensure_instruments", noop)
+    monkeypatch.setattr(session, "_fetch_candles", fetch)
+
+    first = await session.get_mcx_futures_candle_data("GOLDPETAL")
+    second = await session.get_mcx_futures_candle_data("GOLDPETAL")
+
+    assert first == second
+    assert len(calls) == 1
+    assert calls[0][0:3] == ("MCX", "578631", "FIVE_MINUTE")
+    assert calls[0][5]["fail_fast_rate_limit"] is True
+    assert calls[0][3] != "" and calls[0][4] != ""
