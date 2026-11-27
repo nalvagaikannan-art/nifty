@@ -180,7 +180,10 @@
   display: inline-block;
   animation: ltpulse 1.8s infinite;
 }
-.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.lt-status-group { display: flex; align-items: center; gap: 10px; cursor: pointer; flex-wrap:wrap; padding:6px 9px; border:1px solid var(--lt-border2); border-radius:10px; background:var(--lt-card); }
+.lt-status-checked { display:inline-flex; align-items:center; gap:5px; color:var(--lt-text3); font-size:10px; font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.lt-status-checked::before { content:''; width:5px; height:5px; border-radius:50%; background:var(--lt-text3); }
+@media(max-width:640px){ .lt-header-right{gap:6px;flex-wrap:wrap;justify-content:flex-end}.lt-status-group{gap:7px;padding:5px 7px}.lt-live-dot{font-size:10px}.lt-status-checked{font-size:9px} }
 .lt-live-dot.unavail { color: var(--lt-red); }
 .lt-live-dot.unavail::before { background: var(--lt-red); animation: none; opacity: .6; }
 @keyframes ltpulse {
@@ -238,6 +241,13 @@
   color: var(--lt-green);
 }
 
+/* Backend-verified symbol watchlist; selection reuses the dashboard's normal data flow. */
+.lt-watchlist{margin:-3px 0 12px;padding:10px 12px;background:var(--lt-card);border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow)}
+.lt-watchlist-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;font-weight:800}
+.lt-watchlist-items{display:flex;gap:6px;overflow-x:auto;padding:2px 1px 5px;scrollbar-width:thin}
+.lt-watch-chip{flex:0 0 auto;border:1px solid var(--lt-border2);border-radius:999px;background:var(--lt-gray-bg);color:var(--lt-text2);padding:6px 10px;font-size:11px;font-weight:800;cursor:pointer}
+.lt-watch-chip.active{border-color:var(--lt-green);background:var(--lt-green-bg);color:var(--lt-green)}
+.lt-watch-note{font-size:10px;color:var(--lt-text3);margin-top:4px}
 /* ── Card base ── */
 .lt-card {
   background: var(--lt-card);
@@ -396,6 +406,16 @@
   margin-top: 3px;
   font-weight: 600;
 }
+
+
+.lt-history-panel{margin:12px 0;padding:13px 14px;background:var(--lt-card);border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow)}
+.lt-history-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.lt-history-list{display:grid;gap:7px}
+.lt-history-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;padding:9px 10px;background:var(--lt-gray-bg);border:1px solid var(--lt-gray-bd);border-radius:8px}
+.lt-history-main{font-size:12px;font-weight:800;color:var(--lt-text)}
+.lt-history-meta{font-size:10px;color:var(--lt-text3);margin-top:3px}
+.lt-history-empty{font-size:11px;color:var(--lt-text3);padding:10px;background:var(--lt-gray-bg);border-radius:8px}
+.lt-history-score{font-size:11px;font-weight:800;color:var(--lt-text2);text-align:right}
 
 /* ── ALL INDEX SIGNAL BOARD ── */
 .lt-all-signals {
@@ -998,6 +1018,7 @@
         <span class="lt-live-dot unavail" id="lt-status-angel">● Angel One</span>
         <span class="lt-live-dot unavail" id="lt-status-market">● Market</span>
       </span>
+      <span class="lt-status-checked" id="lt-status-checked" title="Backend status check time, not quote freshness">Status check --:--:--</span>
       <span class="lt-time" id="lt-clock">--:-- --</span>
       <button class="lt-ref-btn" id="lt-ref-btn" onclick="ltRefresh(true)">↻ Refresh</button>
     </div>
@@ -1015,6 +1036,15 @@
         <option value="">NSE F&O Stocks…</option>
       </select>
     </div>
+
+    <section id="lt-watchlist" class="lt-watchlist" aria-label="Broker verified NSE watchlist">
+      <div class="lt-watchlist-head"><span>Watchlist · NSE F&amp;O</span><span id="lt-watch-count">Loading symbols…</span></div>
+      <input id="lt-watch-search" type="search" autocomplete="off" placeholder="Search verified symbols…" aria-label="Search verified watchlist symbols" style="width:100%;box-sizing:border-box;margin:0 0 8px;padding:8px 10px;border:1px solid var(--lt-border2);border-radius:8px;background:var(--lt-gray-bg);color:var(--lt-text);font-size:12px;">
+      <div id="lt-watchlist-items" class="lt-watchlist-items" role="group" aria-label="Select dashboard symbol">
+        <span class="lt-watch-note">Broker-verified symbol list loading…</span>
+      </div>
+      <div class="lt-watch-note" id="lt-watch-note">Selection loads the existing dashboard analysis; this list does not imply a live quote.</div>
+    </section>
 
     <section id="lt-market-universe" aria-label="Unified market coverage" style="margin:0 0 12px;padding:12px 14px;background:#fff;border:1px solid var(--lt-border);border-radius:var(--lt-radius);box-shadow:var(--lt-shadow);">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
@@ -1197,6 +1227,16 @@
         </div>
       </div>
     </div>
+
+
+    <section class="lt-history-panel" aria-label="Selected symbol signal history">
+      <div class="lt-history-head">
+        <div class="lt-all-signals-title" style="margin:0;">SIGNAL HISTORY · <span id="lt-history-symbol">NIFTY</span></div>
+        <button type="button" class="lt-ref-btn" onclick="ltLoadSignalHistory()">↻ History</button>
+      </div>
+      <div class="lt-all-signals-note">Backend-persisted strategy events for the selected symbol. This is history, not a live entry instruction.</div>
+      <div id="lt-signal-history" class="lt-history-list" aria-live="polite"><div class="lt-history-empty">Loading signal history…</div></div>
+    </section>
 
     <!-- ── F&O STOCK MARKET MOVERS ── -->
     <div class="lt-all-signals" style="margin-top:12px;">
@@ -1779,13 +1819,60 @@ setInterval(ltClock, 1000);
 ltClock();
 
 // Fetch the broker-master-backed F&O universe once; do not poll all stocks.
-fetch('/api/market/symbols').then(function(r){return r.json();}).then(function(u){
-  var sel=document.getElementById('lt-stock-select');
-  if(!sel || !u || !u.stocks_available || !Array.isArray(u.stocks)) return;
-  u.stocks.forEach(function(sym){
-    var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
+var ltWatchSymbols=[];
+function ltRenderWatchlist(filter){
+  var list=document.getElementById('lt-watchlist-items');
+  if(!list) return;
+  var q=String(filter||'').trim().toUpperCase();
+  list.textContent='';
+  var visible=ltWatchSymbols.filter(function(sym){return !q || sym.indexOf(q)!==-1;});
+  if(!visible.length){
+    list.textContent=ltWatchSymbols.length?'No matching symbols':'Verified index symbols unavailable';
+    return;
+  }
+  visible.forEach(function(sym){
+    var chip=document.createElement('button');
+    chip.type='button'; chip.className='lt-watch-chip';
+    chip.dataset.watchSym=sym; chip.textContent=sym;
+    chip.setAttribute('aria-pressed',sym===ltSym?'true':'false');
+    chip.addEventListener('click',function(){ltSetSym(null,sym);});
+    list.appendChild(chip);
   });
-}).catch(function(){ /* index selector remains usable if the stock master is unavailable */ });
+  ltUpdateWatchlistSelection();
+}
+var watchSearch=document.getElementById('lt-watch-search');
+if(watchSearch) watchSearch.addEventListener('input',function(){ltRenderWatchlist(this.value);});
+fetch('/api/market/symbols').then(function(r){
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}).then(function(u){
+  if(!u || !Array.isArray(u.indices)) throw new Error('Invalid symbol universe payload');
+  var indices=u.indices.map(function(x){return String(x||'').trim().toUpperCase();}).filter(Boolean);
+  var stocks=Array.isArray(u.stocks)?u.stocks.map(function(x){return String(x||'').trim().toUpperCase();}).filter(Boolean):[];
+  ltWatchSymbols=Array.from(new Set(indices.concat(stocks)));
+  var sel=document.getElementById('lt-stock-select');
+  if(sel && u.stocks_available===true){
+    stocks.forEach(function(sym){
+      var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
+    });
+  }
+  var count=document.getElementById('lt-watch-count');
+  if(count) count.textContent=ltWatchSymbols.length+' verified symbols'+(u.stocks_available===true?'':' · indices only');
+  ltRenderWatchlist(watchSearch?watchSearch.value:'');
+}).catch(function(){
+  var list=document.getElementById('lt-watchlist-items');
+  var count=document.getElementById('lt-watch-count');
+  if(list) list.textContent='Broker-verified symbols unavailable';
+  if(count) count.textContent='Unavailable';
+});
+
+function ltUpdateWatchlistSelection(){
+  document.querySelectorAll('[data-watch-sym]').forEach(function(chip){
+    var active=chip.dataset.watchSym===String(ltSym||'').toUpperCase();
+    chip.classList.toggle('active',active);
+    chip.setAttribute('aria-pressed',active?'true':'false');
+  });
+}
 
 // ── Symbol selector ──
 function ltSetSym(btn, sym){
@@ -1794,7 +1881,9 @@ function ltSetSym(btn, sym){
   var stockSelect = document.getElementById('lt-stock-select');
   if(stockSelect && stockSelect.value !== sym) stockSelect.value = '';
   ltSym = sym;
+  ltUpdateWatchlistSelection();
   document.getElementById('lt-sym-name').textContent = sym === 'NIFTY' ? 'NIFTY 50' : sym;
+  ltLoadSignalHistory();
   // SYMBOL_SWITCH_QUEUE_FIX: if a refresh is already running, its old
   // response must not remain visible after the selected symbol changes.
   ltRefresh();
@@ -1818,12 +1907,49 @@ function ltUpdateStatus(){
       var mkt = document.getElementById('lt-status-market');
       mkt.className = 'lt-live-dot ' + (s.market_open ? 'live' : 'unavail');
       mkt.textContent = s.market_open ? '● Market Open' : '● Market Closed';
+      var checked = document.getElementById('lt-status-checked');
+      if(checked) checked.textContent = 'Status check ' + new Date().toLocaleTimeString('en-IN',{hour12:false});
     })
     .catch(function(){
       ['lt-status-ai','lt-status-angel','lt-status-market'].forEach(function(id){
         var el = document.getElementById(id);
         el.className = 'lt-live-dot unavail';
       });
+      var checked = document.getElementById('lt-status-checked');
+      if(checked) checked.textContent = 'Status check failed';
+    });
+}
+
+
+function ltLoadSignalHistory(){
+  var sym = String(ltSym || 'NIFTY').toUpperCase();
+  var title = document.getElementById('lt-history-symbol');
+  var root = document.getElementById('lt-signal-history');
+  if(!root) return;
+  if(title) title.textContent = sym;
+  root.innerHTML = '<div class="lt-history-empty">Loading ' + ltEsc(sym) + ' history…</div>';
+  fetch('/api/strategy/history/' + encodeURIComponent(sym), {cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(function(payload){
+      if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
+      var rows = Array.isArray(payload.history) ? payload.history.slice(0,5) : [];
+      if(!rows.length){
+        root.innerHTML = '<div class="lt-history-empty">No persisted signal events for ' + ltEsc(sym) + ' yet.</div>';
+        return;
+      }
+      root.innerHTML = rows.map(function(item){
+        var action = String(item.strategy || 'WAIT').toUpperCase();
+        var stamp = [item.date || '', item.timestamp || ''].filter(Boolean).join(' · ');
+        var meta = [stamp, item.market_state || 'Market state unavailable', item.spot ? ('Spot ' + Number(item.spot).toLocaleString('en-IN')) : 'Spot unavailable'].join(' · ');
+        var reversal = item.reversal ? (' · ' + (item.reversal_type || 'REVERSAL')) : '';
+        var reasons = Array.isArray(item.reasons) ? item.reasons.slice(0,2).map(function(x){return String(x);}).join(' · ') : '';
+        var detail = meta + (reasons ? ' · ' + reasons : '');
+        return '<div class="lt-history-row"><div><div class="lt-history-main">' + ltEsc(action + reversal) + '</div><div class="lt-history-meta">' + ltEsc(detail) + '</div></div><div class="lt-history-score">Score ' + ltEsc(item.score == null ? '--' : item.score) + '<br>Conf. ' + ltEsc(item.confidence == null ? '--' : item.confidence) + '</div></div>';
+      }).join('');
+    })
+    .catch(function(){
+      if(sym !== String(ltSym || 'NIFTY').toUpperCase()) return;
+      root.innerHTML = '<div class="lt-history-empty">Signal history unavailable. Retry when backend storage is ready.</div>';
     });
 }
 
@@ -3291,6 +3417,7 @@ ltFastSpotRefresh();
 ltFastSpotInterval = setInterval(ltFastSpotRefresh, 1000);
 
 // Initial load
+ltLoadSignalHistory();
 ltRefresh();
 </script>
 

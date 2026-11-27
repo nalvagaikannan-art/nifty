@@ -54,11 +54,27 @@
     #mcx-workspace th{font-size:.64rem;color:var(--mx-muted);letter-spacing:.06em;text-transform:uppercase}
     #mcx-workspace .mx-hidden{display:none!important}
     #mcx-workspace .mx-empty{padding:18px;text-align:center;border:1px dashed var(--mx-line);border-radius:11px;color:var(--mx-muted);font-size:.78rem}
+    #mcx-workspace .mx-terminal-strip{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;padding:9px 11px;border:1px solid var(--mx-line);border-radius:10px;background:rgba(148,163,184,.07)}
+    #mcx-workspace .mx-terminal-chip{font-size:.68rem;font-weight:800;letter-spacing:.04em;color:var(--mx-muted)}
+    #mcx-workspace .mx-terminal-chip strong{color:var(--text,#0f172a)}
+    #mcx-workspace .mx-stat{background:linear-gradient(145deg,rgba(148,163,184,.055),transparent)}
+    #mcx-workspace .mx-decision{font-size:1.15rem;letter-spacing:.035em}
+    #mcx-workspace .mx-decision[data-action="wait"]{color:#d97706}
+    #mcx-workspace .mx-decision[data-action="buy"]{color:#16a34a}
+    #mcx-workspace .mx-decision[data-action="sell"]{color:#dc2626}
+    #mcx-workspace .mx-disclaimer{border-left:3px solid #d97706;padding:9px 11px;background:rgba(217,119,6,.07);border-radius:0 8px 8px 0}
+    #mcx-workspace .mx-panel-head strong{font-size:.88rem}
     @media(max-width:700px){ #mcx-workspace .mx-toolbar{grid-template-columns:1fr 1fr}#mcx-workspace .mx-toolbar .mx-tabs{grid-column:1/-1;grid-row:2}#mcx-workspace .mx-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#mcx-workspace .mx-value{font-size:.95rem}}
   </style>
   <div class="mx-head">
-    <div><div class="mx-kicker">Multi-commodity · Angel One MCX</div><div class="mx-title">MCX Trading Workspace</div><div class="mx-sub">Futures மற்றும் Options-ஐ தனித்தனியாகப் பாருங்கள். எல்லா contract விவரங்களும் broker instrument master-இலிருந்து.</div></div>
+    <div><div class="mx-kicker">MARKET WATCH · PAPER TERMINAL · MCX</div><div class="mx-title">MCX Trading Terminal</div><div class="mx-sub">Futures technical analysis மற்றும் Options contract discovery தனித்தனி modules. Contract metadata Angel One instrument master-இலிருந்து.</div></div>
     <div class="mx-status" id="mx-data-status" role="status"><span class="mx-dot" id="mx-status-dot"></span><span id="mx-status-text">Market data சரிபார்க்கப்படுகிறது</span></div>
+  </div>
+  <div class="mx-terminal-strip" aria-label="Terminal mode">
+    <span class="mx-terminal-chip">MODE <strong>ANALYSIS / PAPER</strong></span>
+    <span class="mx-terminal-chip">EXECUTION <strong>DISABLED</strong></span>
+    <span class="mx-terminal-chip">SIGNAL SCOPE <strong>MCX FUTURES ONLY</strong></span>
+    <span class="mx-terminal-chip">OPTIONS <strong>CATALOGUE ONLY</strong></span>
   </div>
   <div class="mx-toolbar">
     <label><span class="mx-label">Commodity</span><select class="mx-select" id="mx-commodity"><option value="">Loading catalogue…</option></select></label>
@@ -68,15 +84,15 @@
     </div>
   </div>
   <div class="mx-grid">
-    <div class="mx-stat"><div class="mx-label">Live Premium / LTP</div><div class="mx-value" id="mx-ltp">--</div><div class="mx-note" id="mx-ltp-time">Quote not loaded</div></div>
+    <div class="mx-stat"><div class="mx-label">Futures LTP</div><div class="mx-value" id="mx-ltp">--</div><div class="mx-note" id="mx-ltp-time">Quote not loaded</div></div>
     <div class="mx-stat"><div class="mx-label">Available Futures</div><div class="mx-value" id="mx-fut-count">--</div><div class="mx-note">Active master contracts</div></div>
     <div class="mx-stat"><div class="mx-label">Options Contracts</div><div class="mx-value" id="mx-opt-count">--</div><div class="mx-note" id="mx-opt-types">CE / PE coverage</div></div>
     <div class="mx-stat"><div class="mx-label">Data Source</div><div class="mx-value" style="font-size:.88rem">Angel One</div><div class="mx-note">MCX only · no fallback</div></div>
   </div>
   <div class="mx-panel" id="mx-futures-panel">
-    <div class="mx-panel-head"><div><strong>Futures analysis</strong><div class="mx-note">5-minute candles · trend confirmation · risk levels</div></div><button type="button" class="mx-action primary" id="mx-analyze">Analyse contract</button></div>
+    <div class="mx-panel-head"><div><strong>Futures Analysis · FUTCOM</strong><div class="mx-note">5-minute futures candles · trend confirmation · risk references</div></div><button type="button" class="mx-action primary" id="mx-analyze">Analyse contract</button></div>
     <div class="mx-grid">
-      <div class="mx-stat"><div class="mx-label">Decision</div><div class="mx-value" id="mx-action">WAIT</div></div>
+      <div class="mx-stat"><div class="mx-label">Decision</div><div class="mx-value mx-decision" id="mx-action" data-action="wait">WAIT</div></div>
       <div class="mx-stat"><div class="mx-label">Entry Reference</div><div class="mx-value" id="mx-entry">--</div></div>
       <div class="mx-stat"><div class="mx-label">Stop Loss</div><div class="mx-value" id="mx-stop">--</div></div>
       <div class="mx-stat"><div class="mx-label">Target</div><div class="mx-value" id="mx-target">--</div></div>
@@ -86,13 +102,13 @@
     <div class="mx-table-wrap"><table><thead><tr><th>Contract</th><th>Expiry</th><th>Lot</th><th>Tick size</th></tr></thead><tbody id="mx-contract-rows"><tr><td colspan="4">Loading…</td></tr></tbody></table></div>
   </div>
   <div class="mx-panel mx-hidden" id="mx-options-panel">
-    <div class="mx-panel-head"><div><strong>Options chain coverage</strong><div class="mx-note">Actual MCX OPTFUT contracts only; no NSE option-chain substitution</div></div></div>
+    <div class="mx-panel-head"><div><strong>Options Catalogue · OPTFUT</strong><div class="mx-note">Instrument-master discovery only · no live option-chain analysis</div></div></div>
     <div class="mx-empty" id="mx-options-state">Options coverage loading…</div>
     <div class="mx-note" style="margin-top:9px">Option premium recommendation, spread/liquidity checks, and paper-position entry require verified MCX option quote/candle support. Until those checks are implemented and validated, this panel will not generate CE/PE calls.</div>
   </div>
   <div class="mx-panel">
-    <div class="mx-panel-head"><strong>Paper trading safety</strong><span class="mx-note">No broker orders</span></div>
-    <div class="mx-note">இந்த workspace market analysis மற்றும் paper tracking-க்கானது. Live execution இல்லை. Fresh/stale data, missing contract அல்லது risk confirmation இல்லாதபோது decision WAIT ஆகவே இருக்கும்.</div>
+    <div class="mx-panel-head"><strong>Risk & Execution Controls</strong><span class="mx-note">Broker orders disabled</span></div>
+    <div class="mx-note mx-disclaimer">இந்த terminal analysis மற்றும் paper tracking-க்கானது; broker order placement இல்லை. Futures analysis-ன் action FUTCOM futures-க்கு மட்டுமே பொருந்தும். OPTFUT CE/PE count என்பது contract catalogue coverage மட்டுமே — option premium, Greeks, spread, liquidity அல்லது option-chain signal அல்ல. Fresh/stale data, missing contract அல்லது risk confirmation இல்லாதபோது WAIT.</div>
   </div>
   <div class="mx-head" style="margin-top:12px"><span class="mx-note" id="mx-last-refresh">Not refreshed yet</span><button type="button" class="mx-action" id="mx-refresh">↻ Refresh data</button></div>
 </section>
@@ -114,10 +130,10 @@
     }catch(e){contracts=[];$('mx-contract-rows').innerHTML='<tr><td colspan="4">Contract master unavailable: '+esc(e.message)+'</td></tr>';status('Contract data unavailable','warn');}
   }
   async function refreshQuote(){if(!selected)return;try{const d=await api('/api/market/mcx/quote/'+encodeURIComponent(selected));if(!d.available){$('mx-ltp').textContent='--';$('mx-ltp-time').textContent=d.reason||'Quote unavailable';status('Quote unavailable','warn');return;}$('mx-ltp').textContent=money(d.ltp);$('mx-ltp-time').textContent=(d.tradingsymbol||'')+' · '+(d.observed_at||'Observed time unavailable');status('Angel One MCX data received','ok');}catch(e){$('mx-ltp').textContent='--';$('mx-ltp-time').textContent=e.message;status('Quote unavailable','warn');}}
-  async function analyze(){if(!selected||busy)return;busy=true;$('mx-analyze').disabled=true;$('mx-action').textContent='CHECKING';$('mx-analysis-detail').textContent='Fresh candles மற்றும் risk checks சரிபார்க்கப்படுகிறது…';try{const d=await api('/api/market/mcx/analysis/'+encodeURIComponent(selected));$('mx-action').textContent=d.action||'WAIT';$('mx-entry').textContent=d.eligible?money(d.entry_reference):'--';$('mx-stop').textContent=d.eligible?money(d.stop_reference):'--';$('mx-target').textContent=d.eligible?money(d.target_reference):'--';const bits=[d.reason||'No validated setup'];if(d.last_candle_at)bits.push('Candle '+d.last_candle_at);if(d.rsi14!=null)bits.push('RSI '+d.rsi14);if(d.ema9!=null&&d.ema21!=null)bits.push('EMA9 '+d.ema9+' / EMA21 '+d.ema21);bits.push('Paper only');$('mx-analysis-detail').textContent=bits.join(' · ');}catch(e){$('mx-action').textContent='WAIT';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';$('mx-analysis-detail').textContent='Analysis unavailable: '+e.message;}finally{busy=false;$('mx-analyze').disabled=false;}}
+  async function analyze(){if(!selected||busy)return;busy=true;$('mx-analyze').disabled=true;$('mx-action').textContent='CHECKING';$('mx-analysis-detail').textContent='Fresh candles மற்றும் risk checks சரிபார்க்கப்படுகிறது…';try{const d=await api('/api/market/mcx/analysis/'+encodeURIComponent(selected));$('mx-action').textContent=d.action||'WAIT';$('mx-action').dataset.action=String(d.action||'WAIT').toLowerCase().includes('buy')?'buy':String(d.action||'WAIT').toLowerCase().includes('sell')?'sell':'wait';$('mx-entry').textContent=d.eligible?money(d.entry_reference):'--';$('mx-stop').textContent=d.eligible?money(d.stop_reference):'--';$('mx-target').textContent=d.eligible?money(d.target_reference):'--';const bits=[d.reason||'No validated setup'];if(d.last_candle_at)bits.push('Candle '+d.last_candle_at);if(d.rsi14!=null)bits.push('RSI '+d.rsi14);if(d.ema9!=null&&d.ema21!=null)bits.push('EMA9 '+d.ema9+' / EMA21 '+d.ema21);bits.push('Paper only');$('mx-analysis-detail').textContent=bits.join(' · ');}catch(e){$('mx-action').textContent='WAIT';$('mx-action').dataset.action='wait';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';$('mx-analysis-detail').textContent='Analysis unavailable: '+e.message;}finally{busy=false;$('mx-analyze').disabled=false;}}
   async function init(){try{const d=await api('/api/market/mcx/catalog');catalog=d.commodities||[];$('mx-commodity').innerHTML=catalog.length?catalog.map(c=>'<option value="'+esc(c.commodity)+'">'+esc(c.commodity.replace(/([A-Z]+)(M|MIC|MINI|PETAL|GUINEA|TEN|100)$/,'$1 $2'))+'</option>').join(''):'<option value="">No MCX contracts found</option>';if(!catalog.length){status('MCX catalogue unavailable','warn');$('mx-options-state').textContent='No verified MCX contracts found in Angel One master.';return;}selected=catalog[0].commodity;$('mx-commodity').value=selected;syncCounts();await loadContracts();renderOptions();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');}catch(e){status('Catalogue unavailable','warn');$('mx-commodity').innerHTML='<option value="">Catalogue unavailable</option>';$('mx-options-state').textContent=e.message;}}
   function syncCounts(){const c=active();$('mx-fut-count').textContent=c.futures_contracts??0;renderOptions();}
-  $('mx-commodity').addEventListener('change',async e=>{selected=e.target.value;syncCounts();$('mx-action').textContent='WAIT';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';await loadContracts();});
+  $('mx-commodity').addEventListener('change',async e=>{selected=e.target.value;syncCounts();$('mx-action').textContent='WAIT';$('mx-action').dataset.action='wait';$('mx-entry').textContent=$('mx-stop').textContent=$('mx-target').textContent='--';await loadContracts();});
   $('mx-analyze').addEventListener('click',analyze);
   $('mx-refresh').addEventListener('click',async()=>{await loadContracts();await refreshQuote();$('mx-last-refresh').textContent='Updated '+new Date().toLocaleTimeString('en-IN');});
   root.querySelectorAll('[data-mx-tab]').forEach(b=>b.addEventListener('click',()=>{root.querySelectorAll('[data-mx-tab]').forEach(x=>x.setAttribute('aria-selected',String(x===b)));const opt=b.dataset.mxTab==='options';$('mx-futures-panel').classList.toggle('mx-hidden',opt);$('mx-options-panel').classList.toggle('mx-hidden',!opt);}));
