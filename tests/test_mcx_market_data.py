@@ -90,6 +90,9 @@ async def test_mcx_quote_is_cached_for_repeated_widget_polls(monkeypatch):
     async def noop():
         return None
 
+    async def throttle_noop(**kwargs):
+        return None
+
     calls = []
     async def sdk_call(*args):
         calls.append(args)
@@ -97,7 +100,7 @@ async def test_mcx_quote_is_cached_for_repeated_widget_polls(monkeypatch):
 
     monkeypatch.setattr(session, "ensure_session", noop)
     monkeypatch.setattr(session, "_ensure_instruments", noop)
-    monkeypatch.setattr(session, "_throttle", noop)
+    monkeypatch.setattr(session, "_throttle", throttle_noop)
     monkeypatch.setattr(session, "_run_sdk_call", sdk_call)
 
     first = await session.get_mcx_futures_ltp("GOLDPETAL")
