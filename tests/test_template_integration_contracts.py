@@ -184,5 +184,8 @@ def test_dashboard_signal_history_panel_uses_selected_symbol_persisted_api():
     assert "payload.history" in template
     assert "item.strategy" in template
     assert "item.reversal" in template
+    assert "item.reversal_type" in template
+    assert "item.reasons" in template
+    assert "slice(0,2)" in template
     assert "ltLoadSignalHistory();" in template
     assert "This is history, not a live entry instruction." in template
