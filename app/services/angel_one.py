@@ -182,6 +182,12 @@ class AngelOneSession:
         # guard for its broker-specific serialization requirement. The
         # broker-wide I/O lock above also serializes it against other SDK paths.
         self._historical_api_lock = asyncio.Lock()
+        # MCX widgets can be open on multiple pages. Coalesce identical broker
+        # requests and reuse short-lived data instead of exhausting SmartAPI.
+        self._mcx_quote_cache: dict[str, tuple[float, Dict]] = {}
+        self._mcx_quote_lock = asyncio.Lock()
+        self._mcx_candle_cache: dict[tuple, tuple[float, List[Dict]]] = {}
+        self._mcx_candle_lock = asyncio.Lock()
 
     async def _throttle(
         self,
@@ -776,40 +782,60 @@ class AngelOneSession:
         return sorted(found.values(), key=lambda item: (item["expiry"], item["tradingsymbol"]))
 
     async def get_mcx_futures_ltp(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
-        """Fetch an Angel One MCX futures LTP; return None on unavailable data."""
+        """Fetch Angel One MCX LTP with a short per-contract cache."""
         info = await self._resolve_mcx_futures_token(commodity)
         if not info:
             return None
-        await self.ensure_session()
-        await self._throttle(call_name=f"mcx_ltp:{info['tradingsymbol']}")
-        try:
-            body = await self._run_sdk_call(
-                "ltpData", "MCX", info["tradingsymbol"], info["token"]
-            )
-        except Exception as exc:
-            logger.warning("Angel One MCX LTP unavailable for %s: %s", info["tradingsymbol"], exc)
-            return None
-        data = body.get("data") if isinstance(body, dict) else None
-        ltp = safe_float(data.get("ltp")) if isinstance(data, dict) else 0.0
-        if ltp <= 0:
-            return None
-        return {
-            **info, "ltp": ltp, "source": "angel_one_mcx_ltp",
-            "observed_at": now_ist().isoformat(), "exchange_timestamp": None,
-        }
+        cache_key = info["token"]
+        async with self._mcx_quote_lock:
+            cached = self._mcx_quote_cache.get(cache_key)
+            if cached and time.time() - cached[0] < 15.0:
+                return dict(cached[1])
+            await self.ensure_session()
+            await self._throttle(call_name=f"mcx_ltp:{info['tradingsymbol']}")
+            try:
+                body = await self._run_sdk_call(
+                    "ltpData", "MCX", info["tradingsymbol"], info["token"]
+                )
+            except Exception as exc:
+                logger.warning("Angel One MCX LTP unavailable for %s: %s", info["tradingsymbol"], exc)
+                return None
+            data = body.get("data") if isinstance(body, dict) else None
+            ltp = safe_float(data.get("ltp")) if isinstance(data, dict) else 0.0
+            if ltp <= 0:
+                return None
+            result = {
+                **info, "ltp": ltp, "source": "angel_one_mcx_ltp",
+                "observed_at": now_ist().isoformat(), "exchange_timestamp": None,
+            }
+            self._mcx_quote_cache[cache_key] = (time.time(), result)
+            return dict(result)
 
     async def get_mcx_futures_candle_data(
         self, commodity: str = "GOLDPETAL", interval: str = "FIVE_MINUTE",
         from_date: str = "", to_date: str = "",
     ) -> List[Dict]:
-        """Fetch MCX FUTCOM candles only; never substitute NSE/global futures data."""
+        """Fetch MCX FUTCOM candles only, with bounded history and short caching."""
         info = await self._resolve_mcx_futures_token(commodity)
         if not info:
             raise AngelOneError(f"No active MCX FUTCOM contract found for {commodity}")
-        return await self._fetch_candles(
-            "MCX", info["token"], interval, from_date, to_date,
-            label=f"{info['tradingsymbol']} MCX",
-        )
+        current_ist = now_ist()
+        if not from_date:
+            from_date = (current_ist - timedelta(days=7)).strftime("%Y-%m-%d 00:00")
+        if not to_date:
+            to_date = current_ist.strftime("%Y-%m-%d %H:%M")
+        cache_key = (info["token"], interval.upper(), from_date, to_date)
+        async with self._mcx_candle_lock:
+            cached = self._mcx_candle_cache.get(cache_key)
+            if cached and time.time() - cached[0] < 60.0:
+                return [dict(row) for row in cached[1]]
+            candles = await self._fetch_candles(
+                "MCX", info["token"], interval, from_date, to_date,
+                label=f"{info['tradingsymbol']} MCX", fail_fast_rate_limit=True,
+            )
+            safe_rows = [dict(row) for row in candles if isinstance(row, dict)]
+            self._mcx_candle_cache[cache_key] = (time.time(), safe_rows)
+            return [dict(row) for row in safe_rows]
 
     async def get_ltp(self, symbol: str) -> Dict:
         """Live LTP for supported indices or NSE F&O stock cash instruments."""
