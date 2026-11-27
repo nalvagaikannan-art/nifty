@@ -81,14 +81,14 @@ def analyze_mcx_futures(candles, contract, now=None):
     rows.sort(key=lambda x: x["timestamp"])
     if len(rows) < 30:
         return {"action": "WAIT", "eligible": False, "reason": "At least 30 valid MCX candles are required",
-                "exchange": "MCX", "instrument": "GOLDPETAL", "source": "angel_one_mcx_candles"}
+                "exchange": "MCX", "instrument": (contract or {}).get("name") or "MCX", "source": "angel_one_mcx_candles"}
 
     latest = rows[-1]
     age = (now - latest["timestamp"]).total_seconds()
     if age < -120 or age > 12 * 60:
         return {"action": "WAIT", "eligible": False,
                 "reason": "Latest MCX candle is not fresh; no trade signal is permitted",
-                "exchange": "MCX", "instrument": "GOLDPETAL",
+                "exchange": "MCX", "instrument": (contract or {}).get("name") or "MCX",
                 "last_candle_at": latest["timestamp"].isoformat(),
                 "candle_age_seconds": round(age, 1),
                 "source": "angel_one_mcx_candles"}
@@ -103,7 +103,7 @@ def analyze_mcx_futures(candles, contract, now=None):
     if not tick or tick <= 0 or not lot or lot <= 0 or atr14 <= 0:
         return {"action": "WAIT", "eligible": False,
                 "reason": "Contract tick size, lot size or ATR is invalid",
-                "exchange": "MCX", "instrument": "GOLDPETAL"}
+                "exchange": "MCX", "instrument": (contract or {}).get("name") or "MCX"}
 
     long_ok = ema9 > ema21 and close > ema9 and 52 <= rsi14 <= 68 and close > rows[-2]["close"]
     short_ok = ema9 < ema21 and close < ema9 and 32 <= rsi14 <= 48 and close < rows[-2]["close"]
@@ -119,7 +119,7 @@ def analyze_mcx_futures(candles, contract, now=None):
         reason = "Fresh MCX candle; EMA trend, RSI band and price confirmation aligned"
     return {
         "action": action, "eligible": eligible, "reason": reason,
-        "exchange": "MCX", "instrument": "GOLDPETAL",
+        "exchange": "MCX", "instrument": (contract or {}).get("name") or "MCX",
         "contract": (contract or {}).get("tradingsymbol"),
         "expiry": (contract or {}).get("expiry"),
         "source": "angel_one_mcx_candles",
