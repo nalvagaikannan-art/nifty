@@ -1877,7 +1877,10 @@ function ltLoadSignalHistory(){
         var action = String(item.strategy || 'WAIT').toUpperCase();
         var stamp = [item.date || '', item.timestamp || ''].filter(Boolean).join(' · ');
         var meta = [stamp, item.market_state || 'Market state unavailable', item.spot ? ('Spot ' + Number(item.spot).toLocaleString('en-IN')) : 'Spot unavailable'].join(' · ');
-        return '<div class="lt-history-row"><div><div class="lt-history-main">' + ltEsc(action) + (item.reversal ? ' · REVERSAL' : '') + '</div><div class="lt-history-meta">' + ltEsc(meta) + '</div></div><div class="lt-history-score">Score ' + ltEsc(item.score == null ? '--' : item.score) + '<br>Conf. ' + ltEsc(item.confidence == null ? '--' : item.confidence) + '</div></div>';
+        var reversal = item.reversal ? (' · ' + (item.reversal_type || 'REVERSAL')) : '';
+        var reasons = Array.isArray(item.reasons) ? item.reasons.slice(0,2).map(function(x){return String(x);}).join(' · ') : '';
+        var detail = meta + (reasons ? ' · ' + reasons : '');
+        return '<div class="lt-history-row"><div><div class="lt-history-main">' + ltEsc(action + reversal) + '</div><div class="lt-history-meta">' + ltEsc(detail) + '</div></div><div class="lt-history-score">Score ' + ltEsc(item.score == null ? '--' : item.score) + '<br>Conf. ' + ltEsc(item.confidence == null ? '--' : item.confidence) + '</div></div>';
       }).join('');
     })
     .catch(function(){
