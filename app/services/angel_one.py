@@ -699,88 +699,82 @@ class AngelOneSession:
         return {"exchange": "NSE", "token": str(row["token"]).strip(),
                 "tradingsymbol": target, "name": sym}
 
+    MCX_STANDARD_COMMODITIES = {"CRUDEOIL", "NATURALGAS", "GOLD", "SILVER", "COPPER", "NICKEL", "ALUMINIUM"}
+    MCX_PILOT_SYMBOLS = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}
+
+    @staticmethod
+    def _mcx_expiry(row):
+        raw = str(row.get("expiry") or "").strip()
+        for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw, fmt).date()
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _mcx_contract_row(cls, row, key):
+        if not isinstance(row, dict) or row.get("exch_seg") != "MCX" or row.get("instrumenttype") != "FUTCOM":
+            return None
+        name = str(row.get("name") or "").strip().upper()
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if key == "GOLDPETAL":
+            if symbol != cls.MCX_PILOT_SYMBOLS[key]:
+                return None
+        elif key not in cls.MCX_STANDARD_COMMODITIES or name != key:
+            return None
+        expiry = cls._mcx_expiry(row)
+        token = str(row.get("token") or "").strip()
+        try:
+            tick_size = float(row.get("tick_size") or 0) / 100.0
+            lot_size = int(float(row.get("lotsize") or 0))
+        except (TypeError, ValueError):
+            return None
+        if not expiry or not token or not symbol or tick_size <= 0 or lot_size <= 0:
+            return None
+        if not symbol.endswith("FUT"):
+            return None
+        return {"exchange": "MCX", "token": token, "name": name or key,
+                "tradingsymbol": symbol, "expiry": expiry.isoformat(),
+                "tick_size": tick_size, "lot_size": lot_size, "instrumenttype": "FUTCOM"}
+
     async def _resolve_mcx_futures_token(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
-        """Resolve the explicitly approved GOLDPETAL 31-Dec-2026 pilot contract."""
+        """Resolve an exact-name MCX FUTCOM contract; GOLDPETAL remains expiry-pinned."""
         key = str(commodity or "").strip().upper()
-        pilot_symbol = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}.get(key)
-        if not pilot_symbol:
+        if key not in self.MCX_STANDARD_COMMODITIES and key not in self.MCX_PILOT_SYMBOLS:
             return None
         await self.ensure_session()
         await self._ensure_instruments()
         today = now_ist().date()
-        rows = []
+        contracts = []
         for row in (self._instruments or []):
-            if not isinstance(row, dict) or row.get("exch_seg") != "MCX":
-                continue
-            if row.get("instrumenttype") != "FUTCOM":
-                continue
-            name = str(row.get("name") or "").strip().upper()
-            symbol = str(row.get("symbol") or "").strip().upper()
-            if symbol != pilot_symbol:
-                continue
-            expiry = None
-            for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
-                try:
-                    expiry = datetime.strptime(str(row.get("expiry")), fmt).date()
-                    break
-                except ValueError:
-                    continue
-            if expiry and expiry >= today and row.get("token"):
-                rows.append((expiry, row))
-        if not rows:
+            item = self._mcx_contract_row(row, key)
+            if item and date.fromisoformat(item["expiry"]) >= today:
+                contracts.append(item)
+        if key == "GOLDPETAL":
+            contracts = [c for c in contracts if c["tradingsymbol"] == self.MCX_PILOT_SYMBOLS[key]]
+        if not contracts:
             return None
-        rows.sort(key=lambda item: (item[0], str(item[1].get("symbol") or "")))
-        expiry, row = rows[0]
-        try:
-            tick_raw = float(row.get("tick_size") or 0)
-            lot_size = int(float(row.get("lotsize") or 0))
-        except (TypeError, ValueError):
-            return None
-        return {
-            "exchange": "MCX", "token": str(row["token"]).strip(),
-            "name": str(row.get("name") or key).strip().upper(),
-            "tradingsymbol": str(row.get("symbol") or "").strip().upper(),
-            "expiry": expiry.isoformat(), "tick_size": tick_raw / 100.0,
-            "lot_size": lot_size, "instrumenttype": "FUTCOM",
-        }
+        contracts.sort(key=lambda item: (item["expiry"], item["tradingsymbol"]))
+        return contracts[0]
 
     async def get_mcx_futures_contracts(self, commodity: str = "GOLDPETAL") -> List[Dict]:
-        """Return only the explicitly approved GOLDPETAL 31-Dec-2026 pilot contract."""
+        """Return verified active MCX FUTCOM contracts for an exact commodity."""
         key = str(commodity or "").strip().upper()
-        pilot_symbol = {"GOLDPETAL": "GOLDPETAL31DEC26FUT"}.get(key)
-        if not pilot_symbol:
+        if key not in self.MCX_STANDARD_COMMODITIES and key not in self.MCX_PILOT_SYMBOLS:
             return []
         await self.ensure_session()
         await self._ensure_instruments()
         today = now_ist().date()
         found = {}
         for row in (self._instruments or []):
-            if not isinstance(row, dict) or row.get("exch_seg") != "MCX" or row.get("instrumenttype") != "FUTCOM":
+            item = self._mcx_contract_row(row, key)
+            if not item or date.fromisoformat(item["expiry"]) < today:
                 continue
-            if str(row.get("symbol") or "").strip().upper() != pilot_symbol:
-                continue
-            expiry = None
-            for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
-                try:
-                    expiry = datetime.strptime(str(row.get("expiry")), fmt).date()
-                    break
-                except ValueError:
-                    continue
-            if not expiry or expiry < today or not row.get("token"):
-                continue
-            try:
-                tick_size = float(row.get("tick_size") or 0) / 100.0
-                lot_size = int(float(row.get("lotsize") or 0))
-            except (TypeError, ValueError):
-                continue
-            item = {
-                "exchange": "MCX", "token": str(row["token"]).strip(),
-                "name": str(row.get("name") or key).strip().upper(),
-                "tradingsymbol": str(row.get("symbol") or "").strip().upper(),
-                "expiry": expiry.isoformat(), "tick_size": tick_size,
-                "lot_size": lot_size, "instrumenttype": "FUTCOM",
-            }
             found[item["token"]] = item
+        if key == "GOLDPETAL":
+            found = {token: item for token, item in found.items()
+                     if item["tradingsymbol"] == self.MCX_PILOT_SYMBOLS[key]}
         return sorted(found.values(), key=lambda item: (item["expiry"], item["tradingsymbol"]))
 
     async def get_mcx_futures_ltp(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
