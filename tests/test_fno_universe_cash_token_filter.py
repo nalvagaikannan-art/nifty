@@ -32,3 +32,17 @@ def test_fno_universe_is_empty_when_no_matching_cash_underlyings():
     ]
 
     assert _verified_nse_fno_stock_symbols(instruments) == []
+
+
+
+def test_fno_universe_excludes_synthetic_nse_test_symbols_even_with_cash_tokens():
+    instruments = [
+        {"exch_seg": "NFO", "instrumenttype": "OPTSTK", "name": "RELIANCE"},
+        {"exch_seg": "NFO", "instrumenttype": "OPTSTK", "name": "011NSETEST"},
+        {"exch_seg": "NFO", "instrumenttype": "FUTSTK", "name": "021NSETEST"},
+        {"exch_seg": "NSE", "symbol": "RELIANCE-EQ", "token": "2885"},
+        {"exch_seg": "NSE", "symbol": "011NSETEST-EQ", "token": "900001"},
+        {"exch_seg": "NSE", "symbol": "021NSETEST-EQ", "token": "900002"},
+    ]
+
+    assert _verified_nse_fno_stock_symbols(instruments) == ["RELIANCE"]
