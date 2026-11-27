@@ -1039,6 +1039,7 @@
 
     <section id="lt-watchlist" class="lt-watchlist" aria-label="Broker verified NSE watchlist">
       <div class="lt-watchlist-head"><span>Watchlist · NSE F&amp;O</span><span id="lt-watch-count">Loading symbols…</span></div>
+      <input id="lt-watch-search" type="search" autocomplete="off" placeholder="Search verified symbols…" aria-label="Search verified watchlist symbols" style="width:100%;box-sizing:border-box;margin:0 0 8px;padding:8px 10px;border:1px solid var(--lt-border2);border-radius:8px;background:var(--lt-gray-bg);color:var(--lt-text);font-size:12px;">
       <div id="lt-watchlist-items" class="lt-watchlist-items" role="group" aria-label="Select dashboard symbol">
         <span class="lt-watch-note">Broker-verified symbol list loading…</span>
       </div>
@@ -1818,44 +1819,51 @@ setInterval(ltClock, 1000);
 ltClock();
 
 // Fetch the broker-master-backed F&O universe once; do not poll all stocks.
-fetch('/api/market/symbols').then(function(r){return r.json();}).then(function(u){
+var ltWatchSymbols=[];
+function ltRenderWatchlist(filter){
+  var list=document.getElementById('lt-watchlist-items');
+  if(!list) return;
+  var q=String(filter||'').trim().toUpperCase();
+  list.textContent='';
+  var visible=ltWatchSymbols.filter(function(sym){return !q || sym.indexOf(q)!==-1;});
+  if(!visible.length){
+    list.textContent=ltWatchSymbols.length?'No matching symbols':'Verified index symbols unavailable';
+    return;
+  }
+  visible.forEach(function(sym){
+    var chip=document.createElement('button');
+    chip.type='button'; chip.className='lt-watch-chip';
+    chip.dataset.watchSym=sym; chip.textContent=sym;
+    chip.setAttribute('aria-pressed',sym===ltSym?'true':'false');
+    chip.addEventListener('click',function(){ltSetSym(null,sym);});
+    list.appendChild(chip);
+  });
+  ltUpdateWatchlistSelection();
+}
+var watchSearch=document.getElementById('lt-watch-search');
+if(watchSearch) watchSearch.addEventListener('input',function(){ltRenderWatchlist(this.value);});
+fetch('/api/market/symbols').then(function(r){
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}).then(function(u){
+  if(!u || !Array.isArray(u.indices)) throw new Error('Invalid symbol universe payload');
+  var indices=u.indices.map(function(x){return String(x||'').trim().toUpperCase();}).filter(Boolean);
+  var stocks=Array.isArray(u.stocks)?u.stocks.map(function(x){return String(x||'').trim().toUpperCase();}).filter(Boolean):[];
+  ltWatchSymbols=Array.from(new Set(indices.concat(stocks)));
   var sel=document.getElementById('lt-stock-select');
-  if(!sel || !u || !u.stocks_available || !Array.isArray(u.stocks)) return;
-  var indices=Array.isArray(u.indices)?u.indices:[];
-  var stocks=Array.isArray(u.stocks)?u.stocks:[];
-  if(sel && u.stocks_available){
+  if(sel && u.stocks_available===true){
     stocks.forEach(function(sym){
       var opt=document.createElement('option'); opt.value=sym; opt.textContent=sym; sel.appendChild(opt);
     });
   }
-  var list=document.getElementById('lt-watchlist-items');
   var count=document.getElementById('lt-watch-count');
-  if(list){
-    list.textContent='';
-    if(!indices.length && !stocks.length){
-      list.textContent='Verified symbols unavailable';
-      if(count) count.textContent='Unavailable';
-    }else{
-      indices.concat(stocks).forEach(function(raw){
-        var sym=String(raw||'').trim().toUpperCase();
-        if(!sym) return;
-        var chip=document.createElement('button');
-        chip.type='button'; chip.className='lt-watch-chip';
-        chip.dataset.watchSym=sym; chip.textContent=sym;
-        chip.setAttribute('aria-pressed',sym===ltSym?'true':'false');
-        chip.addEventListener('click',function(){ltSetSym(null,sym);});
-        list.appendChild(chip);
-      });
-      if(count) count.textContent=(indices.length+stocks.length)+' verified symbols';
-      ltUpdateWatchlistSelection();
-    }
-  }
+  if(count) count.textContent=ltWatchSymbols.length+' verified symbols'+(u.stocks_available===true?'':' · indices only');
+  ltRenderWatchlist(watchSearch?watchSearch.value:'');
 }).catch(function(){
   var list=document.getElementById('lt-watchlist-items');
   var count=document.getElementById('lt-watch-count');
   if(list) list.textContent='Broker-verified symbols unavailable';
   if(count) count.textContent='Unavailable';
-  /* Existing index tabs remain usable when the stock master is unavailable. */
 });
 
 function ltUpdateWatchlistSelection(){
