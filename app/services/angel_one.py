@@ -693,6 +693,124 @@ class AngelOneSession:
         return {"exchange": "NSE", "token": str(row["token"]).strip(),
                 "tradingsymbol": target, "name": sym}
 
+    async def _resolve_mcx_futures_token(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
+        """Resolve the nearest unexpired MCX FUTCOM contract from the compact master."""
+        key = str(commodity or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9_-]{2,30}", key):
+            return None
+        await self.ensure_session()
+        await self._ensure_instruments()
+        today = now_ist().date()
+        rows = []
+        for row in (self._instruments or []):
+            if not isinstance(row, dict) or row.get("exch_seg") != "MCX":
+                continue
+            if row.get("instrumenttype") != "FUTCOM":
+                continue
+            name = str(row.get("name") or "").strip().upper()
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if key not in (name, symbol):
+                continue
+            expiry = None
+            for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+                try:
+                    expiry = datetime.strptime(str(row.get("expiry")), fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if expiry and expiry >= today and row.get("token"):
+                rows.append((expiry, row))
+        if not rows:
+            return None
+        rows.sort(key=lambda item: (item[0], str(item[1].get("symbol") or "")))
+        expiry, row = rows[0]
+        try:
+            tick_raw = float(row.get("tick_size") or 0)
+            lot_size = int(float(row.get("lotsize") or 0))
+        except (TypeError, ValueError):
+            return None
+        return {
+            "exchange": "MCX", "token": str(row["token"]).strip(),
+            "name": str(row.get("name") or key).strip().upper(),
+            "tradingsymbol": str(row.get("symbol") or "").strip().upper(),
+            "expiry": expiry.isoformat(), "tick_size": tick_raw / 100.0,
+            "lot_size": lot_size, "instrumenttype": "FUTCOM",
+        }
+
+    async def get_mcx_futures_contracts(self, commodity: str = "GOLDPETAL") -> List[Dict]:
+        """Return verified, unexpired MCX FUTCOM contracts for one commodity family."""
+        key = str(commodity or "").strip().upper()
+        if not re.fullmatch(r"[A-Z0-9_-]{2,30}", key):
+            return []
+        await self.ensure_session()
+        await self._ensure_instruments()
+        today = now_ist().date()
+        found = {}
+        for row in (self._instruments or []):
+            if not isinstance(row, dict) or row.get("exch_seg") != "MCX" or row.get("instrumenttype") != "FUTCOM":
+                continue
+            if key not in (str(row.get("name") or "").strip().upper(), str(row.get("symbol") or "").strip().upper()):
+                continue
+            expiry = None
+            for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+                try:
+                    expiry = datetime.strptime(str(row.get("expiry")), fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if not expiry or expiry < today or not row.get("token"):
+                continue
+            try:
+                tick_size = float(row.get("tick_size") or 0) / 100.0
+                lot_size = int(float(row.get("lotsize") or 0))
+            except (TypeError, ValueError):
+                continue
+            item = {
+                "exchange": "MCX", "token": str(row["token"]).strip(),
+                "name": str(row.get("name") or key).strip().upper(),
+                "tradingsymbol": str(row.get("symbol") or "").strip().upper(),
+                "expiry": expiry.isoformat(), "tick_size": tick_size,
+                "lot_size": lot_size, "instrumenttype": "FUTCOM",
+            }
+            found[item["token"]] = item
+        return sorted(found.values(), key=lambda item: (item["expiry"], item["tradingsymbol"]))
+
+    async def get_mcx_futures_ltp(self, commodity: str = "GOLDPETAL") -> Optional[Dict]:
+        """Fetch an Angel One MCX futures LTP; return None on unavailable data."""
+        info = await self._resolve_mcx_futures_token(commodity)
+        if not info:
+            return None
+        await self.ensure_session()
+        await self._throttle(call_name=f"mcx_ltp:{info['tradingsymbol']}")
+        try:
+            body = await self._run_sdk_call(
+                "ltpData", "MCX", info["tradingsymbol"], info["token"]
+            )
+        except Exception as exc:
+            logger.warning("Angel One MCX LTP unavailable for %s: %s", info["tradingsymbol"], exc)
+            return None
+        data = body.get("data") if isinstance(body, dict) else None
+        ltp = safe_float(data.get("ltp")) if isinstance(data, dict) else 0.0
+        if ltp <= 0:
+            return None
+        return {
+            **info, "ltp": ltp, "source": "angel_one_mcx_ltp",
+            "observed_at": now_ist().isoformat(), "exchange_timestamp": None,
+        }
+
+    async def get_mcx_futures_candle_data(
+        self, commodity: str = "GOLDPETAL", interval: str = "FIVE_MINUTE",
+        from_date: str = "", to_date: str = "",
+    ) -> List[Dict]:
+        """Fetch MCX FUTCOM candles only; never substitute NSE/global futures data."""
+        info = await self._resolve_mcx_futures_token(commodity)
+        if not info:
+            raise AngelOneError(f"No active MCX FUTCOM contract found for {commodity}")
+        return await self._fetch_candles(
+            "MCX", info["token"], interval, from_date, to_date,
+            label=f"{info['tradingsymbol']} MCX",
+        )
+
     async def get_ltp(self, symbol: str) -> Dict:
         """Live LTP for supported indices or NSE F&O stock cash instruments."""
         await self.ensure_session()
@@ -1039,7 +1157,7 @@ class AngelOneSession:
     # Persistent cache contains only index derivatives plus the current
     # NSE F&O stock universe (OPTSTK/FUTSTK) and their NSE cash EQ rows.
     # The schema version invalidates older index-only caches automatically.
-    _INSTRUMENT_CACHE_SCHEMA_VERSION = 2
+    _INSTRUMENT_CACHE_SCHEMA_VERSION = 3
     _INSTRUMENT_CACHE_FILE = (
         Path(__file__).resolve().parents[2]
         / "data"
@@ -1090,7 +1208,19 @@ class AngelOneSession:
             and str(row.get("name") or "").strip().upper() in stock_names
             and row.get("token")
         ]
-        return index_rows + stock_derivative_rows + stock_cash_rows
+        # Retain only MCX FUTCOM rows in the compact cache; never cache the
+        # full MCX master or unrelated commodity contracts.
+        mcx_futures_rows = [
+            row for row in rows
+            if isinstance(row, dict)
+            and row.get("exch_seg") == "MCX"
+            and row.get("instrumenttype") == "FUTCOM"
+            and row.get("name")
+            and row.get("expiry")
+            and row.get("token")
+            and row.get("symbol")
+        ]
+        return index_rows + stock_derivative_rows + stock_cash_rows + mcx_futures_rows
 
     async def _ensure_instruments(self) -> None:
         """
@@ -1262,6 +1392,12 @@ class AngelOneSession:
                             "OPTIDX", "FUTIDX", "OPTSTK", "FUTSTK"
                         )
                         and row.get("expiry")
+                    )
+                    or (
+                        row.get("exch_seg") == "MCX"
+                        and row.get("instrumenttype") == "FUTCOM"
+                        and row.get("expiry")
+                        and row.get("symbol")
                     )
                     or (
                         row.get("exch_seg") == "NSE"
